@@ -8,10 +8,11 @@ Switch [Pi](https://pi.dev) between permission modes with `Shift+Tab`.
 | `auto` | Anything your permission rules allow | Your permission judge first, then you if it defers |
 | `plan` | Read and research, then submit a plan. No edits | You, for any non-read-only command |
 | `read-only` | Read and research only | Nobody. Everything else is blocked |
+| `yolo` | Anything your `deny` rules don't block | Nobody. It doesn't ask |
 
-`Shift+Tab` cycles `normal → auto → plan → read-only → normal`. The footer shows the current mode.
+`Shift+Tab` cycles `normal → auto → plan → read-only → normal`. The footer shows the current mode. `yolo` is off this cycle: you start it with `/mode yolo`.
 
-The mode is saved per session and survives `--continue`. A new session always starts in `normal`, and nothing in a project can change that.
+The mode is saved per session and survives `--continue`, except `yolo`, which resumes as `normal`. A new session always starts in `normal`, and nothing in a project can change that.
 
 ## Quick start
 
@@ -20,7 +21,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-modes@0.1.4
+   pi install npm:@huseynsnmz/pi-modes@0.2.0
    ```
 
 2. Move it above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
@@ -39,7 +40,7 @@ Requires Pi 1.5 or newer.
 
 4. Restart Pi. The footer shows `mode: normal`, and `Shift+Tab` changes the mode.
 
-To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.1.4`.
+To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.2.0`.
 
 ## Commands
 
@@ -48,12 +49,43 @@ To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@
 | `Shift+Tab` | Next mode |
 | `/mode` | Pick a mode from a list |
 | `/mode plan` | Switch directly to a mode |
+| `/mode yolo` | Start `yolo`, after a warning |
 
 `Shift+Tab` normally cycles the thinking level, and this extension takes it over. To keep that action on another key, add this to `~/.pi/agent/keybindings.json`:
 
 ```json
 { "app.thinking.cycle": "alt+t" }
 ```
+
+## Yolo
+
+For when you've decided not to be asked. `/mode yolo` shows a red warning, and only `Enter` starts it. `Shift+Tab` goes back to `normal`.
+
+With `pi-permission-system`, add the link to its config once, then restart Pi. The link does nothing outside `yolo`:
+
+```bash
+f=~/.pi/agent/extensions/pi-permission-system/config.json
+jq '.authorizerChain = ((.authorizerChain // []) + ["pi-modes"] | unique)' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+```
+
+What it does and doesn't cover:
+
+- **`deny` rules still block.** A link only answers questions the rules left open.
+- **Subagents are covered.** Their prompts come to your session, and yolo answers them.
+- **Access outside the project can still ask.** The permission system doesn't let any link approve its `external_directory` and `path` surfaces. To stop those prompts too, set those rules to `allow` yourself. That applies in every mode.
+- **The review log says who approved.** Approvals are recorded under the link name `pi-modes`.
+
+The permission system's own `yoloMode` setting is different: it applies to every open Pi session and stays on until you turn it off.
+
+## Review what you keep approving
+
+The package includes a skill that turns repeated approvals into allowlist rules. Run it now and then:
+
+```
+/skill:review-permissions
+```
+
+It reads the permission system's review log and groups what you approved. The agent rates each group and shows you the list, and only the rules you pick are added. The scripts refuse rules that are too broad, such as `git *`, or that cover `git push`, `rm`, `curl` or an interpreter like `python`. They back up the config first and place new rules so that your `deny` rules still win. Approvals made in `yolo` are ignored, and so are commands that look like they hold a secret.
 
 ## How plan mode ends
 
@@ -72,6 +104,8 @@ In plan mode the agent calls the `submit_plan` tool. You then choose one of:
 Without a classifier, `auto` behaves like `normal`, and the extension warns you when you switch to it.
 
 **`pi-subagents`:** blocked in `plan` and `read-only`, because a child agent could write files. In `normal` and `auto` it is unchanged.
+
+**`pi-frame`:** the editor frame follows the mode, and turns red in `yolo`.
 
 **`pi-look` and `pi-claude-code-ui`:** no conflicts are expected, as neither uses `Shift+Tab`. The mode appears through Pi's standard status API.
 

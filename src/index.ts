@@ -1,25 +1,54 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, matchesKey, Text } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { clearGate, installJudgeGate, JUDGE_NAMES, judgeGated, setGateMode } from "./judge-gate.ts";
-import { decideToolCall, displayCommand, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
+import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "./judge-gate.ts";
+import { decideToolCall, displayCommand, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
 const ENTRY_TYPE = "pi-modes";
 const CYCLE_KEY = "shift+tab";
 
-const STATUS_COLOR = { normal: "dim", auto: "warning", plan: "accent", "read-only": "success" } as const;
+const STATUS_COLOR = { normal: "dim", auto: "warning", plan: "accent", "read-only": "success", yolo: "error" } as const;
 
-function chainNamesJudge(): boolean {
+function chainNames(wanted: (name: unknown) => boolean): boolean {
   try {
     const path = join(getAgentDir(), "extensions", "pi-permission-system", "config.json");
     const chain: unknown = JSON.parse(readFileSync(path, "utf8")).authorizerChain;
-    return Array.isArray(chain) && chain.some((name) => JUDGE_NAMES.has(name));
+    return Array.isArray(chain) && chain.some(wanted);
   } catch {
     return false;
   }
+}
+
+function chainNamesJudge(): boolean {
+  return chainNames((name) => JUDGE_NAMES.has(name as string));
+}
+
+/** Only Enter starts it, so no other key, like a stray y, can agree to it. */
+async function confirmYolo(ctx: ExtensionContext): Promise<boolean> {
+  const agreed = await ctx.ui.custom<boolean>((_tui, theme, _keys, done) => ({
+    invalidate() {},
+    handleInput(data: string) {
+      if (matchesKey(data, "enter")) done(true);
+      else if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) done(false);
+    },
+    render(width: number) {
+      const red = (text: string) => theme.fg("error", text);
+      const rule = red("─".repeat(width));
+      const body = [
+        red(theme.bold("▲ YOLO")),
+        "",
+        "The agent stops asking. Anything it wants to run is approved, including commands that delete files or reach the network.",
+        theme.fg("dim", "Your deny rules still block. It lasts until you change mode or leave this session."),
+        "",
+        `${red(theme.bold("Enter"))} start   ${theme.fg("dim", "Esc cancel")}`,
+      ];
+      return [rule, ...body.flatMap((line) => (line === "" ? [""] : wrapTextWithAnsi(line, width))), rule];
+    },
+  }));
+  return agreed === true;
 }
 
 function loadOrderIsLate(): boolean {
@@ -37,7 +66,7 @@ function restoredMode(ctx: ExtensionContext): Mode {
     const saved: unknown = (entry.data as { mode?: unknown } | undefined)?.mode;
     if (isMode(saved)) mode = saved;
   }
-  return mode;
+  return resumedMode(mode);
 }
 
 export default function piModes(pi: ExtensionAPI): void {
@@ -46,6 +75,13 @@ export default function piModes(pi: ExtensionAPI): void {
   let mode: Mode = "normal";
   let stopListening: (() => void) | undefined;
   let warnedUngated = false;
+  let disposeYoloLink: (() => void) | undefined;
+
+  pi.events.on("permissions:ready", (data) => {
+    const sessionId = (data as { sessionId?: unknown } | undefined)?.sessionId;
+    if (disposeYoloLink !== undefined || typeof sessionId !== "string") return;
+    disposeYoloLink = registerYoloLink(sessionId);
+  });
 
   function apply(next: Mode, ctx: ExtensionContext): void {
     mode = next;
@@ -79,6 +115,19 @@ export default function piModes(pi: ExtensionAPI): void {
     }
   }
 
+  /** Every way into a mode a person can pick goes through here, so yolo can't skip its question. */
+  async function pick(next: Mode, ctx: ExtensionContext): Promise<void> {
+    if (next === "yolo" && next !== mode) {
+      if (!ctx.hasUI) return;
+      if (hasPermissionSystem(ctx.sessionManager.getSessionId()) && !chainNames((name) => name === YOLO_LINK)) {
+        ctx.ui.notify(`Yolo needs "${YOLO_LINK}" in authorizerChain in pi-permission-system's config.json, then a restart. See the README.`, "error");
+        return;
+      }
+      if (!(await confirmYolo(ctx))) return;
+    }
+    change(next, ctx);
+  }
+
   pi.on("session_start", (_event, ctx) => {
     apply(restoredMode(ctx), ctx);
     if (ctx.mode === "tui") {
@@ -101,6 +150,8 @@ export default function piModes(pi: ExtensionAPI): void {
   pi.on("session_shutdown", (_event, ctx) => {
     stopListening?.();
     stopListening = undefined;
+    disposeYoloLink?.();
+    disposeYoloLink = undefined;
     clearGate(ctx.sessionManager.getSessionId());
   });
 
@@ -162,14 +213,14 @@ export default function piModes(pi: ExtensionAPI): void {
       const requested = args.trim();
       if (requested === "") {
         const picked = ctx.hasUI ? await ctx.ui.select(`Mode (now ${mode})`, [...MODES]) : undefined;
-        if (isMode(picked)) change(picked, ctx);
+        if (isMode(picked)) await pick(picked, ctx);
         return;
       }
       if (!isMode(requested)) {
         ctx.ui.notify(`Unknown mode ${requested}. Use one of: ${MODES.join(", ")}.`, "error");
         return;
       }
-      change(requested, ctx);
+      await pick(requested, ctx);
     },
   });
 }

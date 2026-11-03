@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clearGate, installJudgeGate, judgeGated, setGateMode } from "../src/judge-gate.ts";
+import { clearGate, hasPermissionSystem, installJudgeGate, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "../src/judge-gate.ts";
 
 const SERVICES = Symbol.for("@gotgenes/pi-permission-system:session-services");
 type Link = (...args: unknown[]) => Promise<unknown>;
@@ -83,4 +83,36 @@ test("other links pass through untouched and install is idempotent", async () =>
   service.registerAuthorizer("someone-else", link);
   assert.equal(service.links.get("someone-else"), link);
   assert.equal(judgeGated("s1", store), false);
+});
+
+test("the yolo link allows only in yolo, per session, and stops when disposed", async () => {
+  const { store, service } = setup();
+  const dispose = registerYoloLink("s1", store);
+  const link = service.links.get(YOLO_LINK) as Link;
+  assert.deepEqual(await link(), { kind: "defer" });
+  for (const mode of ["auto", "plan", "read-only"] as const) {
+    setGateMode("s1", mode, store);
+    assert.deepEqual(await link(), { kind: "defer" });
+  }
+  setGateMode("s2", "yolo", store);
+  assert.deepEqual(await link(), { kind: "defer" });
+  setGateMode("s1", "yolo", store);
+  assert.deepEqual(await link(), { kind: "allow" });
+  dispose?.();
+  assert.equal(service.links.has(YOLO_LINK), false);
+});
+
+test("the judge does not approve in yolo, so yolo stays on one link", async () => {
+  const { store, service, judge, judged } = setup();
+  service.registerAuthorizer("permission-judge", judge);
+  setGateMode("s1", "yolo", store);
+  assert.deepEqual(await (service.links.get("permission-judge") as Link)(), { kind: "defer" });
+  assert.equal(judged(), 0);
+});
+
+test("no permission system, no link", () => {
+  const store: Record<symbol, unknown> = {};
+  installJudgeGate(store);
+  assert.equal(registerYoloLink("s1", store), undefined);
+  assert.equal(hasPermissionSystem("s1", store), false);
 });

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0]
+
+### Added
+
+- `yolo` mode: approves every permission prompt it's allowed to, with a red warning that only `Enter` confirms. It's off the `Shift+Tab` cycle and doesn't survive a resume. With `pi-permission-system`, add `pi-modes` to `authorizerChain`. `deny` rules still block, and `external_directory` and `path` asks can still prompt.
+- The `review-permissions` skill: reviews what you approved and adds the rules you pick to the allowlist.
+
 ## [0.1.4]
 
 ### Fixed

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
+import { decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
 
 const bash = (command: string) => ({ command });
 
 const cases: Array<[string, Mode, string, unknown, string]> = [
   ["normal leaves write to the permission system", "normal", "write", {}, "allow"],
   ["auto leaves bash to the permission system", "auto", "bash", bash("rm x"), "allow"],
+  ["yolo leaves bash to the permission system", "yolo", "bash", bash("rm x"), "allow"],
   ["plan allows reading", "plan", "read", {}, "allow"],
   ["plan blocks write", "plan", "write", {}, "block"],
   ["plan blocks edit", "plan", "edit", {}, "block"],
@@ -36,6 +37,16 @@ test("cycle visits every mode and returns to normal", () => {
   for (let i = 0; i < 3; i += 1) seen.push(nextMode(seen.at(-1) as Mode));
   assert.deepEqual(seen, ["normal", "auto", "plan", "read-only"]);
   assert.equal(nextMode("read-only"), "normal");
+});
+
+test("yolo is off the cycle: nothing cycles into it, and leaving goes to normal", () => {
+  assert.equal(nextMode("read-only"), "normal");
+  assert.equal(nextMode("yolo"), "normal");
+});
+
+test("yolo does not survive a resume", () => {
+  assert.equal(resumedMode("yolo"), "normal");
+  assert.equal(resumedMode("plan"), "plan");
 });
 
 test("only restricted modes change the system prompt", () => {

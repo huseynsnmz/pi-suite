@@ -17,6 +17,8 @@ import type { Mode } from "./modes.ts";
 
 export const JUDGE_NAMES: ReadonlySet<string> = new Set(["permission-judge", "classifier"]);
 
+export const YOLO_LINK = "pi-modes";
+
 const SERVICES_KEY = Symbol.for("@gotgenes/pi-permission-system:session-services");
 const STATE_KEY = Symbol.for("pi-modes:session-state");
 const PATCHED = Symbol.for("pi-modes:patched");
@@ -78,6 +80,24 @@ export function installJudgeGate(store: Store = globalThis as unknown as Store):
     gateService(store, sessionId, service);
     return set(sessionId, service);
   };
+}
+
+/**
+ * Registers the link that makes yolo work: it allows every ask in yolo and defers otherwise.
+ * It decides nothing until the user names it in `authorizerChain`, and because it only runs on
+ * an ask, `deny` rules still block. The review log names it, so yolo's approvals stay visible.
+ * Returns a disposer, or undefined when this session has no permission system.
+ */
+export function registerYoloLink(sessionId: string, store: Store = globalThis as unknown as Store): (() => void) | undefined {
+  const service = (store[SERVICES_KEY] as ServiceMap | undefined)?.get(sessionId);
+  if (typeof service?.registerAuthorizer !== "function") return undefined;
+  return service.registerAuthorizer(YOLO_LINK, async () =>
+    stateFor(store, sessionId).mode === "yolo" ? { kind: "allow" } : { kind: "defer" },
+  );
+}
+
+export function hasPermissionSystem(sessionId: string, store: Store = globalThis as unknown as Store): boolean {
+  return (store[SERVICES_KEY] as ServiceMap | undefined)?.has(sessionId) === true;
 }
 
 export function setGateMode(sessionId: string, mode: Mode, store: Store = globalThis as unknown as Store): void {

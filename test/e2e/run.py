@@ -47,8 +47,8 @@ env = {
     "models": [{"id": "m", "name": "Mock", "contextWindow": 100000, "maxTokens": 1000, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}],
 }}}))
 (agent / "extensions/pi-permission-system/config.json").write_text(json.dumps({
-    "doublePressToConfirm": False, "authorizerChain": [] if SOLO else ["permission-judge"],
-    "permission": {"*": "ask", "read": "allow", "submit_plan": "allow", "external_directory": "allow"},
+    "doublePressToConfirm": False, "authorizerChain": [] if SOLO else ["pi-modes", "permission-judge"],
+    "permission": {"*": "ask", "bash": {"*": "ask", "touch denied*": "deny"}, "read": "allow", "submit_plan": "allow", "external_directory": "allow"},
 }))
 (agent / "extensions/pi-permission-classifier/config.json").write_text("{}")
 (agent / "settings.json").write_text(json.dumps({
@@ -140,6 +140,25 @@ def check(name, ok, detail=""):
 SHIFT_TAB = "\x1b[Z"
 # Loaded last, this extension's check runs after the permission system's dialog.
 DIALOG_FIRST = ORDER == "modes-last"
+
+
+def ask_yolo():
+    # Esc closes the autocomplete list, which would otherwise take the Enter.
+    term.send("/mode yolo")
+    term.pump(0.4)
+    term.send("\x1b")
+    term.pump(0.4)
+    term.send("\r")
+
+
+def confirm_yolo():
+    term.send("\r")
+    term.pump(1)
+    # pi-look keeps its footer drawing for 100 ms, so a key makes it show the new mode.
+    term.send(" ")
+    term.pump(0.2)
+    term.send("\x7f")
+    term.wait(r"mode: yolo")
 
 
 def approve_dialog_if_first():
@@ -244,6 +263,41 @@ try:
     term.send(SHIFT_TAB)
     term.wait(r"mode: normal")
     check("shift+tab wraps back to normal", True)
+
+    ask_yolo()
+    term.wait(r"Enter start")
+    term.pump(0.5)
+    term.send("y")
+    term.pump(0.5)
+    term.send("\x1b")
+    term.pump(1)
+    check("yolo: y does not confirm and Esc cancels", "mode: yolo" not in term.text)
+    ask_yolo()
+    term.mark = len(term.text)
+    term.wait(r"Enter start")
+    term.pump(0.5)
+    confirm_yolo()
+    check("yolo: Enter starts it", True)
+    before = judge_calls()
+    term.prompt("RUN:touch yolo.txt")
+    term.until((project / "yolo.txt").exists, "yolo.txt")
+    check("yolo: a command runs without a prompt", True)
+    check("yolo: judge stays out", judge_calls() == before, f"judge={judge_calls()}")
+    term.pump(1)
+    if not SOLO:
+        term.prompt("RUN:touch denied.txt")
+        approve_dialog_if_first()
+        term.wait(r"FINISHED")
+        term.pump(1)
+        check("yolo: deny rules still block", not (project / "denied.txt").exists())
+    term.send(SHIFT_TAB)
+    term.wait(r"mode: normal")
+    check("shift+tab leaves yolo for normal", True)
+    term.send(SHIFT_TAB); term.wait(r"mode: auto")
+    term.send(SHIFT_TAB); term.wait(r"mode: plan")
+    term.send(SHIFT_TAB); term.wait(r"mode: read-only")
+    term.send(SHIFT_TAB); term.wait(r"mode: normal")
+    check("the cycle skips yolo", True)
     term.send(SHIFT_TAB); term.wait(r"mode: auto")
     term.send(SHIFT_TAB); term.wait(r"mode: plan")
     term.send(SHIFT_TAB); term.wait(r"mode: read-only")
@@ -254,7 +308,36 @@ try:
     term = Terminal("--continue")
     term.wait(r"mode: read-only", 40)
     check("mode is restored when the session resumes", True)
+    term.pump(1)
+    ask_yolo()
+    term.wait(r"Enter start")
+    term.pump(0.5)
+    confirm_yolo()
+    term.pump(1)
     term.close()
+    term = Terminal("--continue")
+    term.wait(r"mode: normal", 40)
+    check("yolo does not survive a resume", True)
+    term.close()
+
+    if not SOLO:
+        collected = json.loads(subprocess.run(
+            ["node", str(REPO / "skills/review-permissions/scripts/collect.mjs")],
+            env=env, capture_output=True, text=True, check=True, timeout=20,
+        ).stdout)
+        examples = [e for c in collected["candidates"] for e in c.get("examples", [])]
+        print("collected:", json.dumps(collected)[:500], flush=True)
+        check("skill: finds the command a person approved", any("touch normal.txt" in e for e in examples))
+        check("skill: ignores what yolo approved", not any("yolo.txt" in e for e in examples))
+        check("skill: ignores what the judge's yolo link allowed", not any("denied.txt" in e for e in examples))
+        config = agent / "extensions/pi-permission-system/config.json"
+        applied = subprocess.run(
+            ["node", str(REPO / "skills/review-permissions/scripts/apply.mjs"), "--bash", "touch normal.txt*"],
+            env=env, capture_output=True, text=True, timeout=20,
+        )
+        rules = json.loads(config.read_text())["permission"]["bash"]
+        check("skill: applies a rule and keeps the deny after it",
+              applied.returncode == 0 and list(rules) == ["*", "touch normal.txt*", "touch denied*"], str(rules))
 
     term = Terminal()
     term.wait(r"mode: normal", 40)

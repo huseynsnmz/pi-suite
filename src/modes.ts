@@ -1,7 +1,10 @@
 import { classifyBash } from "./bash.ts";
 
-export const MODES = ["normal", "auto", "plan", "read-only"] as const;
+export const MODES = ["normal", "auto", "plan", "read-only", "yolo"] as const;
 export type Mode = (typeof MODES)[number];
+
+/** Shift+Tab never lands on yolo, because yolo has to be asked for. */
+const CYCLE: readonly Mode[] = ["normal", "auto", "plan", "read-only"];
 
 export const SUBMIT_PLAN_TOOL = "submit_plan";
 
@@ -12,7 +15,12 @@ export function isMode(value: unknown): value is Mode {
 }
 
 export function nextMode(mode: Mode): Mode {
-  return MODES[(MODES.indexOf(mode) + 1) % MODES.length] as Mode;
+  return CYCLE[(CYCLE.indexOf(mode) + 1) % CYCLE.length] as Mode;
+}
+
+/** What a resumed session starts in. Yolo is never restored, because it was only agreed to once. */
+export function resumedMode(saved: Mode): Mode {
+  return saved === "yolo" ? "normal" : saved;
 }
 
 export type ToolDecision =
@@ -28,7 +36,7 @@ const ALLOW: ToolDecision = { action: "allow" };
  * subagent could write without this extension seeing how.
  */
 export function decideToolCall(mode: Mode, toolName: string, input: unknown): ToolDecision {
-  if (mode === "normal" || mode === "auto") return ALLOW;
+  if (mode === "normal" || mode === "auto" || mode === "yolo") return ALLOW;
   const leave = "Press Shift+Tab to change mode.";
   if (READ_TOOLS.has(toolName)) return ALLOW;
   if (toolName === SUBMIT_PLAN_TOOL && mode === "plan") return ALLOW;
