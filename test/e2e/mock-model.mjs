@@ -23,11 +23,12 @@ function reply(res, content, call) {
   res.end();
 }
 
-function scriptedCall(text) {
+function scriptedCall(text, tools) {
   const [verb, ...rest] = text.split(":");
   const arg = rest.join(":");
-  if (verb === "RUN") return { name: "bash", args: { command: arg } };
-  if (verb === "WRITE") return { name: "write", args: { path: arg, content: "x" } };
+  const off = tools.includes("yolo_bash");
+  if (verb === "RUN") return { name: off ? "yolo_bash" : "bash", args: { command: arg } };
+  if (verb === "WRITE") return off ? { name: "yolo_write", args: { file: arg, content: "x" } } : { name: "write", args: { path: arg, content: "x" } };
   if (verb === "SUBAGENT") return { name: "subagent", args: { agent: "scout", task: "x" } };
   if (verb === "PLAN") return { name: "submit_plan", args: { plan: "PLANBODY step one" } };
   return undefined;
@@ -47,7 +48,7 @@ createServer((req, res) => {
     if (last?.role === "tool") return reply(res, `FINISHED ${String(last.content).slice(0, 120)}`);
     const text = typeof last?.content === "string" ? last.content : (last?.content ?? []).map((part) => part.text ?? "").join("");
     const system = JSON.stringify(body.messages?.[0] ?? "");
-    appendFileSync(logPath, `chat plan=${system.includes("Plan mode is on")} readonly=${system.includes("Read-only mode is on")} submit=${tools.includes("submit_plan")}\n`);
-    return reply(res, scriptedCall(text) ? "" : "OK", scriptedCall(text));
+    appendFileSync(logPath, `chat plan=${system.includes("Plan mode is on")} readonly=${system.includes("Read-only mode is on")} submit=${tools.includes("submit_plan")} bash=${tools.includes("bash")} alias=${tools.includes("yolo_bash")}\n`);
+    return reply(res, scriptedCall(text, tools) ? "" : "OK", scriptedCall(text, tools));
   });
 }).listen(Number(port), "127.0.0.1");

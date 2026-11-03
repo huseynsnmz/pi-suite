@@ -3,10 +3,12 @@ import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
 import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "./judge-gate.ts";
 import { decideToolCall, displayCommand, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
+const DENY_STATUS_KEY = "pi-modes-deny";
 const ENTRY_TYPE = "pi-modes";
 const CYCLE_KEY = "shift+tab";
 
@@ -26,13 +28,21 @@ function chainNamesJudge(): boolean {
   return chainNames((name) => JUDGE_NAMES.has(name as string));
 }
 
-/** Only Enter starts it, so no other key, like a stray y, can agree to it. */
-async function confirmYolo(ctx: ExtensionContext): Promise<boolean> {
-  const agreed = await ctx.ui.custom<boolean>((_tui, theme, _keys, done) => ({
+/**
+ * Only Enter starts it, so no other key, like a stray y, can agree to it. Deny rules stay on
+ * unless the user presses d. Undefined means cancelled.
+ */
+async function confirmYolo(ctx: ExtensionContext, canIgnoreDeny: boolean): Promise<{ denyOff: boolean } | undefined> {
+  let denyOff = false;
+  const agreed = await ctx.ui.custom<boolean>((tui, theme, _keys, done) => ({
     invalidate() {},
     handleInput(data: string) {
       if (matchesKey(data, "enter")) done(true);
       else if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) done(false);
+      else if (canIgnoreDeny && matchesKey(data, "d")) {
+        denyOff = !denyOff;
+        tui.requestRender();
+      }
     },
     render(width: number) {
       const red = (text: string) => theme.fg("error", text);
@@ -41,14 +51,18 @@ async function confirmYolo(ctx: ExtensionContext): Promise<boolean> {
         red(theme.bold("▲ YOLO")),
         "",
         "The agent stops asking. Anything it wants to run is approved, including commands that delete files or reach the network.",
-        theme.fg("dim", "Your deny rules still block. It lasts until you change mode or leave this session."),
+        theme.fg("dim", "It lasts until you change mode or leave this session."),
         "",
-        `${red(theme.bold("Enter"))} start   ${theme.fg("dim", "Esc cancel")}`,
+        denyOff
+          ? red(theme.bold("Deny rules: IGNORED for bash, read, write and edit. Secrets you protected can be read."))
+          : `Deny rules: ${theme.bold("respected")}`,
+        "",
+        `${red(theme.bold("Enter"))} start   ${canIgnoreDeny ? `${theme.fg("dim", denyOff ? "d respect deny rules" : "d ignore deny rules")}   ` : ""}${theme.fg("dim", "Esc cancel")}`,
       ];
       return [rule, ...body.flatMap((line) => (line === "" ? [""] : wrapTextWithAnsi(line, width))), rule];
     },
   }));
-  return agreed === true;
+  return agreed === true ? { denyOff } : undefined;
 }
 
 function loadOrderIsLate(): boolean {
@@ -76,6 +90,10 @@ export default function piModes(pi: ExtensionAPI): void {
   let stopListening: (() => void) | undefined;
   let warnedUngated = false;
   let disposeYoloLink: (() => void) | undefined;
+  let denyOff = false;
+  let replacedTools: string[] = [];
+
+  for (const tool of aliasDefinitions(() => mode === "yolo" && denyOff)) pi.registerTool(tool);
 
   pi.events.on("permissions:ready", (data) => {
     const sessionId = (data as { sessionId?: unknown } | undefined)?.sessionId;
@@ -85,10 +103,16 @@ export default function piModes(pi: ExtensionAPI): void {
 
   function apply(next: Mode, ctx: ExtensionContext): void {
     mode = next;
+    if (next !== "yolo") denyOff = false;
     setGateMode(ctx.sessionManager.getSessionId(), next);
-    const others = pi.getActiveTools().filter((name) => name !== SUBMIT_PLAN_TOOL);
+    let others = withoutAliases(pi.getActiveTools().filter((name) => name !== SUBMIT_PLAN_TOOL), replacedTools);
+    replacedTools = [];
+    if (denyOff) ({ active: others, replaced: replacedTools } = withAliases(others));
     pi.setActiveTools(next === "plan" ? [...others, SUBMIT_PLAN_TOOL] : others);
-    if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg(STATUS_COLOR[next], `mode: ${next}`));
+    if (ctx.hasUI) {
+      ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg(STATUS_COLOR[next], `mode: ${next}`));
+      ctx.ui.setStatus(DENY_STATUS_KEY, denyOff ? ctx.ui.theme.fg("error", "deny rules off") : undefined);
+    }
   }
 
   function warnIfJudgeUncontrolled(ctx: ExtensionContext): void {
@@ -123,7 +147,9 @@ export default function piModes(pi: ExtensionAPI): void {
         ctx.ui.notify(`Yolo needs "${YOLO_LINK}" in authorizerChain in pi-permission-system's config.json, then a restart. See the README.`, "error");
         return;
       }
-      if (!(await confirmYolo(ctx))) return;
+      const agreed = await confirmYolo(ctx, hasPermissionSystem(ctx.sessionManager.getSessionId()));
+      if (agreed === undefined) return;
+      denyOff = agreed.denyOff;
     }
     change(next, ctx);
   }
@@ -159,7 +185,7 @@ export default function piModes(pi: ExtensionAPI): void {
   pi.on("agent_start", (_event, ctx) => warnIfJudgeUncontrolled(ctx));
 
   pi.on("before_agent_start", (event) => {
-    const prompt = modePrompt(mode);
+    const prompt = denyOff ? DENY_OFF_PROMPT : modePrompt(mode);
     return prompt ? { systemPrompt: `${event.systemPrompt}\n\n${prompt}` } : undefined;
   });
 

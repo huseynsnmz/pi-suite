@@ -1,6 +1,6 @@
 {
   "name": "@huseynsnmz/pi-modes",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Shift+Tab permission modes for Pi: normal, auto, plan, read-only and yolo",
   "type": "module",
   "license": "MIT",

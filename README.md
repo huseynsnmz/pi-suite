@@ -8,7 +8,7 @@ Switch [Pi](https://pi.dev) between permission modes with `Shift+Tab`.
 | `auto` | Anything your permission rules allow | Your permission judge first, then you if it defers |
 | `plan` | Read and research, then submit a plan. No edits | You, for any non-read-only command |
 | `read-only` | Read and research only | Nobody. Everything else is blocked |
-| `yolo` | Anything your `deny` rules don't block | Nobody. It doesn't ask |
+| `yolo` | Anything your `deny` rules don't block, or anything at all if you turn them off | Nobody. It doesn't ask |
 
 `Shift+Tab` cycles `normal → auto → plan → read-only → normal`. The footer shows the current mode. `yolo` is off this cycle: you start it with `/mode yolo`.
 
@@ -21,7 +21,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-modes@0.2.0
+   pi install npm:@huseynsnmz/pi-modes@0.2.1
    ```
 
 2. Move it above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
@@ -40,7 +40,7 @@ Requires Pi 1.5 or newer.
 
 4. Restart Pi. The footer shows `mode: normal`, and `Shift+Tab` changes the mode.
 
-To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.2.0`.
+To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.2.1`.
 
 ## Commands
 
@@ -70,7 +70,7 @@ jq '.authorizerChain = ((.authorizerChain // []) + ["pi-modes"] | unique)' "$f" 
 
 What it does and doesn't cover:
 
-- **`deny` rules still block.** A link only answers questions the rules left open.
+- **`deny` rules still block, unless you choose otherwise.** A link only answers questions the rules left open. In the warning, `d` turns them off for this run. The agent then gets separate tools (`yolo_bash`, `yolo_read`, `yolo_write`, `yolo_edit`) that your rules don't name, and the footer says `deny rules off`. Other tools, like MCP, stay under the rules, and so do subagents. A top-level `"*": "deny"` still blocks these tools. Leaving yolo puts everything back.
 - **Subagents are covered.** Their prompts come to your session, and yolo answers them.
 - **Access outside the project can still ask.** The permission system doesn't let any link approve its `external_directory` and `path` surfaces. To stop those prompts too, set those rules to `allow` yourself. That applies in every mode.
 - **The review log says who approved.** Approvals are recorded under the link name `pi-modes`.
@@ -85,7 +85,7 @@ The package includes a skill that turns repeated approvals into allowlist rules.
 /skill:review-permissions
 ```
 
-It reads the permission system's review log and groups what you approved. The agent rates each group and shows you the list, and only the rules you pick are added. The scripts refuse rules that are too broad, such as `git *`, or that cover `git push`, `rm`, `curl` or an interpreter like `python`. They back up the config first and place new rules so that your `deny` rules still win. Approvals made in `yolo` are ignored, and so are commands that look like they hold a secret.
+It reads the permission system's review log and your past chats, and groups what you approved and what ran. The agent rates each group and shows you the list, and only the rules you pick are added. The scripts refuse rules that are too broad, such as `git *`, or that cover `git push`, `rm`, `curl` or an interpreter like `python`. They back up the config first and place new rules so that your `deny` rules still win. What ran in `yolo` is ignored, and so are commands that look like they hold a secret.
 
 ## How plan mode ends
 

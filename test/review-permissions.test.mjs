@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { applyRules, refuseBash, refuseTool, withBashAllows } from "../skills/review-permissions/scripts/apply.mjs";
-import { collect, ruleFor, suggestPattern } from "../skills/review-permissions/scripts/collect.mjs";
+import { collect, ranCommands, ruleFor, suggestPattern } from "../skills/review-permissions/scripts/collect.mjs";
 
 const approved = (command, extra = {}) => ({ event: "permission_request.approved", resolution: "approved", decidedBy: { kind: "user", via: "dialog" }, surface: "bash", command, timestamp: "2026-11-03T10:00:00Z", ...extra });
 
@@ -43,6 +43,32 @@ test("a judge's approvals and session grants count", () => {
     approved("npm test", { resolution: "session_approved", decidedBy: { kind: "session_approval" } }),
   ]);
   assert.equal(candidates[0].approvals, 2);
+});
+
+const done = (id, isError = false) => ({ type: "message", message: { role: "toolResult", toolCallId: id, isError } });
+const call = (id, command) => ({ type: "message", timestamp: "2026-11-03T10:00:00Z", message: { role: "assistant", content: [{ type: "toolCall", id, name: "bash", arguments: { command } }] } });
+
+test("history: commands that ran, without blocked calls or anything from yolo", () => {
+  const ran = ranCommands([
+    call("a", "npm test"),
+    done("a"),
+    call("b", "rm x"),
+    done("b", true),
+    { type: "custom", customType: "pi-modes", data: { mode: "yolo" } },
+    call("c", "touch yolo"),
+    done("c"),
+    { type: "custom", customType: "pi-modes", data: { mode: "normal" } },
+    call("a", "make"),
+    done("a"),
+    call("e", "never finished"),
+  ]);
+  assert.deepEqual(ran.map((r) => r.command), ["npm test", "make"]);
+});
+
+test("history counts apart from approvals, and rules and secrets still filter it", () => {
+  const history = [{ command: "npm test", timestamp: "t" }, { command: "git diff", timestamp: "t" }, { command: "x --token=y", timestamp: "t" }];
+  const { candidates } = collect([approved("npm test")], { bash: { "git diff*": "allow" } }, history);
+  assert.deepEqual(candidates.map((c) => [c.pattern, c.approvals, c.ran]), [["npm test*", 1, 1]]);
 });
 
 test("a pattern stops at the subcommand", () => {

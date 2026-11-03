@@ -48,7 +48,7 @@ env = {
 }}}))
 (agent / "extensions/pi-permission-system/config.json").write_text(json.dumps({
     "doublePressToConfirm": False, "authorizerChain": [] if SOLO else ["pi-modes", "permission-judge"],
-    "permission": {"*": "ask", "bash": {"*": "ask", "touch denied*": "deny"}, "read": "allow", "submit_plan": "allow", "external_directory": "allow"},
+    "permission": {"*": "ask", "bash": {"*": "ask", "touch denied*": "deny"}, "path": {"*": "allow", "*.secret": "deny"}, "read": "allow", "submit_plan": "allow", "external_directory": "allow"},
 }))
 (agent / "extensions/pi-permission-classifier/config.json").write_text("{}")
 (agent / "settings.json").write_text(json.dumps({
@@ -286,13 +286,47 @@ try:
     term.pump(1)
     if not SOLO:
         term.prompt("RUN:touch denied.txt")
-        approve_dialog_if_first()
         term.wait(r"FINISHED")
         term.pump(1)
         check("yolo: deny rules still block", not (project / "denied.txt").exists())
+        term.prompt("WRITE:deny.secret")
+        term.pump(3)
+        check("yolo: a deny on a path still blocks", not (project / "deny.secret").exists())
     term.send(SHIFT_TAB)
     term.wait(r"mode: normal")
     check("shift+tab leaves yolo for normal", True)
+    if not SOLO:
+        term.pump(1)
+        ask_yolo()
+        term.mark = len(term.text)
+        term.wait(r"Enter start")
+        term.pump(0.5)
+        term.send("d")
+        term.wait(r"IGNORED")
+        term.pump(0.3)
+        confirm_yolo()
+        term.wait(r"deny rules off")
+        check("yolo: d turns deny off, and the footer says so", True)
+        term.prompt("RUN:touch denied.txt")
+        term.until((project / "denied.txt").exists, "denied.txt")
+        check("deny off: a denied command runs", True)
+        term.pump(1)
+        term.prompt("WRITE:deny.secret")
+        term.until((project / "deny.secret").exists, "deny.secret")
+        check("deny off: a denied path can be written", True)
+        chat = log.read_text().splitlines()
+        check("deny off: the model gets the other tools instead of bash", "bash=false alias=true" in chat[-1], chat[-1])
+        term.pump(1)
+        term.send(SHIFT_TAB)
+        term.wait(r"mode: normal")
+        term.pump(1)
+        (project / "denied.txt").unlink()
+        term.prompt("RUN:touch denied.txt")
+        term.pump(3)
+        chat = log.read_text().splitlines()
+        check("leaving yolo restores deny", not (project / "denied.txt").exists())
+        check("leaving yolo restores the tools", "bash=true alias=false" in chat[-1], chat[-1])
+        term.pump(1)
     term.send(SHIFT_TAB); term.wait(r"mode: auto")
     term.send(SHIFT_TAB); term.wait(r"mode: plan")
     term.send(SHIFT_TAB); term.wait(r"mode: read-only")
@@ -326,8 +360,8 @@ try:
             env=env, capture_output=True, text=True, check=True, timeout=20,
         ).stdout)
         examples = [e for c in collected["candidates"] for e in c.get("examples", [])]
-        print("collected:", json.dumps(collected)[:500], flush=True)
         check("skill: finds the command a person approved", any("touch normal.txt" in e for e in examples))
+        check("skill: also reads the chat history", any(c.get("ran", 0) > 0 and any("touch normal.txt" in e for e in c.get("examples", [])) for c in collected["candidates"]))
         check("skill: ignores what yolo approved", not any("yolo.txt" in e for e in examples))
         check("skill: ignores what the judge's yolo link allowed", not any("denied.txt" in e for e in examples))
         config = agent / "extensions/pi-permission-system/config.json"

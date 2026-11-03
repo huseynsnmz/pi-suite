@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { withAliases, withoutAliases } from "../src/deny-off.ts";
 import { decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
 
 const bash = (command: string) => ({ command });
@@ -77,3 +78,11 @@ for (const [name, packages, late] of loadOrder) {
     assert.equal(loadsAfterPermissionSystem(packages), late);
   });
 }
+
+test("deny off swaps only the tools that are active, and puts them back", () => {
+  const on = withAliases(["read", "bash", "grep", "yolo_edit"]);
+  assert.deepEqual(on.active, ["grep", "yolo_bash", "yolo_read"]);
+  assert.deepEqual(on.replaced, ["bash", "read"]);
+  assert.deepEqual(withoutAliases(on.active, on.replaced).sort(), ["bash", "grep", "read"]);
+  assert.deepEqual(withoutAliases(["read", "yolo_write"], []), ["read"]);
+});
