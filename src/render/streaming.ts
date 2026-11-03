@@ -4,9 +4,9 @@ import { resolve } from "node:path";
 // While the model writes an edit or a write, these show the lines arriving, with a cursor.
 import { GLYPH, isObject, tildify } from "@adeildo/pi-kit";
 import { getLanguageFromPath, highlightCode, type Theme } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
 
 import { tabs } from "./format.ts";
+import { plainText } from "./safe.ts";
 
 export interface Stream {
 	lines: string[];
@@ -139,8 +139,7 @@ export function pathLine(tool: string, path: string | undefined, theme: Theme): 
 
 /** A carriage return would cross the border, and escape codes would reach the terminal. */
 export function printable(line: string): string {
-	// oxlint-disable-next-line no-control-regex -- control characters are what this removes
-	return tabs(stripTerminalSequences(line).replace(/[\u0000-\u0008\u000a-\u001f\u007f]/g, ""));
+	return tabs(plainText(line).replace(/\n/g, ""));
 }
 
 /** A key the model moved past is complete, and so is every key once the call is written. */

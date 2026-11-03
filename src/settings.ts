@@ -58,7 +58,7 @@ export const icons = setting<IconMode>({
 	ui: {
 		section: "Appearance",
 		label: "Icons",
-		description: "Auto uses Nerd Font glyphs locally, plain Unicode over SSH.",
+		description: "Auto uses plain Unicode, or ASCII without UTF-8. Pick Nerd if your terminal uses a Nerd Font.",
 		preview: iconsPreview,
 	},
 });

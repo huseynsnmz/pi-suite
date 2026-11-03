@@ -169,8 +169,9 @@ describe("frame", () => {
 });
 
 describe("glyphs", () => {
-	test("auto picks Nerd Font locally, Unicode over SSH and ASCII without UTF-8", () => {
-		expect(resolveIcons("auto", { LANG: "en_US.UTF-8" })).toBe(NERD);
+	test("auto never needs a special font: Unicode, or ASCII without UTF-8", () => {
+		expect(resolveIcons("auto", { LANG: "en_US.UTF-8" })).toBe(UNICODE);
+		expect(resolveIcons("nerd", { LANG: "en_US.UTF-8" })).toBe(NERD);
 		expect(resolveIcons("auto", { LANG: "en_US.UTF-8", SSH_TTY: "/dev/pts/1" })).toBe(UNICODE);
 		expect(resolveIcons("auto", { LANG: "C" })).toBe(ASCII);
 		expect(resolveIcons("auto", { TERM: "dumb" })).toBe(ASCII);

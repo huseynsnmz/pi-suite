@@ -8,6 +8,7 @@ import type { GithubState } from "../data/github.ts";
 import { type LastVisit, since, type StartNote, startNotes } from "../data/start-notes.ts";
 import { BOXES, border } from "../render/frame.ts";
 import { EFFORT_LEVELS, type Paint } from "../render/paint.ts";
+import { styledText } from "../render/safe.ts";
 import { renderSegments, type SegmentId } from "../render/segments.ts";
 import type { HeaderStyle } from "../settings.ts";
 import type { Screen } from "./screen.ts";
@@ -93,10 +94,12 @@ export class HeaderComponent implements Component {
 			this.#source.lastVisit(),
 			github,
 		);
-		const lines =
+		// A pull request's title, a workflow's name and the folder come from outside.
+		const lines = (
 			width < MIN_CARD || this.#source.style() === "compact"
 				? this.#compact(width, notes)
-				: this.#card(width, notes);
+				: this.#card(width, notes)
+		).map(styledText);
 		this.#drawn = { width, at: now, github, lines };
 		return lines;
 	}

@@ -1,5 +1,5 @@
 // CI's last run on this branch and your open pull requests that wait on you, asked once per launch.
-// Shows nothing without gh, network or a GitHub remote.
+// Shows nothing without gh, network or a GitHub remote, and does not start gh without that remote.
 import { isObject } from "@adeildo/pi-kit";
 
 import { processRunner, type Runner } from "./runner.ts";
@@ -7,6 +7,8 @@ import { processRunner, type Runner } from "./runner.ts";
 const FAILED = new Set(["failure", "startup_failure", "timed_out"]);
 /** Enough to tell a new comment from an old one. */
 const PR_FIELDS = "number,title,author,reviewDecision,comments";
+/** github.com, or an enterprise host like github.acme.dev. */
+const GITHUB_REMOTE = /(?:@|\/\/)(?:[\w-]+\.)*github\.[\w.-]+[:/]/i;
 
 interface CiFailure {
 	branch: string;
@@ -31,9 +33,16 @@ export async function readGithub(
 	since: number | undefined,
 	run: Runner = processRunner(cwd),
 ): Promise<GithubState> {
+	if (!(await onGithub(run))) return { ci: undefined, pr: undefined };
 	const [branch, pr] = await Promise.all([branchOf(run), pullRequest(run, since)]);
 	const ci = branch === undefined ? undefined : await failedRun(run, branch);
 	return { ci, pr };
+}
+
+/** gh has nothing to say about GitLab or any other host, so it does not start. */
+async function onGithub(run: Runner): Promise<boolean> {
+	const remotes = await ask(() => run("git", ["remote", "-v"]));
+	return remotes !== undefined && GITHUB_REMOTE.test(remotes);
 }
 
 async function branchOf(run: Runner): Promise<string | undefined> {

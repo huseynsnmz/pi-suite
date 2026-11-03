@@ -479,3 +479,20 @@ describe("lines pi cut from an output", () => {
 		expect(hidden("... nothing to see", theme)).toBe("... nothing to see");
 	});
 });
+
+describe("a frame cannot be used to drive the terminal", () => {
+	test("whatever a renderer draws loses everything but its colors", () => {
+		const fake = fakePi();
+		createApp(fake.pi, { name: "frame" }).use(frameFeature).build();
+		const base: ToolRenderers = {
+			renderCall: () => new Text("\u001b[31mrm\u001b[0m\u001b]52;c;QUJD\u0007\u202e x", 0, 0),
+		};
+		const drawn = resolve(fake, base, "mcp_tool")
+			?.renderCall?.({}, theme, context())
+			?.render(60)
+			.join("\n");
+		expect(drawn).toContain("\u001b[31mrm\u001b[0m x");
+		expect(drawn).not.toContain("]52;");
+		expect(drawn).not.toContain("\u202e");
+	});
+});

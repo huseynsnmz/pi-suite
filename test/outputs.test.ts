@@ -111,3 +111,14 @@ describe("the cost of the view", () => {
 		expect(opening.render(60)).not.toBe(moved);
 	});
 });
+
+describe("output from a tool cannot drive the terminal", () => {
+	test("the view strips what a command printed and what the model called it", () => {
+		const outputs = outputsOf([
+			call("1", "bash", { command: "ls\u001b]0;title\u0007" }),
+			result("1", "one\u001b]52;c;QUJD\u0007\r\ntwo\u001b[2J"),
+		]);
+		expect(outputs[0]?.target).toBe("ls");
+		expect(outputs[0]?.lines).toEqual(["one", "two"]);
+	});
+});

@@ -4,8 +4,10 @@ import { readGithub } from "../src/data/github.ts";
 import type { Runner } from "../src/data/runner.ts";
 
 /** A command line that answers only what the test set up, and fails for anything else. */
-function runner(answers: { branch?: string; runs?: string; pulls?: string }): Runner {
+function runner(answers: { branch?: string; runs?: string; pulls?: string; remotes?: string }): Runner {
 	return async (file, args) => {
+		if (file === "git" && args[0] === "remote")
+			return answers.remotes ?? "origin\tgit@github.com:a/b.git (fetch)\n";
 		if (file === "git") {
 			if (answers.branch === undefined) throw new Error("no git here");
 			return answers.branch;
@@ -151,4 +153,30 @@ describe("what GitHub answers for the folder", () => {
 		expect(await readGithub("/tmp", undefined, MISSING)).toEqual({ ci: undefined, pr: undefined });
 		expect(await readGithub("/repo", undefined, BROKEN)).toEqual({ ci: undefined, pr: undefined });
 	});
+});
+
+describe("readGithub outside GitHub", () => {
+	test("never starts gh for a GitLab remote", async () => {
+		const asked: string[] = [];
+		const run: Runner = async (file, args) => {
+			asked.push(file);
+			if (args[0] === "remote") return "origin\tgit@gitlab.com:a/b.git (fetch)\n";
+			return "main";
+		};
+		expect(await readGithub("/x", undefined, run)).toEqual({ ci: undefined, pr: undefined });
+		expect(asked).not.toContain("gh");
+	});
+	test.each(["https://github.com/a/b.git", "git@github.com:a/b.git", "ssh://git@github.acme.dev/a/b"])(
+		"asks gh for %s",
+		async (url) => {
+			const asked: string[] = [];
+			const run: Runner = async (file, args) => {
+				asked.push(file);
+				if (args[0] === "remote") return `origin\t${url} (fetch)\n`;
+				return file === "git" ? "main" : "[]";
+			};
+			await readGithub("/x", undefined, run);
+			expect(asked).toContain("gh");
+		},
+	);
 });

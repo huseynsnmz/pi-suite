@@ -9,6 +9,9 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
+import { tabs } from "../render/format.ts";
+import { plainText } from "../render/safe.ts";
+
 export interface Output {
 	tool: string;
 	/** The path, the command, the query. */
@@ -30,14 +33,14 @@ export function outputsOf(branch: readonly SessionEntry[]): Output[] {
 		}
 		if (message.role !== "toolResult") continue;
 		const call = calls.get(message.toolCallId);
-		const text = message.content
+		const printed = message.content
 			.map((part) => (part.type === "text" ? part.text : "[image]"))
-			.join("\n")
-			.trimEnd();
+			.join("\n");
+		const text = tabs(plainText(printed)).trimEnd();
 		if (text === "") continue;
 		outputs.push({
-			tool: call?.tool ?? message.toolName,
-			target: call?.target ?? "",
+			tool: plainText(call?.tool ?? message.toolName),
+			target: plainText(call?.target ?? ""),
 			lines: text.split("\n"),
 			failed: message.isError,
 		});

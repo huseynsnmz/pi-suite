@@ -24,6 +24,7 @@ import { editBody } from "../render/diff.ts";
 import { tabs } from "../render/format.ts";
 import { type IconSet, glyphsOf } from "../render/glyphs.ts";
 import { pathLine, type Stream, STREAMERS } from "../render/streaming.ts";
+import { styledText } from "../render/safe.ts";
 import { stateMark, toolIcon, toolLabel } from "../render/tools.ts";
 import { icons } from "../settings.ts";
 
@@ -415,7 +416,7 @@ function rule(
 	const [start, end] =
 		edge === "top" ? [LINE.topLeft, LINE.topRight] : [LINE.bottomLeft, LINE.bottomRight];
 	const paint = (text: string) => theme.fg(color, text);
-	const cell = left === "" ? "" : ` ${left} `;
+	const cell = left === "" ? "" : ` ${styledText(left)} `;
 	const fill = Math.max(1, width - BODY_PAD - visibleWidth(cell));
 	const line =
 		paint(`${start}${LINE.h}`) + cell + paint(LINE.h.repeat(fill)) + paint(`${LINE.h}${end}`);
@@ -445,7 +446,9 @@ function phaseLabel(
 function inside(lines: readonly string[], width: number, theme: Theme): string[] {
 	const paint = (text: string) => theme.fg("border", text);
 	const inner = room(width);
-	return trim(lines).map((line) => {
+	return trim(lines).map((drawn) => {
+		// Whichever renderer drew it, and whatever it was given to show.
+		const line = styledText(drawn);
 		const wide = visibleWidth(line);
 		const text = wide > inner ? truncateToWidth(line, inner, CUT, true) : line;
 		const pad = " ".repeat(Math.max(0, inner - (wide > inner ? visibleWidth(text) : wide)));

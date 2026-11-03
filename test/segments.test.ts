@@ -437,3 +437,18 @@ describe("labels", () => {
 		expect(text(["last"], snapshot())).toEqual([]);
 	});
 });
+
+test("a branch or a status cannot carry a terminal command", () => {
+	const drawn = renderSegments(["branch", "status:other"], {
+		snapshot: snapshot({
+			branch: "main\u001b]0;title\u0007",
+			statuses: new Map([["other", "\u001b[32mok\u001b[0m\u001b[2J"]]),
+		}),
+		glyphs: UNICODE,
+		paint: PLAIN,
+		options: { pathLength: 40, gaugeCells: 8, labels: true, claimed: new Set() },
+	}).map((piece) => piece.text);
+	expect(drawn.join(" ")).not.toContain("]0;");
+	expect(drawn.join(" ")).not.toContain("[2J");
+	expect(drawn[1]).toBe("\u001b[32mok\u001b[0m");
+});

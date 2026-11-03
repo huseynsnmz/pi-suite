@@ -27,6 +27,7 @@ import {
 } from "./format.ts";
 import type { Glyphs } from "./glyphs.ts";
 import { EFFORT_LEVELS, type Paint, type Role } from "./paint.ts";
+import { styledText } from "./safe.ts";
 
 export const SEGMENT_IDS = [
 	"path",
@@ -605,12 +606,23 @@ export function renderSegments(ids: readonly SegmentId[], input: SegmentInput): 
 	return ids.flatMap((id): Piece[] => {
 		if (id.startsWith(STATUS_PREFIX)) {
 			const text = input.snapshot.statuses.get(id.slice(STATUS_PREFIX.length));
-			return text === undefined ? [] : [{ text, priority: STATUS_PRIORITY }];
+			return text === undefined ? [] : [safePiece({ text, priority: STATUS_PRIORITY })];
 		}
 		const segment = SEGMENTS[id as BuiltinSegment];
 		const rendered = segment.render(input);
-		return rendered === undefined ? [] : [{ ...rendered, priority: segment.priority }];
+		return rendered === undefined ? [] : [safePiece({ ...rendered, priority: segment.priority })];
 	});
+}
+
+/** A branch, a folder, a session's name or another package's status can hold anything. */
+function safePiece(piece: Piece): Piece {
+	const { compact, shrink } = piece;
+	return {
+		...piece,
+		text: styledText(piece.text),
+		...(compact === undefined ? {} : { compact: styledText(compact) }),
+		...(shrink === undefined ? {} : { shrink: (width: number) => styledText(shrink(width)) }),
+	};
 }
 
 /** `5h 62% resets in 2h`; the percent carries the color. */

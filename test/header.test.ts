@@ -104,3 +104,16 @@ describe("the session's name on the start card", () => {
 		expect(first).toMatch(/π-frame .* · quokka · /);
 	});
 });
+
+test("a pull request's title cannot carry a terminal command", () => {
+	const lines = new HeaderComponent(
+		screen(),
+		source(() => ({
+			ci: undefined,
+			pr: { number: 1, title: "fix\u001b]52;c;QUJD\u0007\u001b[2J", waits: "new comment" },
+		})),
+	).render(100);
+	expect(lines.join("\n")).not.toContain("]52;");
+	expect(lines.join("\n")).not.toContain("[2J");
+	expect(lines.map(plain).some((line) => line.includes("PR #1 fix"))).toBe(true);
+});

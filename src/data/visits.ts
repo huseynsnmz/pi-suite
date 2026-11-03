@@ -1,5 +1,5 @@
 // The start screen says what changed since the last session in a folder, so it remembers when that was.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { isObject } from "@adeildo/pi-kit";
@@ -18,13 +18,21 @@ export function visit(
 	const visits = read(file);
 	const last = visits[cwd];
 	visits[cwd] = { at: now, version };
+	// Two sessions starting together must not read each other's half-written file. It lists your folders.
+	const temporary = `${file}.${process.pid}.tmp`;
 	try {
 		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, JSON.stringify(visits));
+		writeFileSync(temporary, JSON.stringify(visits), { mode: 0o600 });
+		renameSync(temporary, file);
 	} catch {
 		// A start screen that cannot remember only loses "since when".
+		rmSync(temporary, { force: true });
 	}
-	return last;
+	return isVisit(last) ? last : undefined;
+}
+
+function isVisit(value: unknown): value is LastVisit {
+	return isObject(value) && Number.isFinite(value.at) && typeof value.version === "string";
 }
 
 function read(file: string): Visits {

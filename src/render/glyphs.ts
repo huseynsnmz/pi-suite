@@ -178,8 +178,8 @@ export function resolveIcons(mode: IconMode, env: NodeJS.ProcessEnv = process.en
 	if (env.TERM === "dumb") return ASCII;
 	const locale = env.LC_ALL ?? env.LC_CTYPE ?? env.LANG;
 	if (locale !== undefined && locale !== "" && !/utf-?8/i.test(locale)) return ASCII;
-	if (env.SSH_TTY !== undefined || env.SSH_CONNECTION !== undefined) return UNICODE;
-	return NERD;
+	// Nothing can tell which font the terminal draws with, and a missing icon shows as a box or `[?]`.
+	return UNICODE;
 }
 
 /** Resolved again only when the setting changes; resolving per drawing was a fifth of typing's cost. */
