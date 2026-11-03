@@ -344,7 +344,7 @@ describe("header", () => {
 			.render(100)
 			.map(plain);
 		expect(lines.some((line) => /π-frame \S+ is new +was 0\.0\.1/.test(line))).toBe(true);
-		expect(lines.findLast(Boolean)).toMatch(/^╰─ 1 thing since .+ \/ commands/);
+		expect(lines.findLast(Boolean)).toMatch(/^╰─ 1 thing since /);
 	});
 
 	test("the π rises from its feet once, when there is a terminal to redraw it", () => {

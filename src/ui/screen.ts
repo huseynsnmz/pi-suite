@@ -29,6 +29,12 @@ export interface Screen {
 	cursor(): CursorStyle;
 	decorate(line: string): string;
 	skills(): boolean;
+	/** Changes when another package reports something new. */
+	statusesKey(): string;
+	/** A short message for the bottom line, in place of the session's numbers. */
+	notice(): string | undefined;
+	/** Ctrl+C with the editor focused, typed text included so it can be cleared. */
+	interrupt(clearEditor: () => void): void;
 	/** Compared by anything that keeps a drawing, so a change does not wait for the next keystroke. */
 	revision(): number;
 	bump(): void;

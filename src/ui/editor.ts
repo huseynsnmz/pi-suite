@@ -32,6 +32,7 @@ const CURSOR_SEQUENCES: Record<CursorStyle, string> = {
 
 export class FrameEditor extends CustomEditor {
 	readonly #screen: Screen;
+	readonly #keybindings: KeybindingsManager;
 	#indicator: WorkingIndicator;
 	#framing = false;
 	#hiddenAbove = 0;
@@ -47,6 +48,7 @@ export class FrameEditor extends CustomEditor {
 	) {
 		super(tui, theme, keybindings, { ...options, paddingX: 0, embedWorkingStatus: true });
 		this.#screen = screen;
+		this.#keybindings = keybindings;
 	}
 
 	/** The frame owns the horizontal inset, so pi's padding would double it. */
@@ -65,6 +67,10 @@ export class FrameEditor extends CustomEditor {
 	 * leaves the cursor in a `/name` (a typed slash, a deleted or retyped letter) lists the skills.
 	 */
 	override handleInput(data: string): void {
+		if (this.#keybindings.matches(data, "app.clear") && !this.isShowingAutocomplete()) {
+			this.#screen.interrupt(() => this.setText(""));
+			return;
+		}
 		const before = this.getText();
 		super.handleInput(data);
 		if (this.isShowingAutocomplete() || !this.#screen.skills() || this.getText() === before) return;

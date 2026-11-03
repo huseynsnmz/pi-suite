@@ -8,6 +8,7 @@ import type { GithubState } from "../data/github.ts";
 import { modeOf } from "../data/mode.ts";
 import { type LastVisit, since, type StartNote, startNotes } from "../data/start-notes.ts";
 import { BOXES, border } from "../render/frame.ts";
+import { keyLabel } from "../render/keys.ts";
 import { EFFORT_LEVELS, type Paint } from "../render/paint.ts";
 import { styledText } from "../render/safe.ts";
 import { renderSegments, type SegmentId } from "../render/segments.ts";
@@ -151,7 +152,8 @@ export class HeaderComponent implements Component {
 			border(
 				width,
 				[
-					{ text: this.#closing(notes, paint, last, snapshot.now), priority: 1 },
+					// What waits on you outlasts the key hints when the edge runs out of room.
+					{ text: this.#closing(notes, paint, last, snapshot.now), priority: 100 },
 					...this.#hintPieces(paint),
 				],
 				[],
@@ -286,7 +288,7 @@ export function hints(modes: boolean, effortKeys: string = keyText("app.thinking
 		{ key: keyText("app.model.select") || "/model", does: "model" },
 		...(modes ? [{ key: MODE_KEY, does: "mode" }] : []),
 		{ key: free || "/effort", does: "effort" },
-		{ key: "alt+s", does: "settings" },
+		{ key: keyLabel("alt+s"), does: "settings" },
 	];
 }
 

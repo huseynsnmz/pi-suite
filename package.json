@@ -1,7 +1,7 @@
 {
 	"name": "@huseynsnmz/pi-frame",
-	"version": "0.2.0",
-	"description": "Pi's start screen, a framed editor, a box around every tool call and a session footer. A hardened fork of @adeildo/pi-look.",
+	"version": "0.3.0",
+	"description": "Pi's start screen, a framed editor, a box around every tool call and a session footer. A fork of @adeildo/pi-look.",
 	"keywords": [
 		"pi",
 		"pi-coding-agent",

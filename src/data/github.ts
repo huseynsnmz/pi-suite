@@ -1,7 +1,8 @@
 // CI's last run on this branch and your open pull requests that wait on you, asked once per launch.
-// Shows nothing without gh, network or a GitHub remote, and does not start gh without that remote.
+// Shows nothing without the forge's tool, network or a remote it serves, and starts only that tool.
 import { isObject } from "@adeildo/pi-kit";
 
+import { gitlabHosts, glabMayStart, readGitlab } from "./gitlab.ts";
 import { processRunner, type Runner } from "./runner.ts";
 
 const FAILED = new Set(["failure", "startup_failure", "timed_out"]);
@@ -19,7 +20,9 @@ interface CiFailure {
 interface OpenPullRequest {
 	number: number;
 	title: string;
-	waits: "changes requested" | "new comment";
+	waits: "changes requested" | "new comment" | "open threads";
+	/** How the forge names it. `PR #52` when unset. */
+	ref?: string;
 }
 
 export interface GithubState {
@@ -33,16 +36,14 @@ export async function readGithub(
 	since: number | undefined,
 	run: Runner = processRunner(cwd),
 ): Promise<GithubState> {
-	if (!(await onGithub(run))) return { ci: undefined, pr: undefined };
+	const remotes = (await ask(() => run("git", ["remote", "-v"]))) ?? "";
+	if (!GITHUB_REMOTE.test(remotes)) {
+		const hosts = gitlabHosts(remotes);
+		return glabMayStart(hosts) ? readGitlab(run, await branchOf(run)) : { ci: undefined, pr: undefined };
+	}
 	const [branch, pr] = await Promise.all([branchOf(run), pullRequest(run, since)]);
 	const ci = branch === undefined ? undefined : await failedRun(run, branch);
 	return { ci, pr };
-}
-
-/** gh has nothing to say about GitLab or any other host, so it does not start. */
-async function onGithub(run: Runner): Promise<boolean> {
-	const remotes = await ask(() => run("git", ["remote", "-v"]));
-	return remotes !== undefined && GITHUB_REMOTE.test(remotes);
 }
 
 async function branchOf(run: Runner): Promise<string | undefined> {
@@ -109,7 +110,7 @@ function loginOf(value: unknown): string | undefined {
 	return isObject(value) ? field(value, "login") : undefined;
 }
 
-async function ask(question: () => Promise<string>): Promise<string | undefined> {
+export async function ask(question: () => Promise<string>): Promise<string | undefined> {
 	try {
 		return await question();
 	} catch {
@@ -117,7 +118,7 @@ async function ask(question: () => Promise<string>): Promise<string | undefined>
 	}
 }
 
-function rows(out: string | undefined): Record<string, unknown>[] {
+export function rows(out: string | undefined): Record<string, unknown>[] {
 	if (out === undefined) return [];
 	let value: unknown;
 	try {
@@ -128,12 +129,12 @@ function rows(out: string | undefined): Record<string, unknown>[] {
 	return Array.isArray(value) ? value.filter(isObject) : [];
 }
 
-function field(row: Record<string, unknown>, key: string): string | undefined {
+export function field(row: Record<string, unknown>, key: string): string | undefined {
 	const value = row[key];
 	return typeof value === "string" && value !== "" ? value : undefined;
 }
 
-function numberOf(pr: Record<string, unknown>): number | undefined {
-	const value = pr["number"];
+export function numberOf(pr: Record<string, unknown>, key = "number"): number | undefined {
+	const value = pr[key];
 	return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }

@@ -25,6 +25,16 @@ agent.mkdir(parents=True)
 project.mkdir()
 bin_dir.mkdir()
 
+glab_log = root / "glab.log"
+fake_glab = bin_dir / "glab"
+fake_glab.write_text(f"""#!/bin/sh
+echo "$@" >> "{glab_log}"
+case "$1" in
+  ci) echo '[{{"status":"failed","sha":"abcdef1234567","ref":"main"}}]' ;;
+  mr) echo '[{{"iid":7,"title":"Fix it","detailed_merge_status":"requested_changes"}}]' ;;
+esac
+""")
+fake_glab.chmod(0o755)
 gh_log = root / "gh.log"
 fake_gh = bin_dir / "gh"
 fake_gh.write_text(f'#!/bin/sh\necho "$@" >> "{gh_log}"\necho "[]"\n')
@@ -34,6 +44,15 @@ env = {
     "PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": str(home), "TERM": "xterm-256color", "COLUMNS": "120", "LINES": "45",
     "LANG": "en_US.UTF-8", "PI_CODING_AGENT_DIR": str(agent), "PI_SKIP_VERSION_CHECK": "1",
 }
+
+
+if any("pi-permission-system" in p for p in EXTRA):
+    for name, config in (
+        ("pi-permission-system", {"authorizerChain": ["pi-modes", "permission-judge"], "permission": {"*": "allow"}}),
+        ("pi-permission-classifier", {}),
+    ):
+        (agent / "extensions" / name).mkdir(parents=True)
+        (agent / "extensions" / name / "config.json").write_text(json.dumps(config))
 
 
 def git(*args, cwd=project):
@@ -93,6 +112,9 @@ class Terminal:
             if text in self.plain():
                 return True
         return False
+
+    def send(self, text):
+        os.write(self.fd, text.encode())
 
     def plain(self):
         return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]", "", self.raw)
@@ -166,6 +188,23 @@ try:
                 str(colors).replace(ESC, "ESC"),
             )
             check("the frame returns to its color in normal", colors["back to normal"] == colors["normal"])
+            os.write(term.fd, b"/mode yolo")
+            term.pump(0.4)
+            os.write(term.fd, b"\x1b")
+            term.pump(0.4)
+            os.write(term.fd, b"\r")
+            term.pump(1)
+            check("/mode yolo asks first", term.wait("Enter start", 5))
+            os.write(term.fd, b"\r")
+            check("the footer shows yolo without another key", term.wait("mode: yolo", 5))
+            term.pump(1)
+            yolo = frame_color()
+            check("yolo has its own frame color", yolo not in colors.values(), str(yolo).replace(ESC, "ESC"))
+            os.write(term.fd, SHIFT_TAB)
+            term.pump(1)
+            plain = term.plain()
+            check("the skill is listed", "review-permissions" in plain)
+            check("the skills list is framed", "\u2500 skills " in plain and "[Skills]" not in plain)
         os.write(term.fd, b"/effort high")
         term.pump(0.5)
         os.write(term.fd, b"\x1b")
@@ -203,14 +242,59 @@ try:
     ]:
         check(f"no {name} reaches the terminal", needle not in term.raw)
     check("command output still shows", "printed" in term.plain())
+    if any("pi-permission-system" in p for p in EXTRA):
+        drawn = re.search(r"(\x1b\[[\d;]*m)perm-judge: ", term.raw)
+        check("the judge's status is drawn dim", drawn is not None, repr(drawn.group(1)) if drawn else "not drawn")
     check("git counts still show", "?1" in term.plain() or "? 1" in term.plain())
     term.close()
 
     git("remote", "set-url", "origin", "git@github.com:team/app.git")
+    glab_log.unlink(missing_ok=True)
     term = Terminal()
     term.wait("Mock", 40)
     term.pump(3)
     check("gh is started for a GitHub remote", gh_log.exists())
+    check("glab is not started for a GitHub remote", not glab_log.exists())
+    term.close()
+
+    git("remote", "set-url", "origin", "git@gitlab.com:team/app.git")
+    gh_log.unlink()
+    term = Terminal()
+    term.wait("Mock", 40)
+    term.pump(3)
+    check("glab is started for a GitLab remote", glab_log.exists())
+    check("gh is not started for a GitLab remote", not gh_log.exists())
+    plain = term.plain()
+    check("the start card shows the failed pipeline", "CI failed on" in plain, plain[-300:] if "CI failed on" not in plain else "")
+    check("the start card shows the merge request", "MR !7" in plain)
+    for section in ("extensions",):
+        check(f"Pi's {section} list is framed", f"\u2500 {section} " in plain)
+    check("no bracketed section names", "[Extensions]" not in plain)
+    if sys.platform == "darwin":
+        check("the card says option, not alt", "option+s settings" in plain and "alt+s" not in plain)
+
+    started = time.time()
+    term.send("SLEEP")
+    term.pump(0.4)
+    term.send("\r")
+    term.pump(3)
+    check("the run is going", term.wait("sleep 20", 5) and "Aborted" not in term.plain())
+    term.send("\x03")
+    check("ctrl+c stops a run and says so", term.wait("Aborted", 5) and time.time() - started < 12)
+    term.pump(1)
+    alive = lambda: os.waitpid(term.pid, os.WNOHANG)[0] == 0
+    check("stopping a run does not exit", alive())
+    term.pump(1.5)
+    term.send("\x03")
+    check("with nothing running, ctrl+c says how to exit", term.wait("Press ctrl+c again to exit", 5))
+    Path(os.environ.get("PI_FRAME_E2E_RAW", os.devnull)).write_text(term.raw)
+    term.pump(3)
+    term.send("\x03")
+    term.pump(1)
+    check("after the warning passes, it warns again", alive())
+    term.send("\x03")
+    term.pump(3)
+    check("the second press exits", not alive())
 finally:
     term.close()
     model.terminate()

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- With a GitLab remote, the start card shows a failed pipeline and merge requests waiting on you, through `glab`.
+- `Ctrl+C` while something runs stops it and says `Aborted`. With nothing running, it clears the editor and says to press it again within 2 seconds to exit.
+- The red `yolo` frame for the new pi-modes mode.
+
+### Changed
+
+- What Pi loaded at startup (context, skills, prompts, extensions) is drawn in frames.
+- On a Mac, key hints say `option+` instead of `alt+`.
+- A status with no color of its own, like `perm-judge:`, is drawn dim like the rest of the footer.
+- When the start card's bottom edge is short of room, the key hints go before the count of what waits on you.
+
 ## 0.2.0
 
 ### Added
@@ -17,20 +32,4 @@
 
 ## 0.1.0
 
-First release, forked from `@adeildo/pi-look` 6.0.0.
-
-### Security
-
-- `git status` no longer runs what a repository configures: `core.fsmonitor`, filters, hooks, submodule config or partial clone downloads.
-- Escape sequences, control characters and bidirectional overrides are removed from what is drawn. Colors stay. This covers tool boxes, the `Alt+O` view, the start card, the editor frame and the footer.
-- The visits file is readable only by you and written atomically. Entries of the wrong shape are ignored.
-
-### Fixed
-
-- `auto` icons no longer need a Nerd Font.
-- `gh` starts only for a remote on a GitHub host.
-
-### Changed
-
-- Renamed to `pi-frame`: the package, settings keys, session entries and start card.
-- Removed the screenshots, which showed the old name.
+First release, forked from `@adeildo/pi-look` 6.0.0 and renamed to `pi-frame`: the package, settings keys, session entries and start card.

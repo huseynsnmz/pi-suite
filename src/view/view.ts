@@ -1,4 +1,5 @@
 // Another session over the whole screen. A read-only source has a line in place of the editor.
+import { keyLabel } from "../render/keys.ts";
 import { entryFrame, type SessionSummary, type SessionSource } from "@adeildo/pi-kit";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -80,7 +81,7 @@ export class SessionView implements Component, Focusable {
 		return entryFrame([...body, "", ...this.#editor(inner, snapshot)], width, theme, {
 			top: titleOf(snapshot),
 			topRight: theme.fg(ended ? "dim" : "success", ended ? "ended" : "live"),
-			bottom: `${theme.fg("dim", "alt+g")} back`,
+			bottom: `${theme.fg("dim", keyLabel("alt+g"))} back`,
 			bottomRight: this.#viewport.following
 				? undefined
 				: theme.fg("dim", `${lines.length - end} more below`),

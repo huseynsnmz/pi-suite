@@ -1,3 +1,4 @@
+import { keyLabel } from "../src/render/keys.ts";
 import { beforeAll, describe, expect, test } from "bun:test";
 
 import type { SessionSource, SourceItem } from "@adeildo/pi-kit";
@@ -75,7 +76,7 @@ describe("a session over the screen", () => {
 		expect(lines[0]).toContain("live");
 		expect(lines.join("\n")).toContain("hello there");
 		expect(lines.join("\n")).toContain("Read only");
-		expect(lines.at(-1)).toContain("alt+g back");
+		expect(lines.at(-1)).toContain(`${keyLabel("alt+g")} back`);
 	});
 
 	test("scrolled back, it says how much is below, and end follows again", () => {

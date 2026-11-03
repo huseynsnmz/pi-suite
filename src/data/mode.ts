@@ -2,12 +2,12 @@
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 
 const MODE_STATUS = "pi-modes";
-const REPORTED = /^mode: (normal|auto|plan|read-only)$/;
+const REPORTED = /^mode: (normal|auto|plan|read-only|yolo)$/;
 
-type Mode = "normal" | "auto" | "plan" | "read-only";
+type Mode = "normal" | "auto" | "plan" | "read-only" | "yolo";
 
 /** The same colors pi-modes gives the word. In `normal`, the frame stays pi's own. */
-const FRAME_COLORS = { auto: "warning", plan: "accent", "read-only": "success" } as const;
+const FRAME_COLORS = { auto: "warning", plan: "accent", "read-only": "success", yolo: "error" } as const;
 
 export function modeOf(statuses: ReadonlyMap<string, string>): Mode | undefined {
 	const status = statuses.get(MODE_STATUS);

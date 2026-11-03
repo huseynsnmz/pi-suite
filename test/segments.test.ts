@@ -341,6 +341,22 @@ describe("segments", () => {
 		expect(text(["status:missing"], data)).toEqual([]);
 	});
 
+	test("a status with no color takes the footer's, and one with a color keeps it", () => {
+		const paint = { ...PLAIN, dim: (value: string) => `dim(${value})` };
+		const drawn = renderSegments(["status:plain", "status:colored"], {
+			snapshot: snapshot({
+				statuses: new Map([
+					["plain", "perm-judge: llm:chat-model"],
+					["colored", "\u001b[33mmode: auto\u001b[39m"],
+				]),
+			}),
+			glyphs: UNICODE,
+			paint,
+			options,
+		}).map((piece) => piece.text);
+		expect(drawn).toEqual(["dim(perm-judge: llm:chat-model)", "\u001b[33mmode: auto\u001b[39m"]);
+	});
+
 	test("the model segment claims the status the providers package also reports", () => {
 		expect(claimedStatuses([["model"]])).toContain("pi-providers:account");
 	});

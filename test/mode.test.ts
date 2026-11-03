@@ -14,6 +14,7 @@ test.each([
 	["auto", "warning"],
 	["plan", "accent"],
 	["read-only", "success"],
+	["yolo", "error"],
 ])("the frame in %s mode is %s", (mode, color) => {
 	expect(modeOf(status(`\u001b[33mmode: ${mode}\u001b[39m`))).toBe(mode as "auto");
 	expect(frameColorOf(status(`mode: ${mode}`))).toBe(color as "accent");

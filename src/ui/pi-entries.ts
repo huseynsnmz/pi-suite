@@ -10,7 +10,7 @@ import {
 	type Theme,
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 
 import type { IconSet } from "../render/glyphs.ts";
 import { isBlank } from "./tool-frame.ts";
@@ -32,7 +32,11 @@ const MARKERS = /^(?:\u001b\]133;[^\u0007]*\u0007)*/;
 const BACKGROUND = /\u001b\[(?:48;[25];[\d;]+|49|4[0-7]|10[0-7])m/g;
 /** Pi's bracketed label, as `[compaction]`, which the frame's top edge replaces. */
 // oxlint-disable-next-line no-control-regex -- the label is wrapped in bold codes
-const LABEL = /(\u001b\[1m)?\[[\w:.-]+\](\u001b\[22m)? ?/;
+const LABEL = /(\u001b\[1m)?\[[\w:. -]+\](\u001b\[22m)? ?/;
+
+const STARTUP_LOADED = new Set(["Context", "Skills", "Prompts", "Extensions"]);
+// oxlint-disable-next-line no-control-regex -- the name is wrapped in color codes
+const STARTUP_SECTION = /^(?:\u001b\[[\d;]*m)*\[(Context|Skills|Prompts|Extensions|Skill warnings|Prompt conflicts|Extension issues|Theme conflicts)\](?:\u001b\[[\d;]*m)*\n/;
 
 type Paint = NonNullable<ReturnType<EntryPaint>>;
 
@@ -68,6 +72,19 @@ export function framePiEntries(source: EntryPaint): void {
 		return { top, color: "borderMuted", label: true };
 	});
 	wrap(BashExecutionComponent, (self, look) => shellFrame(self, look));
+	wrap(Text, (self, look) => startupFrame(self, look));
+}
+
+/** Pi lists what it loaded as `[Skills]` above a plain list, and says it with `Text`. */
+function startupFrame(self: object, look: Paint): Framing | undefined {
+	const name = STARTUP_SECTION.exec((self as { text?: string }).text ?? "")?.[1];
+	if (name === undefined) return undefined;
+	const problem = !STARTUP_LOADED.has(name);
+	return {
+		top: look.theme.fg(problem ? "warning" : "muted", name.toLowerCase()),
+		color: problem ? "warning" : "borderMuted",
+		label: true,
+	};
 }
 
 /** Asked once per message: the client is known before pi draws the prompt, and never changes. */
@@ -175,7 +192,7 @@ export function framed(
 	trim();
 	if (label && lines[0] !== undefined) {
 		// Alone on its line it goes with the line; otherwise only the label goes, as `[skill] name`.
-		const alone = /^\[[\w:.-]+\]$/.test(stripTerminalSequences(lines[0]).trim());
+		const alone = /^\[[\w:. -]+\]$/.test(stripTerminalSequences(lines[0]).trim());
 		if (alone) lines.shift();
 		else lines[0] = lines[0].replace(LABEL, "$2");
 		trim();

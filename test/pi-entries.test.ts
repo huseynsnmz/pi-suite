@@ -9,7 +9,7 @@ import {
 	SkillInvocationMessageComponent,
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 
 import { framed, framePiEntries } from "../src/ui/pi-entries.ts";
 
@@ -146,5 +146,22 @@ describe("drawing on every keystroke", () => {
 		expect(message.render(41)).not.toBe(first);
 		framePiEntries(() => ({ theme: plain, set: "unicode", you: true }));
 		expect(visible(message.render(41))[0]).toContain("\u25b8 you");
+	});
+});
+
+describe("what pi lists at startup", () => {
+	const look = { theme: plain, set: "unicode" as const, you: false };
+	test("each section gets a frame, named on its top edge", () => {
+		framePiEntries(() => look);
+		const lines = visible(new Text("\u001b[36m[Skills]\u001b[39m\n  one, two", 0, 0).render(40));
+		expect(lines[0]).toContain("skills");
+		expect(lines[0]).not.toContain("[Skills]");
+		expect(lines[1]).toContain("one, two");
+		expect(lines.at(-1)?.startsWith("\u2570")).toBe(true);
+	});
+	test("other text stays as it is", () => {
+		framePiEntries(() => look);
+		expect(visible(new Text("[Skills] are great", 0, 0).render(40))).toEqual(["[Skills] are great"]);
+		expect(visible(new Text("hello\nworld", 0, 0).render(40))).toEqual(["hello", "world"]);
 	});
 });

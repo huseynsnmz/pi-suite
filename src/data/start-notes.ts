@@ -54,7 +54,7 @@ export function startNotes(
 		notes.push({
 			mark: GLYPH.flag,
 			color: "warning",
-			text: `PR #${github.pr.number} ${github.pr.title}`,
+			text: `${github.pr.ref ?? `PR #${github.pr.number}`} ${github.pr.title}`,
 			detail: github.pr.waits,
 		});
 	for (const peer of snapshot.peers)

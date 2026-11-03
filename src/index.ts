@@ -23,6 +23,7 @@ import type {
 	ExtensionContext,
 	ReadonlyFooterDataProvider,
 } from "@earendil-works/pi-coding-agent";
+import { keyText } from "@earendil-works/pi-coding-agent";
 import { Key, type TUI } from "@earendil-works/pi-tui";
 
 import { type GitState, readGit } from "./data/git.ts";
@@ -55,6 +56,7 @@ import { applyCursor, FrameEditor } from "./ui/editor.ts";
 import { registerEffort } from "./ui/effort.ts";
 import { FooterComponent, StripComponent } from "./ui/footer.ts";
 import { PACKAGE_VERSION, HeaderComponent, type LoadedCounts } from "./ui/header.ts";
+import { EXIT_WINDOW_MS, type InterruptState, nextInterrupt } from "./ui/interrupt.ts";
 import { OutputView, outputsOf } from "./ui/outputs.ts";
 import { framePiEntries } from "./ui/pi-entries.ts";
 import { frameQueue } from "./ui/queue.ts";
@@ -83,6 +85,9 @@ interface Live {
 	ticker: ReturnType<typeof setInterval> | undefined;
 	frame: Snapshot | undefined;
 	activity: string | undefined;
+	interrupts: InterruptState;
+	notice: string | undefined;
+	noticeTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 export const frameFeature = defineFeature({
@@ -105,6 +110,9 @@ export const frameFeature = defineFeature({
 			ticker: undefined,
 			frame: undefined,
 			activity: undefined,
+			interrupts: {},
+			notice: undefined,
+			noticeTimer: undefined,
 		};
 
 		const glyphs = glyphsOf(() => icons.get(scope));
@@ -373,6 +381,14 @@ function createScreen(
 			labels,
 			claimed: claimedStatuses(Object.values(SLOTS)),
 		}),
+		statusesKey: () => [...(live.footerData?.getExtensionStatuses().values() ?? [])].join("\u0000"),
+		notice: () => {
+			const theme = live.ctx?.ui.theme;
+			return live.notice === undefined || theme === undefined
+				? undefined
+				: theme.fg("warning", live.notice);
+		},
+		interrupt: (clearEditor) => pressCtrlC(live, clearEditor),
 		slot: (name) => SLOTS[name],
 		frameStyle: () => frame.get(scope),
 		frameColor: () => {
@@ -412,6 +428,29 @@ function boardAndPeersOf(
 		peersUnread: peers?.unread,
 		peersWriting: peers?.writing,
 	};
+}
+
+function pressCtrlC(live: Live, clearEditor: () => void): void {
+	const ctx = live.ctx;
+	if (ctx === undefined) return;
+	const now = Date.now();
+	const step = nextInterrupt(live.interrupts, ctx.isIdle(), now);
+	live.interrupts = step.state;
+	if (step.action === "exit") {
+		ctx.shutdown();
+		return;
+	}
+	if (step.action === "abort") ctx.abort();
+	else clearEditor();
+	live.notice = step.action === "abort" ? "Aborted" : `Press ${keyText("app.clear")} again to exit`;
+	if (live.noticeTimer !== undefined) clearTimeout(live.noticeTimer);
+	live.noticeTimer = setTimeout(() => {
+		live.notice = undefined;
+		live.interrupts = {};
+		live.repaint?.();
+	}, EXIT_WINDOW_MS);
+	live.noticeTimer.unref?.();
+	live.repaint?.();
 }
 
 function installEditor(

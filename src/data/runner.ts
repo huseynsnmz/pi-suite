@@ -6,7 +6,12 @@ const TIMEOUT_MS = 3000;
 const MAX_OUTPUT = 1024 * 1024;
 
 /** No download for a partial clone, whose transport the repository's config chooses, and no prompt. */
-const QUIET_GIT = { ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_TERMINAL_PROMPT: "0" };
+const QUIET_GIT = {
+	...process.env,
+	GIT_NO_LAZY_FETCH: "1",
+	GIT_TERMINAL_PROMPT: "0",
+	GLAB_CHECK_UPDATE: "false",
+};
 
 /** Rejects when it fails or takes too long. */
 export type Runner = (file: string, args: readonly string[]) => Promise<string>;

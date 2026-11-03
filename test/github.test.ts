@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { readGithub } from "../src/data/github.ts";
+import { gitlabHosts, glabMayStart } from "../src/data/gitlab.ts";
 import type { Runner } from "../src/data/runner.ts";
 
 /** A command line that answers only what the test set up, and fails for anything else. */
@@ -179,4 +180,64 @@ describe("readGithub outside GitHub", () => {
 			expect(asked).toContain("gh");
 		},
 	);
+});
+
+describe("what GitLab answers for the folder", () => {
+	const GITLAB = "origin\tgit@gitlab.com:a/b.git (fetch)\n";
+	function glab(answers: { ci?: string; mrs?: string }, seen: string[] = []): Runner {
+		return async (file, args) => {
+			if (file === "git") return args[0] === "remote" ? GITLAB : "feat\n";
+			seen.push(`${file} ${args.join(" ")}`);
+			if (args[0] === "ci" && answers.ci !== undefined) return answers.ci;
+			if (args[0] === "mr" && answers.mrs !== undefined) return answers.mrs;
+			throw new Error("no answer");
+		};
+	}
+	const mr = (status: string) =>
+		JSON.stringify([{ iid: 7, title: "Fix it", detailed_merge_status: status }]);
+
+	test("a failed pipeline, and a merge request with changes requested", async () => {
+		const seen: string[] = [];
+		const state = await readGithub(
+			"/x",
+			undefined,
+			glab(
+				{
+					ci: JSON.stringify([{ status: "failed", sha: "abcdef1234567", name: "" }]),
+					mrs: mr("requested_changes"),
+				},
+				seen,
+			),
+		);
+		expect(state.ci).toEqual({ branch: "feat", sha: "abcdef1", name: "pipeline" });
+		expect(state.pr).toEqual({ number: 7, title: "Fix it", waits: "changes requested", ref: "MR !7" });
+		expect(seen.every((line) => line.startsWith("glab "))).toBe(true);
+	});
+
+	test("a passing pipeline and a mergeable request are not news", async () => {
+		const state = await readGithub(
+			"/x",
+			undefined,
+			glab({ ci: JSON.stringify([{ status: "success" }]), mrs: mr("mergeable") }),
+		);
+		expect(state).toEqual({ ci: undefined, pr: undefined });
+	});
+
+	test("without glab there is nothing to say", async () => {
+		expect(await readGithub("/x", undefined, glab({}))).toEqual({ ci: undefined, pr: undefined });
+	});
+
+	test("names the hosts, and not lookalikes", () => {
+		expect(gitlabHosts("o\thttps://gitlab.acme.dev/a/b.git (fetch)\n")).toEqual(["gitlab.acme.dev"]);
+		expect(gitlabHosts("o\thttps://evil.com/gitlab.com/b.git (fetch)\n")).toEqual([]);
+		expect(gitlabHosts("o\thttps://gitlab.com@evil.com/b.git (fetch)\n")).toEqual([]);
+	});
+
+	test("a token from the environment only goes to a host you chose", () => {
+		expect(glabMayStart(["gitlab.acme.dev"], {})).toBe(true);
+		expect(glabMayStart(["gitlab.com"], { GITLAB_TOKEN: "x" })).toBe(true);
+		expect(glabMayStart(["gitlab.evil.dev"], { GITLAB_TOKEN: "x" })).toBe(false);
+		expect(glabMayStart(["gitlab.acme.dev"], { GITLAB_TOKEN: "x", GITLAB_HOST: "https://gitlab.acme.dev" })).toBe(true);
+		expect(glabMayStart([], {})).toBe(false);
+	});
 });

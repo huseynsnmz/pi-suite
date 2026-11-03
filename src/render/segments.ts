@@ -540,7 +540,7 @@ export const SEGMENTS: Record<BuiltinSegment, Segment> = {
 		render: ({ snapshot, glyphs, paint, options }) => {
 			const texts = [...snapshot.statuses]
 				.filter(([key]) => !options.claimed.has(key))
-				.map(([, text]) => text);
+				.map(([, text]) => quietStatus(text, paint));
 			if (texts.length === 0) return undefined;
 			const icon = glyphs.plug === "" ? "" : `${paint.dim(glyphs.plug)} `;
 			return {
@@ -601,12 +601,19 @@ export function renderSegments(ids: readonly SegmentId[], input: SegmentInput): 
 	return ids.flatMap((id): Piece[] => {
 		if (id.startsWith(STATUS_PREFIX)) {
 			const text = input.snapshot.statuses.get(id.slice(STATUS_PREFIX.length));
-			return text === undefined ? [] : [safePiece({ text, priority: STATUS_PRIORITY })];
+			return text === undefined
+				? []
+				: [safePiece({ text: quietStatus(text, input.paint), priority: STATUS_PRIORITY })];
 		}
 		const segment = SEGMENTS[id as BuiltinSegment];
 		const rendered = segment.render(input);
 		return rendered === undefined ? [] : [safePiece({ ...rendered, priority: segment.priority })];
 	});
+}
+
+/** A status that picked no color would stand out from the footer, so it takes the footer's. */
+function quietStatus(text: string, paint: Paint): string {
+	return text.includes("\u001b[") ? text : paint.dim(text);
 }
 
 /** A branch, a folder, a session's name or another package's status can hold anything. */

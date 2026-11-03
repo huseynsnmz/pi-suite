@@ -1,5 +1,5 @@
 import type { ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
-import { type Component, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 import { fitLine, fitRegions, type Piece } from "../render/fit.ts";
 import type { Paint } from "../render/paint.ts";
@@ -13,7 +13,7 @@ const REDRAW_MS = 100;
 
 /** Kept per width and screen revision, since the transcript redraws on every keystroke. */
 class KeptDrawing {
-	#drawn: { width: number; revision: number; at: number; lines: string[] } | undefined;
+	#drawn: { width: number; revision: number; at: number; statuses: string; lines: string[] } | undefined;
 
 	constructor(
 		private readonly screen: Screen,
@@ -24,15 +24,18 @@ class KeptDrawing {
 		const now = Date.now();
 		const revision = this.screen.revision();
 		const drawn = this.#drawn;
+		// A status set as a dialog closes comes right after pi's own redraw.
+		const statuses = this.screen.statusesKey();
 		if (
 			drawn !== undefined &&
 			drawn.width === width &&
 			drawn.revision === revision &&
+			drawn.statuses === statuses &&
 			now - drawn.at < REDRAW_MS
 		)
 			return drawn.lines;
 		const lines = this.draw(width);
-		this.#drawn = { width, revision, at: now, lines };
+		this.#drawn = { width, revision, at: now, statuses, lines };
 		return lines;
 	}
 
@@ -126,7 +129,8 @@ export class FooterComponent implements Component {
 			lines.push(spread(screen, "topLeft", "topRight", room));
 			lines.push(spread(screen, "bottomLeft", "bottomRight", room));
 		}
-		lines.push(spread(screen, "below", "belowRight", room));
+		const notice = screen.notice();
+		lines.push(notice === undefined ? spread(screen, "below", "belowRight", room) : truncateToWidth(notice, room));
 
 		const kept = lines.filter((line) => line !== "").map((line) => `${pad}${line}`);
 		return kept.length === 0 ? [""] : kept;
