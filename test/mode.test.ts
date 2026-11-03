@@ -25,17 +25,10 @@ test("anything else leaves the frame alone", () => {
 	expect(frameColorOf(status("mode: sideways"))).toBeUndefined();
 });
 
-const effortHint = (modes: boolean, keys: string) =>
-	hints(modes, keys).find((hint) => hint.does === "effort")?.key;
-
 test("the start card only promises what the keys do", () => {
-	expect(effortHint(false, "shift+tab")).toBe("shift+tab");
-	expect(effortHint(true, "shift+tab")).toBe("/effort");
-	expect(effortHint(true, "shift+tab/alt+t")).toBe("alt+t");
-	expect(effortHint(true, "alt+t")).toBe("alt+t");
-	expect(effortHint(false, "")).toBe("/effort");
-	expect(hints(true, "shift+tab").map((hint) => hint.does)).toContain("mode");
-	expect(hints(false, "shift+tab").map((hint) => hint.does)).not.toContain("mode");
+	const does = (modes: boolean, sandbox: boolean) => hints(modes, sandbox).map((hint) => hint.does);
+	expect(does(true, true)).toEqual(["commands", "model", "mode", "sandbox", "settings"]);
+	expect(does(false, false)).toEqual(["commands", "model", "settings"]);
 });
 
 function effortCommand() {

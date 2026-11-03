@@ -7,7 +7,7 @@ import {
 } from "@adeildo/pi-kit";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import type { Snapshot } from "../data/snapshot.ts";
+import { SANDBOX_STATUS, type Snapshot } from "../data/snapshot.ts";
 import { promptOf, tokensOf, type Totals } from "../data/totals.ts";
 import type { Piece } from "./fit.ts";
 import {
@@ -543,12 +543,23 @@ export const SEGMENTS: Record<BuiltinSegment, Segment> = {
 			const shown = [...snapshot.statuses].filter(([key]) => !options.claimed.has(key));
 			const mode = shown.find(([key]) => key === MODE_STATUS)?.[1];
 			const texts = shown
-				.filter(([key]) => key !== MODE_STATUS)
+				.filter(([key]) => key !== MODE_STATUS && !(key === SANDBOX_STATUS && snapshot.sandbox !== undefined))
 				.map(([, text]) => quietStatus(text, paint));
-			if (mode !== undefined) {
-				const lead = quietStatus(mode, paint);
+			const divider = `  ${paint.dim(glyphs.apart)}  `;
+			const leads = [
+				...(mode === undefined ? [] : [quietStatus(mode, paint)]),
+				...(snapshot.sandbox === undefined
+					? []
+					: [
+							snapshot.sandbox === "on"
+								? paint.dim("sandbox: on")
+								: paint.raw("warning", "sandbox: off"),
+						]),
+			];
+			if (leads.length > 0) {
+				const lead = leads.join(divider);
 				if (texts.length === 0) return { text: lead };
-				return { text: `${lead}  ${paint.dim(glyphs.apart)}  ${texts.join("  ")}`, compact: lead };
+				return { text: `${lead}${divider}${texts.join("  ")}`, compact: lead };
 			}
 			if (texts.length === 0) return undefined;
 			const icon = glyphs.plug === "" ? "" : `${paint.dim(glyphs.plug)} `;

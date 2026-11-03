@@ -24,10 +24,10 @@ import type {
 	ReadonlyFooterDataProvider,
 } from "@earendil-works/pi-coding-agent";
 import { keyText } from "@earendil-works/pi-coding-agent";
-import { Key, type TUI } from "@earendil-works/pi-tui";
+import { Key, type KeyId, type TUI } from "@earendil-works/pi-tui";
 
 import { type GitState, readGit } from "./data/git.ts";
-import { cmdAsAlt, watchCmdKey } from "./render/keys.ts";
+import { cmdAsKey, SETTINGS_SHORTCUT, watchCmdKey } from "./render/keys.ts";
 import { frameColorOf } from "./data/mode.ts";
 import { type GithubState, readGithub } from "./data/github.ts";
 import { emptySnapshot, type LiveInputs, type Snapshot, SnapshotReader } from "./data/snapshot.ts";
@@ -172,8 +172,8 @@ export const frameFeature = defineFeature({
 
 			stopCmdKeys?.();
 			stopCmdKeys = ctx.ui.onTerminalInput((data) => {
-				const alt = cmdAsAlt(data);
-				return alt === undefined ? undefined : { data: alt };
+				const key = cmdAsKey(data);
+				return key === undefined ? undefined : { data: key };
 			});
 
 			ctx.ui.setFooter(
@@ -373,6 +373,7 @@ function createScreen(
 				last: telemetry.last(),
 				run: telemetry.run(),
 				statuses: live.footerData?.getExtensionStatuses() ?? new Map(),
+				sandboxInstalled: scope.getCommands().some((command) => command.name === "sandbox-enable"),
 				...boardAndPeersOf(scope),
 			});
 			live.frame = snapshot;
@@ -567,8 +568,29 @@ function stopTicking(live: Live): void {
 	live.ticker = undefined;
 }
 
+/** The kit's settings screen asks for Alt+S, which pi-sandbox also needs and can't give up. */
+function withSettingsKey(pi: ExtensionAPI): ExtensionAPI {
+	return new Proxy(pi, {
+		get(target, name) {
+			if (name === "registerShortcut") {
+				return (key: KeyId, options: Parameters<ExtensionAPI["registerShortcut"]>[1]) =>
+					target.registerShortcut(key === Key.alt("s") ? SETTINGS_SHORTCUT : key, options);
+			}
+			if (name === "registerCommand") {
+				return (command: string, options: Parameters<ExtensionAPI["registerCommand"]>[1]) =>
+					target.registerCommand(command, {
+						...options,
+						description: options.description?.replace("Alt+S", "Ctrl+S"),
+					});
+			}
+			const value: unknown = Reflect.get(target, name);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
+
 export default function piLook(pi: ExtensionAPI): void {
-	createApp(pi, { name: "pi-frame" }).use(frameFeature).build();
+	createApp(withSettingsKey(pi), { name: "pi-frame" }).use(frameFeature).build();
 }
 
 async function openView(

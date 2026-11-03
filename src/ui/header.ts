@@ -8,7 +8,7 @@ import type { GithubState } from "../data/github.ts";
 import { modeOf } from "../data/mode.ts";
 import { type LastVisit, since, type StartNote, startNotes } from "../data/start-notes.ts";
 import { BOXES, border } from "../render/frame.ts";
-import { keyLabel } from "../render/keys.ts";
+import { keyLabel, SETTINGS_KEY } from "../render/keys.ts";
 import { EFFORT_LEVELS, type Paint } from "../render/paint.ts";
 import { styledText } from "../render/safe.ts";
 import { renderSegments, type SegmentId } from "../render/segments.ts";
@@ -248,7 +248,8 @@ export class HeaderComponent implements Component {
 	}
 
 	#hintPieces(paint: Paint): { text: string; priority: number }[] {
-		return hints(modeOf(this.#screen.snapshot().statuses) !== undefined)
+		const snapshot = this.#screen.snapshot();
+		return hints(modeOf(snapshot.statuses) !== undefined, snapshot.sandbox !== undefined)
 			.map((hint, index) => ({
 				text: `${paint.role("brand", hint.key)} ${paint.dim(hint.does)}`,
 				priority: 3 + index,
@@ -308,17 +309,13 @@ function packageVersion(): string {
 }
 
 /** With pi-modes loaded, Shift+Tab changes the mode, whatever pi's own binding says. */
-export function hints(modes: boolean, effortKeys: string = keyText("app.thinking.cycle")): Hint[] {
-	const free = effortKeys
-		.split("/")
-		.filter((key) => key !== "" && !(modes && key === MODE_KEY))
-		.join("/");
+export function hints(modes: boolean, sandbox: boolean): Hint[] {
 	return [
 		{ key: "/", does: "commands" },
 		{ key: keyText("app.model.select") || "/model", does: "model" },
 		...(modes ? [{ key: MODE_KEY, does: "mode" }] : []),
-		{ key: free || "/effort", does: "effort" },
-		{ key: keyLabel("alt+s"), does: "settings" },
+		...(sandbox ? [{ key: keyLabel("alt+s"), does: "sandbox" }] : []),
+		{ key: keyLabel(SETTINGS_KEY), does: "settings" },
 	];
 }
 

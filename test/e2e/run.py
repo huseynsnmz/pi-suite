@@ -292,7 +292,27 @@ try:
     Path(os.environ.get("PI_FRAME_E2E_CARD", os.devnull)).write_text(term.raw)
     check("no bracketed section names", "[Extensions]" not in plain)
     if sys.platform == "darwin":
-        check("the card says option, not alt", "option+s settings" in plain and "alt+s" not in plain)
+        check("the card says option, not alt", "alt+" not in plain.split("settings")[0].splitlines()[-1])
+
+    SANDBOX = any("pi-sandbox" in p for p in [*EXTRA, *AFTER])
+    check("the card says ctrl+s for the settings", "ctrl+s settings" in plain)
+    check("the card no longer lists effort", "effort" not in plain.split("settings")[0].splitlines()[-1])
+    check("no shortcut conflict warnings", "shortcut conflict" not in plain.lower() and "conflicts with" not in plain.lower())
+    check("the sandbox key is on the card only with pi-sandbox", ("option+s sandbox" in plain or "alt+s sandbox" in plain) == SANDBOX)
+    before = len(term.plain())
+    os.write(term.fd, b"\x13")
+    check("ctrl+s opens the settings", term.wait("Frame", 8) and "Frame" in term.plain()[before:])
+    os.write(term.fd, b"\x1b")
+    term.pump(1)
+    if SANDBOX:
+        check("the footer says the sandbox is on", "sandbox: on" in term.plain())
+        before = len(term.plain())
+        os.write(term.fd, b"\x1bs")
+        check("option+s turns the sandbox off", term.wait("Sandbox disabled", 8))
+        term.pump(1)
+        check("the footer says the sandbox is off", "sandbox: off" in term.plain()[before:])
+        os.write(term.fd, b"\x1bs")
+        check("option+s turns it back on", term.wait("Sandbox enabled", 8))
 
     started = time.time()
     term.send("SLEEP")

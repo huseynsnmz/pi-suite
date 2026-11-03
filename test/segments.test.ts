@@ -341,6 +341,15 @@ describe("segments", () => {
 		expect(text(["status:missing"], data)).toEqual([]);
 	});
 
+	test("the sandbox's state follows the mode and replaces its long status", () => {
+		const statuses = new Map([["pi-modes", "mode: yolo"], ["sandbox", "x Sandbox: 9 domains"], ["mem", "m 1"]]);
+		const shown = (sandbox: "on" | "off" | undefined) =>
+			text(["statuses"], snapshot({ statuses, sandbox }), {})[0];
+		expect(shown("on")).toBe("mode: yolo  |  sandbox: on  |  m 1");
+		expect(shown("off")).toBe("mode: yolo  |  sandbox: off  |  m 1");
+		expect(shown(undefined)).toBe("mode: yolo  |  x Sandbox: 9 domains  m 1");
+	});
+
 	test("the mode leads the statuses, after which a divider", () => {
 		const data = snapshot({
 			statuses: new Map([

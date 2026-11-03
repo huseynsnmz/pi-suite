@@ -66,7 +66,7 @@ What each piece of the screen shows.
 | `tokens`       | The session's tokens, with the cache                                                                                                                                                |
 | `cache`        | The cache hit of the last prompt                                                                                                                                                    |
 | `average`      | The session's average speeds, both ways                                                                                                                                             |
-| `statuses`     | What other packages report through `setStatus`, minus the ones placed on their own                                                                                                  |
+| `statuses`     | The mode and sandbox state first, then what other packages report through `setStatus`, minus the ones placed on their own                                                                                                  |
 | `status:<key>` | One package's status, by the key it passes to `setStatus`                                                                                                                           |
 
 A `status:<key>` segment is how a package gets a place of its own. [`@adeildo/pi-ask-permission`](../ask-permission) reports its mode as `pi-ask-permission:mode`, and the mode says what happens to what you type, so by default it sits in the frame next to the model instead of in the footer with everything else. `@adeildo/pi-providers` still reports its account as `pi-providers:account`, but the `model` segment draws it in parentheses, so the statuses segment skips it.

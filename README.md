@@ -17,14 +17,14 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.3.3
+   pi install npm:@huseynsnmz/pi-frame@0.3.4
    ```
 
 3. Restart Pi. The start card says `π-frame`.
 
-Your `pi-look` settings don't carry over. Press `Alt+S` and open the **Frame** tab to set them again.
+Your `pi-look` settings don't carry over. Press `Ctrl+S` and open the **Frame** tab to set them again.
 
-On a Mac, `Alt` means the Option key, which needs "Use Option as Meta" in Terminal.app, or Left Option set to `Esc+` in iTerm2. In a terminal that uses the kitty keyboard protocol, such as Ghostty or kitty, `Cmd+S` and `Cmd+O` work too, and the start card says `cmd+s`. Others never pass `Cmd` to Pi, so the card says `option+s` there. A terminal that keeps `Cmd+S` for itself won't pass it on either.
+On a Mac, `Alt` means the Option key, which needs Left Option set to `Esc+` in iTerm2, `"terminal": { "option_as_meta": true }` in Zed, or "Use Option as Meta" in Terminal.app. Otherwise Option types a character such as `ß`. In a terminal that uses the kitty keyboard protocol, such as Ghostty or kitty, `Cmd+S` and `Cmd+O` work too, and the start card says so.
 
 ## What you see
 
@@ -41,7 +41,7 @@ Some pieces, such as rooms, boards, peers and the remote page, appear only with 
 | `Ctrl+C` | Stops a run and says `Aborted`. With nothing running, it clears the editor and says to press it again within 2 seconds to exit |
 | `Alt+O` | Scroll through the session's tool output, one call at a time |
 | `Ctrl+O` | Expand every call in the transcript |
-| `Alt+S` | Settings: icons, editor frame style, framed messages |
+| `Ctrl+S` | Settings: icons, editor frame style, framed messages. With the editor frame off, use `/harness` |
 | `/effort` | Pick how hard the model thinks |
 | `/effort high` | Set it directly: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. If the model can't use that level, Pi picks the closest one and you're told |
 
@@ -49,7 +49,9 @@ More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/
 
 ## Using it with other extensions
 
-**`pi-modes`:** it takes over `Shift+Tab`, so the start card says `shift+tab mode` and points to `/effort` or whichever other key you've bound for effort. To keep a key for effort, set `app.thinking.cycle` in `~/.pi/agent/keybindings.json`.
+**`pi-modes`:** it takes over `Shift+Tab`, so the start card says `shift+tab mode`. To keep a key for effort, set `app.thinking.cycle` in `~/.pi/agent/keybindings.json`, or use `/effort`.
+
+**`pi-sandbox`:** the start card shows `option+s sandbox`, which is `pi-sandbox`'s own on/off key, and the bottom line shows `sandbox: on` or `sandbox: off` after the mode. Its longer status moves to `/sandbox`.
 
 **`pi-permission-system`, `pi-permission-classifier`:** no conflicts were found, and the automated run covers them together with `pi-modes`.
 

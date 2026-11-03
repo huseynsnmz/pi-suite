@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.4
+
+### Changed
+
+- Settings open with `Ctrl+S`, because `pi-sandbox` needs `Alt+S`. `Cmd+S` still works where the terminal can send it.
+- The start card no longer lists effort. `/effort` is unchanged.
+
+### Added
+
+- With `pi-sandbox` installed, the start card shows its on/off key, and the bottom line shows `sandbox: on` or `sandbox: off` after the mode.
+
 ## 0.3.3
 
 ### Changed

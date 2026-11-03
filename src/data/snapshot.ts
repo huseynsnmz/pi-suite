@@ -27,6 +27,9 @@ interface ContextInfo {
 	window: number;
 }
 
+/** pi-sandbox sets this while it's on, and empties it when it goes off. */
+export const SANDBOX_STATUS = "sandbox";
+
 export interface Snapshot {
 	now: number;
 	cwd: string;
@@ -51,6 +54,8 @@ export interface Snapshot {
 	run: RunView | undefined;
 	averages: Averages;
 	statuses: ReadonlyMap<string, string>;
+	/** Whether pi-sandbox is confining commands. Undefined when it isn't installed. */
+	sandbox: "on" | "off" | undefined;
 	/** When a board feature keeps it. */
 	board: Board | undefined;
 	/** When a peers feature keeps them. */
@@ -85,6 +90,7 @@ export function emptySnapshot(): Snapshot {
 		run: undefined,
 		averages: { decode: undefined, prefill: undefined },
 		statuses: new Map(),
+		sandbox: undefined,
 		board: undefined,
 		peers: [],
 		peersRooms: [],
@@ -101,6 +107,7 @@ export interface LiveInputs {
 	last: RequestView | undefined;
 	run: RunView | undefined;
 	statuses: ReadonlyMap<string, string>;
+	sandboxInstalled?: boolean;
 	board?: Board | undefined;
 	me?: { handle: string; color?: string } | undefined;
 	peers?: PeerMark[] | undefined;
@@ -157,6 +164,7 @@ export class SnapshotReader {
 					.map(([key, text]): [string, string] => [key, sanitize(text)])
 					.filter(([, text]) => text !== ""),
 			),
+			sandbox: !live.sandboxInstalled ? undefined : live.statuses.get(SANDBOX_STATUS) ? "on" : "off",
 			board: live.board,
 			peers: live.peers ?? [],
 			peersRooms: live.peersRooms ?? [],

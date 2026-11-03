@@ -1,6 +1,7 @@
 import { skillQueryAt } from "@adeildo/pi-kit";
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import {
+	matchesKey,
 	type EditorTheme,
 	type TUI,
 	type TuiMouseEvent,
@@ -11,6 +12,7 @@ import {
 
 import type { Piece } from "../render/fit.ts";
 import { BOXES, border } from "../render/frame.ts";
+import { SETTINGS_KEY, SETTINGS_SHORTCUT_INPUT } from "../render/keys.ts";
 import type { CursorStyle } from "../settings.ts";
 import { type Screen, type SlotName, slotPieces } from "./screen.ts";
 
@@ -69,6 +71,10 @@ export class FrameEditor extends CustomEditor {
 	override handleInput(data: string): void {
 		if (this.#keybindings.matches(data, "app.clear") && !this.isShowingAutocomplete()) {
 			this.#screen.interrupt(() => this.setText(""));
+			return;
+		}
+		if (matchesKey(data, SETTINGS_KEY)) {
+			super.handleInput(SETTINGS_SHORTCUT_INPUT);
 			return;
 		}
 		const before = this.getText();
