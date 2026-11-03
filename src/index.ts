@@ -27,7 +27,7 @@ import { keyText } from "@earendil-works/pi-coding-agent";
 import { Key, type KeyId, type TUI } from "@earendil-works/pi-tui";
 
 import { type GitState, readGit } from "./data/git.ts";
-import { cmdAsKey, SETTINGS_SHORTCUT, watchCmdKey } from "./render/keys.ts";
+import { cmdAsKey, optionSAsAlt, SETTINGS_SHORTCUT, watchCmdKey } from "./render/keys.ts";
 import { frameColorOf } from "./data/mode.ts";
 import { type GithubState, readGithub } from "./data/github.ts";
 import { emptySnapshot, type LiveInputs, type Snapshot, SnapshotReader } from "./data/snapshot.ts";
@@ -172,7 +172,8 @@ export const frameFeature = defineFeature({
 
 			stopCmdKeys?.();
 			stopCmdKeys = ctx.ui.onTerminalInput((data) => {
-				const key = cmdAsKey(data);
+				const option = optionSAsAlt(data);
+				const key = option !== undefined && sandboxInstalled(scope) ? option : cmdAsKey(data);
 				return key === undefined ? undefined : { data: key };
 			});
 
@@ -373,7 +374,7 @@ function createScreen(
 				last: telemetry.last(),
 				run: telemetry.run(),
 				statuses: live.footerData?.getExtensionStatuses() ?? new Map(),
-				sandboxInstalled: scope.getCommands().some((command) => command.name === "sandbox-enable"),
+				sandboxInstalled: sandboxInstalled(scope),
 				...boardAndPeersOf(scope),
 			});
 			live.frame = snapshot;
@@ -507,6 +508,10 @@ function installHeader(
 				tui,
 			),
 	);
+}
+
+function sandboxInstalled(pi: ExtensionAPI): boolean {
+	return pi.getCommands().some((command) => command.name === "sandbox-enable");
 }
 
 function loadedCounts(pi: ExtensionAPI): LoadedCounts {

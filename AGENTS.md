@@ -14,6 +14,7 @@ Describe it neutrally as a fork of `@adeildo/pi-look`. Don't compare the two or 
 
 - `Alt+S` belongs to `pi-sandbox`, which can't be rebound. The settings screen asks for it from `pi-kit`, so `withSettingsKey` in `src/index.ts` moves that request.
 - Settings open with `Ctrl+S`, but the shortcut isn't registered on it. Pi warns at every start about a shortcut on `Ctrl+S`, since its pickers use that key, so `src/ui/editor.ts` passes the key on to a private shortcut. The private key is sent in kitty form, because the legacy form doesn't match once the kitty protocol is on.
+- On a Mac, `Option+S` types `ß` unless the terminal sends Option as Alt. With `pi-sandbox` installed, `optionSAsAlt` turns that `ß` into `Alt+S`. Other Option keys stay as they are, because `ø` and friends are ordinary letters on some keyboards.
 - Before taking a key, check Pi's defaults and the other extensions. If two extensions want one, the last loaded wins and Pi warns.
 
 ## Testing

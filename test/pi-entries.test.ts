@@ -205,9 +205,9 @@ describe("what the start card takes over", () => {
 	});
 });
 
-test("an extension goes by its package's name", () => {
-	expect(extensionName("@gotgenes/pi-permission-system@42.0.0:src")).toBe("pi-permission-system");
-	expect(extensionName("pi-subagents@0.84.0:src/extension")).toBe("pi-subagents");
+test("an extension goes by its package's name and version", () => {
+	expect(extensionName("@gotgenes/pi-permission-system@42.0.0:src")).toBe("pi-permission-system@42.0.0");
+	expect(extensionName("pi-subagents@0.84.0:src/extension")).toBe("pi-subagents@0.84.0");
 	expect(extensionName("pi-frame/src")).toBe("pi-frame");
 	expect(extensionName("my-tool")).toBe("my-tool");
 });

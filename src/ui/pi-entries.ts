@@ -99,7 +99,7 @@ export function onLoadedListsChange(listener: () => void): void {
 export function extensionName(label: string): string {
 	return label
 		.replace(/^@[^/]+\//, "")
-		.replace(/(?:[@:]|\/src\b).*$/, "");
+		.replace(/(?::|\/src\b).*$/, "");
 }
 
 /** A section Pi shows as one line of names, and not yet expanded with Ctrl+O. */

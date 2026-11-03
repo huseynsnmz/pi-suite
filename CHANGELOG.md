@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.5
+
+### Changed
+
+- Option+S turns the sandbox on and off on a Mac even when the terminal types `ß`.
+- The extensions on the start card show their versions, like `pi-subagents@0.84.0`.
+- Updated `diff` to 9.0.0.
+
 ## 0.3.4
 
 ### Changed

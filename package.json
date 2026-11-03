@@ -1,6 +1,6 @@
 {
 	"name": "@huseynsnmz/pi-frame",
-	"version": "0.3.4",
+	"version": "0.3.5",
 	"description": "Pi's start screen, a framed editor, a box around every tool call and a session footer. A fork of @adeildo/pi-look.",
 	"keywords": [
 		"pi",
@@ -50,7 +50,7 @@
 	},
 	"dependencies": {
 		"@adeildo/pi-kit": "6.0.0",
-		"diff": "8.0.4"
+		"diff": "9.0.0"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
@@ -61,10 +61,10 @@
 		"@earendil-works/pi-ai": "1.5.0",
 		"@earendil-works/pi-coding-agent": "1.5.0",
 		"@earendil-works/pi-tui": "1.5.0",
-		"@types/bun": "1.3.1",
-		"@types/node": "24.13.3",
+		"@types/bun": "1.4.4",
+		"@types/node": "24.19.2",
 		"typebox": "1.3.27",
-		"typescript": "6.0.3"
+		"typescript": "7.0.2"
 	},
 	"pi": {
 		"extensions": [

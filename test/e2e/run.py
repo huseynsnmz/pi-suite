@@ -298,6 +298,8 @@ try:
     check("the card says ctrl+s for the settings", "ctrl+s settings" in plain)
     check("the card no longer lists effort", "effort" not in plain.split("settings")[0].splitlines()[-1])
     check("no shortcut conflict warnings", "shortcut conflict" not in plain.lower() and "conflicts with" not in plain.lower())
+    if SANDBOX:
+        check("the card gives an extension's version", "pi-sandbox@0.7.3" in plain)
     check("the sandbox key is on the card only with pi-sandbox", ("option+s sandbox" in plain or "alt+s sandbox" in plain) == SANDBOX)
     before = len(term.plain())
     os.write(term.fd, b"\x13")
@@ -313,6 +315,10 @@ try:
         check("the footer says the sandbox is off", "sandbox: off" in term.plain()[before:])
         os.write(term.fd, b"\x1bs")
         check("option+s turns it back on", term.wait("Sandbox enabled", 8))
+        os.write(term.fd, "ß".encode())
+        check("option+s works when the terminal just types ß", term.wait("Sandbox disabled", 8))
+        os.write(term.fd, "ß".encode())
+        term.wait("Sandbox enabled", 8)
 
     started = time.time()
     term.send("SLEEP")
