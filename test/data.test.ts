@@ -53,17 +53,46 @@ describe("telemetry", () => {
 		time.advance(4_000);
 		const record = telemetry.answerEnded(usage({ input: 100, cacheRead: 99_900, output: 800 }));
 
-		expect(record).toEqual({
+		expect(record).toMatchObject({
 			output: 800,
 			prompt: 100_000,
 			firstTokenMs: 2_000,
 			generationMs: 4_000,
+			totalMs: 6_000,
+			stallMs: 0,
 		});
 		const view = telemetry.request();
 		expect(view?.streaming).toBe(false);
 		expect(view?.prefill).toBe(50_000);
 		expect(view?.decode).toBe(200);
 		expect(view?.estimated).toBe(false);
+	});
+
+	test("times each response by its timestamp, while it's written and after a resume", () => {
+		const time = clock();
+		const telemetry = new Telemetry(time.now);
+		telemetry.requestStarted();
+		telemetry.providerRequestSent();
+		telemetry.answerStarted(77);
+		time.advance(500);
+		expect(telemetry.timingOf(77)).toMatchObject({ waitMs: undefined, waitingMs: 500, streaming: true });
+
+		telemetry.answerGrew("Hello", usage({}), "writing");
+		time.advance(3_000);
+		expect(telemetry.timingOf(77)?.stallMs).toBe(3_000);
+		telemetry.answerGrew("world", usage({}), "writing");
+		time.advance(1_000);
+		telemetry.answerGrew("again", usage({}), "writing");
+		const record = telemetry.answerEnded(usage({ output: 100 }));
+		const done = { waitMs: 500, totalMs: 4_500, writingMs: 4_000, stallMs: 3_000, output: 100, streaming: false };
+		expect(telemetry.timingOf(77)).toMatchObject(done);
+		expect(telemetry.timingOf(78)).toBeUndefined();
+
+		telemetry.reset();
+		expect(telemetry.timingOf(77)).toBeUndefined();
+		const data = { type: "custom", customType: "pi-frame:request", data: record };
+		telemetry.restore([data, { type: "custom", customType: "pi-frame:request", data: { output: 1 } }] as never);
+		expect(telemetry.timingOf(77)).toMatchObject(done);
 	});
 
 	test("estimates the live decode speed until the provider counts the tokens", () => {

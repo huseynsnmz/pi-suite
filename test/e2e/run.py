@@ -91,13 +91,13 @@ time.sleep(0.5)
 
 
 class Terminal:
-    def __init__(self, kitty=False):
+    def __init__(self, kitty=False, args=()):
         self.kitty = kitty
         self.answered = False
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(project)
-            os.execve(str(PI), [str(PI)], env)
+            os.execve(str(PI), [str(PI), *args], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 120, 0, 0))
         self.raw = ""
 
@@ -323,6 +323,22 @@ try:
         command("/sandbox-enable")
         check("/sandbox-enable turns it back on", term.wait("Sandbox enabled", 8))
 
+    CLOCK = r"\d\d:\d\d:\d\d\.\d{3}"
+    before = len(term.plain())
+    term.send("SLOW")
+    term.pump(0.4)
+    term.send("\r")
+    check("a response's line follows it while it's written", term.wait("slowfirst", 10))
+    term.pump(2.5)
+    check("the live line shows the stall", bool(re.search(CLOCK + r".*writing.*stall", term.plain()[before:])))
+    term.wait("slowlast", 10)
+    term.pump(1)
+    final = term.plain()[before:]
+    check("the final line has the clock, total and stall", bool(re.search(CLOCK + r"  ttft \S+  server \S+  total \d\.\d{3}s  stall", final)), final[-400:])
+    term.prompt("TOUCH")
+    term.pump(1)
+    check("a tool box has the clock and the time in ms", bool(re.search(CLOCK + r"  took \d+(?:ms|\.\d{3}s)", term.plain())))
+
     started = time.time()
     term.send("SLEEP")
     term.pump(0.4)
@@ -360,6 +376,11 @@ try:
         before = len(term.plain())
         os.write(term.fd, b"\x1b[115;9u")
         check("cmd+s opens the settings", term.wait("Frame", 8) and "Frame" in term.plain()[before:])
+    term.close()
+    term = Terminal(args=["--continue"])
+    term.wait("Mock", 40)
+    term.pump(3)
+    check("a resumed session keeps a response's timings", bool(re.search(CLOCK + r"  ttft \S+  server \S+  total \d\.\d{3}s  stall", term.plain())), term.plain()[-500:])
 finally:
     term.close()
     model.terminate()

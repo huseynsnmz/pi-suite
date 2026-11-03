@@ -52,6 +52,7 @@ import {
 	SEPARATOR,
 	SLOTS,
 	userFrame,
+	timing,
 } from "./settings.ts";
 import { applyCursor, FrameEditor } from "./ui/editor.ts";
 import { registerEffort } from "./ui/effort.ts";
@@ -60,6 +61,8 @@ import { PACKAGE_VERSION, HeaderComponent, type LoadedCounts } from "./ui/header
 import { EXIT_WINDOW_MS, type InterruptState, nextInterrupt } from "./ui/interrupt.ts";
 import { OutputView, outputsOf } from "./ui/outputs.ts";
 import { framePiEntries, loadedLists, onLoadedListsChange } from "./ui/pi-entries.ts";
+import { showTimings } from "./ui/timings.ts";
+import { timingLine } from "./render/timing.ts";
 import { frameQueue } from "./ui/queue.ts";
 import type { Screen, SlotName } from "./ui/screen.ts";
 import { registerToolFrames } from "./ui/tool-frame.ts";
@@ -129,6 +132,11 @@ export const frameFeature = defineFeature({
 				from: (text: string) => PROMPT_FROM.current(scope, text)?.name,
 			};
 		});
+		showTimings((message, width) => {
+			if (live.ctx === undefined || !timing.get(scope)) return undefined;
+			const line = timingLine(telemetry.timingOf(message.timestamp), message, width);
+			return live.ctx.ui.theme.fg("dim", line);
+		});
 		onLoadedListsChange(() => queueMicrotask(() => live.repaint?.()));
 		frameQueue(() => live.ctx?.ui.theme);
 		const repaint = () => {
@@ -167,6 +175,7 @@ export const frameFeature = defineFeature({
 		scope.onSessionStart((ctx) => {
 			live.ctx = ctx;
 			telemetry.reset();
+			telemetry.restore(ctx.sessionManager.getEntries());
 			void probeGit(live);
 			if (ctx.mode !== "tui") return;
 
@@ -249,7 +258,7 @@ export const frameFeature = defineFeature({
 		});
 
 		scope.on("message_start", (event) => {
-			if (event.message.role === "assistant") telemetry.answerStarted();
+			if (event.message.role === "assistant") telemetry.answerStarted(event.message.timestamp);
 		});
 
 		scope.on("message_update", (event) => {

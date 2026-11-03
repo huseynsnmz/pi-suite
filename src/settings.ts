@@ -90,4 +90,16 @@ export const userFrame = setting({
 	},
 });
 
-export const FRAME_SETTINGS = [icons, frame, userFrame];
+export const timing = setting({
+	id: "frame.timing",
+	default: true,
+	decoder: boolean,
+	ui: {
+		section: "Appearance",
+		label: "Timings",
+		description:
+			"A line under each response and on each tool box: when it started, to the millisecond, and how long it took.",
+	},
+});
+
+export const FRAME_SETTINGS = [icons, frame, userFrame, timing];

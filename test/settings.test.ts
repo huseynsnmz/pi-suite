@@ -10,6 +10,7 @@ test("only what depends on the terminal or on taste in lines is a setting", () =
 		"frame.icons",
 		"frame.style",
 		"frame.userFrame",
+		"frame.timing",
 	]);
 });
 

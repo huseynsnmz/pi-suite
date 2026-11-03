@@ -26,7 +26,8 @@ import { type IconSet, glyphsOf } from "../render/glyphs.ts";
 import { pathLine, type Stream, STREAMERS } from "../render/streaming.ts";
 import { styledText } from "../render/safe.ts";
 import { stateMark, toolIcon, toolLabel } from "../render/tools.ts";
-import { icons } from "../settings.ts";
+import { icons, timing } from "../settings.ts";
+import { clockTime, exactly } from "../render/timing.ts";
 
 type Phase = "writing" | "waiting" | "running" | "done" | "failed";
 
@@ -185,7 +186,7 @@ function framed(
 				quiet: blocked,
 				phase,
 				set: frame.set,
-				elapsed: ranFor(clock, phase === "running"),
+				elapsed: phase === "running" || !timing.get(scope) ? ranFor(clock, phase === "running") : tookFor(clock),
 				wrote: wroteFor(clock),
 				images: images === 0 ? undefined : `${images} image${images === 1 ? "" : "s"}`,
 			});
@@ -521,6 +522,12 @@ function ranFor(clock: Clock, running: boolean): string | undefined {
 	if (clock.startedAt === undefined) return undefined;
 	const end = clock.endedAt ?? (running ? Date.now() : undefined);
 	return end === undefined ? undefined : elapsed(end - clock.startedAt);
+}
+
+/** When a finished call started and how long it ran, to the millisecond. */
+function tookFor(clock: Clock): string | undefined {
+	if (clock.startedAt === undefined || clock.endedAt === undefined) return undefined;
+	return `${clockTime(clock.startedAt)}  took ${exactly(clock.endedAt - clock.startedAt)}`;
 }
 
 function timeOf(phase: Phase, clock: Clock): string | undefined {

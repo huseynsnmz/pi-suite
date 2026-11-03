@@ -15,6 +15,13 @@ export interface RequestRecord {
 	prompt: number;
 	firstTokenMs: number;
 	generationMs: number;
+	/** For the line under the response. Older records don't have them. */
+	at?: number;
+	messageAt?: number;
+	serverMs?: number;
+	thoughtMs?: number;
+	totalMs?: number;
+	stallMs?: number;
 }
 
 export const REQUEST_CHANGES = "pi-frame:request";

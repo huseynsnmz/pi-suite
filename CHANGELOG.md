@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.7
+
+### Added
+
+- A line under each response with when the call started, to the millisecond, the wait for the first token, server latency, thinking time, total time and speed. It updates while the response is written, names any stall of 2 seconds or more, and leaves stalls out of the speed.
+- Finished tool boxes show when they started and how long they took, to the millisecond.
+- A **Timings** setting in the Frame tab turns both off.
+
 ## 0.3.6
 
 ### Changed

@@ -37,6 +37,16 @@ createServer((req, res) => {
 		const last = body.messages?.at(-1);
 		if (last?.role === "tool") return reply(res, "FINISHED");
 		const text = typeof last?.content === "string" ? last.content : (last?.content ?? []).map((part) => part.text ?? "").join("");
+		if (text === "SLOW") {
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			chunk(res, { role: "assistant", content: "slowfirst " });
+			return setTimeout(() => {
+				chunk(res, { role: "assistant", content: "slowlast OK" });
+				chunk(res, {}, "stop");
+				res.write("data: [DONE]\n\n");
+				res.end();
+			}, 3_000);
+		}
 		return reply(res, SCRIPT[text] ? "" : "OK", SCRIPT[text]);
 	});
 }).listen(Number(port), "127.0.0.1");

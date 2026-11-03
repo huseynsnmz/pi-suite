@@ -133,13 +133,13 @@ describe("the frame around a tool call", () => {
 	test("leaves the cut out of a call with nothing to print", () => {
 		const { result } = whole(undefined, "");
 		expect(result.some((line) => /^\u251c\u2500+\u2524$/u.test(line))).toBe(false);
-		expect(result.at(-1)).toMatch(/^\u2570\u2500 \S+ done  6\.8s  wrote 2\.1s \u2500+\u256f$/);
+		expect(result.at(-1)).toMatch(/^\u2570\u2500 \S+ done  \d\d:\d\d:\d\d\.\d{3}  took 6\.800s  wrote 2\.1s \u2500+\u256f$/);
 	});
 
 	test("says the times on the bottom rule instead of inside the output", () => {
 		const { result } = whole(undefined, "583 pass\n\nTook 6.8s");
 		expect(result.some((line) => line.includes("Took"))).toBe(false);
-		expect(result.at(-1)).toMatch(/^\u2570\u2500 \S+ done  6\.8s  wrote 2\.1s \u2500+\u256f$/);
+		expect(result.at(-1)).toMatch(/^\u2570\u2500 \S+ done  \d\d:\d\d:\d\d\.\d{3}  took 6\.800s  wrote 2\.1s \u2500+\u256f$/);
 	});
 
 	test("says the phase while the call has nothing to show yet", () => {

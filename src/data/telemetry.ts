@@ -1,7 +1,11 @@
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+
+import { STALL_MS } from "../render/timing.ts";
 import {
 	emptyTotals,
 	perSecond,
 	promptOf,
+	REQUEST_CHANGES,
 	type RequestRecord,
 	type Totals,
 	usageTotals,
@@ -34,6 +38,23 @@ export interface RequestView {
 	estimated: boolean;
 }
 
+/** One call to the model, for the line under its response. */
+export interface Timing {
+	/** When it left. */
+	at: number;
+	streaming: boolean;
+	waitMs: number | undefined;
+	waitingMs: number;
+	serverMs: number | undefined;
+	thoughtMs: number | undefined;
+	totalMs: number;
+	writingMs: number;
+	/** Pauses of `STALL_MS` or more while it wrote. */
+	stallMs: number;
+	output: number;
+	estimated: boolean;
+}
+
 export interface RunView {
 	running: boolean;
 	elapsedMs: number;
@@ -48,8 +69,11 @@ interface Request {
 	firstTokenAt: number | undefined;
 	firstWritingAt: number | undefined;
 	endedAt: number | undefined;
+	messageAt?: number;
 	usage: Totals;
 	characters: number;
+	lastDeltaAt: number | undefined;
+	stallMs: number;
 }
 
 interface Run {
@@ -76,6 +100,9 @@ export class Telemetry {
 	#run: Run | undefined;
 	#request: Request | undefined;
 	#last: RequestView | undefined;
+	/** By the response's timestamp, which stays the same while it's written. */
+	#byMessage = new Map<number, Request>();
+	#restored = new Map<number, Timing>();
 	/** They arrive before the pi message they belong to. */
 	#sentAt: number | undefined;
 	#headersAt: number | undefined;
@@ -116,8 +143,12 @@ export class Telemetry {
 	}
 
 	/** Later requests of a turn: the next call after a tool ran. */
-	answerStarted(): void {
+	answerStarted(messageAt?: number): void {
 		if (this.#request === undefined || this.#request.endedAt !== undefined) this.#begin();
+		if (messageAt !== undefined && this.#request !== undefined) {
+			this.#byMessage.set(messageAt, this.#request);
+			this.#request.messageAt = messageAt;
+		}
 	}
 
 	answerGrew(delta: string, usage: UsageLike, kind: DeltaKind): void {
@@ -125,6 +156,10 @@ export class Telemetry {
 		if (request === undefined || request.endedAt !== undefined) return;
 		request.usage = usageTotals(usage);
 		if (delta.length === 0) return;
+		const grewAt = this.#now();
+		const gap = grewAt - (request.lastDeltaAt ?? grewAt);
+		if (gap >= STALL_MS) request.stallMs += gap;
+		request.lastDeltaAt = grewAt;
 		request.characters += delta.length;
 		request.firstTokenAt ??= this.#now();
 		if (kind === "writing") request.firstWritingAt ??= this.#now();
@@ -148,12 +183,46 @@ export class Telemetry {
 		const firstTokenAt = request.firstTokenAt ?? now;
 		const from = request.sentAt ?? request.startedAt;
 		this.#last = this.#view(request);
+		const timing = this.#timing(request);
 		return {
 			output: request.usage.output,
 			prompt: promptOf(request.usage),
 			firstTokenMs: firstTokenAt - from,
 			generationMs: now - firstTokenAt,
+			at: from,
+			messageAt: request.messageAt,
+			serverMs: span(request.sentAt, request.headersAt),
+			thoughtMs: timing.thoughtMs,
+			totalMs: now - from,
+			stallMs: request.stallMs,
 		};
+	}
+
+	timingOf(messageAt: number): Timing | undefined {
+		const request = this.#byMessage.get(messageAt);
+		return request === undefined ? this.#restored.get(messageAt) : this.#timing(request);
+	}
+
+	/** The calls an earlier run of this session recorded. */
+	restore(entries: readonly SessionEntry[]): void {
+		for (const entry of entries) {
+			if (entry.type !== "custom" || entry.customType !== REQUEST_CHANGES) continue;
+			const record = entry.data as Partial<RequestRecord> | undefined;
+			if (record?.messageAt === undefined || record.at === undefined) continue;
+			this.#restored.set(record.messageAt, {
+				at: record.at,
+				streaming: false,
+				waitMs: record.firstTokenMs,
+				waitingMs: record.firstTokenMs ?? 0,
+				serverMs: record.serverMs,
+				thoughtMs: record.thoughtMs,
+				totalMs: record.totalMs ?? 0,
+				writingMs: record.generationMs ?? 0,
+				stallMs: record.stallMs ?? 0,
+				output: record.output ?? 0,
+				estimated: false,
+			});
+		}
 	}
 
 	request(): RequestView | undefined {
@@ -181,6 +250,8 @@ export class Telemetry {
 		this.#run = undefined;
 		this.#request = undefined;
 		this.#last = undefined;
+		this.#byMessage.clear();
+		this.#restored.clear();
 		this.#sentAt = undefined;
 		this.#headersAt = undefined;
 	}
@@ -195,6 +266,8 @@ export class Telemetry {
 			endedAt: undefined,
 			usage: emptyTotals(),
 			characters: 0,
+			lastDeltaAt: undefined,
+			stallMs: 0,
 		};
 	}
 
@@ -204,6 +277,27 @@ export class Telemetry {
 		if (request === undefined || request.endedAt !== undefined) return;
 		request.sentAt = this.#sentAt;
 		request.headersAt = this.#headersAt;
+	}
+
+	#timing(request: Request): Timing {
+		const view = this.#view(request);
+		const end = request.endedAt ?? this.#now();
+		const from = request.sentAt ?? request.startedAt;
+		// While it's paused, the pause so far counts too.
+		const pause = request.endedAt === undefined ? end - (request.lastDeltaAt ?? end) : 0;
+		return {
+			at: from,
+			streaming: view.streaming,
+			waitMs: view.waitMs,
+			waitingMs: view.waitingMs,
+			serverMs: view.serverMs,
+			thoughtMs: view.thoughtMs,
+			totalMs: end - from,
+			writingMs: request.firstTokenAt === undefined ? 0 : end - request.firstTokenAt,
+			stallMs: request.stallMs + (pause >= STALL_MS ? pause : 0),
+			output: view.usage.output,
+			estimated: view.estimated,
+		};
 	}
 
 	#view(request: Request): RequestView {
