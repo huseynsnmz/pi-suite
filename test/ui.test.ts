@@ -1,0 +1,388 @@
+import { describe, expect, test } from "bun:test";
+
+import { type BoardOp, foldBoard } from "@adeildo/pi-kit";
+import {
+	type KeybindingsManager,
+	type ReadonlyFooterDataProvider,
+} from "@earendil-works/pi-coding-agent";
+import type { AutocompleteProvider, EditorTheme, TUI } from "@earendil-works/pi-tui";
+
+import { LookEditor } from "../src/ui/editor.ts";
+import { FooterComponent, StripComponent } from "../src/ui/footer.ts";
+import { halfBlocks, HeaderComponent } from "../src/ui/header.ts";
+import { draftedTool, describe as describeActivity } from "../src/ui/working.ts";
+import { plain, screen, snapshot, widths } from "./helpers.ts";
+
+function fakeTui(): TUI {
+	return {
+		terminal: { rows: 40, columns: 100, write: () => {} },
+		requestRender: () => {},
+		getShowHardwareCursor: () => false,
+		setShowHardwareCursor: () => {},
+	} as unknown as TUI;
+}
+
+const editorTheme: EditorTheme = {
+	borderColor: (text) => text,
+	selectList: {
+		selectedPrefix: (text) => text,
+		selectedText: (text) => text,
+		description: (text) => text,
+		scrollInfo: (text) => text,
+		noMatch: (text) => text,
+	},
+};
+
+function editor(
+	style: "rounded" | "line" | "off" = "rounded",
+	overrides: Parameters<typeof screen>[1] = {},
+) {
+	const keybindings = { matches: () => false } as unknown as KeybindingsManager;
+	return new LookEditor(
+		fakeTui(),
+		editorTheme,
+		keybindings,
+		screen(snapshot(), { frameStyle: () => style, ...overrides }),
+	);
+}
+
+/** A list that answers what `matches` lets through, and keeps what it was asked. */
+function recordingProvider(
+	asked: string[],
+	matches: (typed: string) => boolean = () => true,
+): AutocompleteProvider {
+	return {
+		getSuggestions: async (lines, line, col) => {
+			const typed = (lines[line] ?? "").slice(0, col);
+			asked.push(typed);
+			if (!matches(typed)) return null;
+			return { items: [{ value: "/skill:simplify", label: "skill:simplify" }], prefix: "/" };
+		},
+		applyCompletion: (lines, cursorLine, cursorCol) => ({ lines, cursorLine, cursorCol }),
+	};
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+const BACKSPACE = "\x7f";
+const ESCAPE = "\x1b";
+
+/** Each key waits for the list it asks for, as a person typing would. */
+async function press(view: LookEditor, ...keys: string[]): Promise<void> {
+	for (const key of keys) {
+		view.handleInput(key);
+		// oxlint-disable-next-line no-await-in-loop -- the next key lands on the list this one opened
+		await settle();
+	}
+}
+
+describe("skills in the editor", () => {
+	test("a slash further into the message opens the list", async () => {
+		const asked: string[] = [];
+		const view = editor("rounded", { skills: () => true });
+		view.setAutocompleteProvider(recordingProvider(asked));
+		view.setText("use ");
+		view.handleInput("/");
+		await settle();
+
+		expect(asked).toEqual(["use /"]);
+		expect(view.isShowingAutocomplete()).toBe(true);
+	});
+
+	test("deleting a character that matched nothing opens the list again", async () => {
+		const asked: string[] = [];
+		const view = editor("rounded", { skills: () => true });
+		view.setAutocompleteProvider(recordingProvider(asked, (typed) => !typed.endsWith("x")));
+		view.setText("use ");
+
+		await press(view, "/", "s", "x");
+		expect(view.isShowingAutocomplete()).toBe(false);
+
+		await press(view, BACKSPACE);
+		expect(view.isShowingAutocomplete()).toBe(true);
+
+		await press(view, "x", BACKSPACE, "i");
+		expect(asked.at(-1)).toBe("use /si");
+		expect(view.isShowingAutocomplete()).toBe(true);
+	});
+
+	test("escape keeps the list closed", async () => {
+		const asked: string[] = [];
+		const view = editor("rounded", { skills: () => true });
+		view.setAutocompleteProvider(recordingProvider(asked));
+		view.setText("use ");
+		await press(view, "/", ESCAPE);
+
+		expect(view.isShowingAutocomplete()).toBe(false);
+		expect(asked).toEqual(["use /"]);
+	});
+
+	test("with no skills feature, a slash is only a slash", async () => {
+		const asked: string[] = [];
+		const view = editor();
+		view.setAutocompleteProvider(recordingProvider(asked));
+		view.setText("use ");
+		view.handleInput("/");
+		await settle();
+
+		expect(asked).toEqual([]);
+	});
+
+	test("a skill you typed is drawn the way the screen colors it", () => {
+		const view = editor("rounded", {
+			decorate: (line) => line.replace("/skill:simplify", "<simplify>"),
+		});
+		view.setText("use /skill:simplify now");
+		expect(plain(view.render(60)[1] ?? "")).toContain("use <simplify> now");
+	});
+});
+
+describe("editor", () => {
+	test("draws a box of the exact width with the slots in its borders", () => {
+		const view = editor();
+		view.setText("hello");
+		const lines = view.render(60);
+
+		expect(widths(lines)).toEqual([60, 60, 60]);
+		expect(plain(lines[0] ?? "")).toMatch(/^╭─ main ─+ ~\/Projects\/pi-harness ─╮$/);
+		expect(plain(lines[1] ?? "")).toMatch(/^│ hello +│$/);
+		// At 60 columns the effort meter drops its label, and the context keeps everything.
+		expect(plain(lines[2] ?? "")).toBe(
+			"╰─ Anthropic/Opus 5.5 · |||||| ─ ctx 43% ###----- 431k/1M ─╯",
+		);
+		expect(plain(view.render(90)[2] ?? "")).toMatch(
+			/^╰─ Anthropic\/Opus 5\.5 · \|{6} high ─+ ctx 43% .* ─╯$/,
+		);
+	});
+
+	test("the second line lines up under the first", () => {
+		const view = editor();
+		view.setText("one\ntwo");
+		const lines = view.render(40).map(plain);
+		expect(lines[1]?.startsWith("│ one")).toBe(true);
+		expect(lines[2]?.startsWith("│ two")).toBe(true);
+	});
+
+	test("puts the working spinner after the branch, so the branch never moves", () => {
+		const view = editor();
+		view.setWorkingStatusIndicator({
+			renderInBorder: () => "* thinking",
+			renderSpinnerInBorder: () => "*",
+		} as unknown as Parameters<LookEditor["setWorkingStatusIndicator"]>[0]);
+		const [top] = view.render(80).map(plain);
+		expect(top).toMatch(/^╭─ main · \* thinking ─+ ~\/Projects\/pi-harness ─╮$/);
+	});
+
+	test("the line style keeps pi's two rules and writes into them", () => {
+		const view = editor("line");
+		view.setText("hi");
+		const lines = view.render(50).map(plain);
+		expect(lines[0]).toMatch(/^── main ─+ ~\/Projects\/pi-harness ──$/);
+		expect(lines[1]).toMatch(/^hi/);
+	});
+
+	test("off leaves pi's editor exactly as it is", () => {
+		const view = editor("off");
+		view.setText("hi");
+		const lines = view.render(30).map(plain);
+		expect(lines[0]).toBe("─".repeat(30));
+	});
+
+	test("clicks land on the text, not on the frame", () => {
+		const view = editor();
+		view.setText("abcdef");
+		view.render(40);
+		// Column 2 is the rail and its space: the first character.
+		view.handleMouse({
+			type: "click",
+			button: "left",
+			x: 4,
+			y: 1,
+			screenX: 4,
+			screenY: 1,
+			width: 40,
+			height: 3,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+		view.insertTextAtCursor?.("X");
+		expect(view.getText()).toBe("abXcdef");
+	});
+});
+
+function stripLines(data: ReturnType<typeof snapshot>): number {
+	return new StripComponent(screen(data, { slots: { stripRight: ["board"] } })).render(90).length;
+}
+
+/** A card being done, and the ones after it to do. */
+function boardOf(doing: string, ...todo: string[]) {
+	const ops: BoardOp[] = [
+		{ op: "add", title: doing, column: "doing", at: 1 },
+		...todo.map((title): BoardOp => ({ op: "add", title, at: 1 })),
+	];
+	return foldBoard(ops, "operator");
+}
+
+describe("strip and footer", () => {
+	test("the strip keeps its line before there is an answer, so the editor never jumps", () => {
+		expect(new StripComponent(screen()).render(80)).toEqual([""]);
+	});
+
+	test("the strip lines up with the text in the frame", () => {
+		const data = snapshot({ run: { running: false, elapsedMs: 9_000, requests: 1, cost: 0 } });
+		expect(new StripComponent(screen(data)).render(80).map(plain)).toEqual(["  answered in 0:09"]);
+	});
+
+	test("the board sits on the right of the strip when there is room, and under it when not", () => {
+		const board = boardOf("draw the strip");
+		const data = snapshot({
+			board,
+			run: { running: false, elapsedMs: 9_000, requests: 1, cost: 0 },
+		});
+		const strip = new StripComponent(screen(data, { slots: { stripRight: ["board"] } }));
+
+		const [wide = ""] = strip.render(100).map(plain);
+		expect(strip.render(100)).toHaveLength(1);
+		expect(wide).toMatch(/^ {2}answered in 0:09 +> draw the strip$/);
+		expect(wide).toHaveLength(98);
+
+		// Narrower than the room kept for the strip: the board gets its own line, on the left.
+		expect(strip.render(70).map(plain)).toEqual(["  answered in 0:09", "  > draw the strip"]);
+	});
+
+	test("on its own line a long step uses the whole width, and its words give way before its counts", () => {
+		// A card title has at most eight words, so the long one is made of long words.
+		const step = "verifying standalone lines truncate exceptionally lengthy deliverable titles";
+		const board = boardOf(step, "frame");
+		const strip = new StripComponent(
+			screen(snapshot({ board }), { slots: { stripRight: ["board"] } }),
+		);
+
+		expect(strip.render(100).map(plain)).toEqual(["", `  > ${step}  1 queued`]);
+		const [, cut = ""] = strip.render(60).map(plain);
+		expect(cut).toHaveLength(58);
+		expect(cut).toEndWith("...  1 queued");
+	});
+
+	test("beside a busy strip the board keeps its counts, and the strip gives way", () => {
+		const board = boardOf("draw the strip", "frame");
+		const busy = snapshot({
+			board,
+			run: { running: true, elapsedMs: 3_600_000, requests: 40, cost: 0 },
+			last: {
+				firstTokenMs: 6_600,
+				generationMs: 3_300,
+				output: 900,
+				prompt: 1000,
+				elapsedMs: 9_000,
+			} as never,
+		});
+		const [line = ""] = new StripComponent(screen(busy, { slots: { stripRight: ["board"] } }))
+			.render(100)
+			.map(plain);
+		expect(line).toEndWith("> draw the strip  1 queued");
+	});
+
+	test("the strip's width does not move the board between lines", () => {
+		const board = boardOf("draw the strip");
+		const idle = snapshot({ board });
+		const busy = snapshot({
+			board,
+			run: { running: true, elapsedMs: 3_600_000, requests: 40, cost: 0 },
+		});
+		expect(stripLines(idle)).toBe(stripLines(busy));
+	});
+
+	test("the footer carries the frame slots when the frame is off", () => {
+		const data = snapshot({
+			totals: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 1.5 },
+		});
+		const footerData = {
+			onBranchChange: () => () => {},
+		} as unknown as ReadonlyFooterDataProvider;
+		const hooks = { attach: () => {}, detach: () => {} };
+
+		const framed = new FooterComponent(fakeTui(), footerData, screen(data), hooks);
+		expect(framed.render(80).map(plain)).toEqual(["  $1.500 this session"]);
+
+		const bare = new FooterComponent(
+			fakeTui(),
+			footerData,
+			screen(data, { frameStyle: () => "off" }),
+			hooks,
+		);
+		const lines = bare.render(80).map(plain);
+		expect(lines).toHaveLength(3);
+		expect(lines[0]).toMatch(/^ main +~\/Projects\/pi-harness$/);
+		expect(widths(lines).every((width) => width <= 80)).toBe(true);
+	});
+});
+
+describe("header", () => {
+	const source = {
+		style: () => "card" as const,
+		counts: () => ({ tools: 14, skills: 9, prompts: 0, extensions: 7 }),
+		lastVisit: () => undefined,
+	};
+
+	test("draws the π, the folder and the model, and says when nothing waits on you", () => {
+		const lines = new HeaderComponent(screen(), source).render(100).map(plain);
+		expect(lines[0]).toMatch(/^╭─ π-harness \S+ ─+ pi \S+ ─╮$/);
+		expect(lines.some((line) => line.includes("▀▀▀██▀▀▀▀██▀▀▀"))).toBe(true);
+		expect(lines.some((line) => line.includes("Anthropic/Opus 5.5"))).toBe(true);
+		expect(lines.some((line) => line.includes("First session in this folder."))).toBe(true);
+		expect(lines.findLast(Boolean)).toMatch(/^╰─ ready when you are +\/ commands/);
+		expect(widths(lines.filter(Boolean)).every((width) => width === 100)).toBe(true);
+	});
+
+	test("lists what changed since the last session, and counts it in the bottom edge", () => {
+		const last = { at: Date.now() - 60_000, version: "0.0.1" };
+		const lines = new HeaderComponent(screen(), { ...source, lastVisit: () => last })
+			.render(100)
+			.map(plain);
+		expect(lines.some((line) => /π-harness \S+ is new +was 0\.0\.1/.test(line))).toBe(true);
+		expect(lines.findLast(Boolean)).toMatch(/^╰─ 1 thing since .+ \/ commands/);
+	});
+
+	test("the π rises from its feet once, when there is a terminal to redraw it", () => {
+		const frames: number[] = [];
+		const header = new HeaderComponent(screen(), source, { requestRender: () => frames.push(1) });
+		const lines = header.render(100).map(plain);
+		// Only the feet are lit right away.
+		expect(lines.some((line) => line.includes("▀▀▀██▀▀▀▀██▀▀▀"))).toBe(false);
+		expect(lines.some((line) => line.includes("██"))).toBe(true);
+	});
+
+	test("drops the logo before the information", () => {
+		const lines = new HeaderComponent(screen(), source).render(56).map(plain);
+		expect(lines.some((line) => line.includes("██"))).toBe(false);
+		expect(lines.some((line) => line.includes("Anthropic/Opus 5.5"))).toBe(true);
+	});
+
+	test("plain lines when compact", () => {
+		const lines = new HeaderComponent(screen(), { ...source, style: () => "compact" }).render(120);
+		expect(plain(lines[0] ?? "")).toContain("π-harness");
+		expect(plain(lines[1] ?? "")).toContain("First session in this folder.");
+	});
+
+	test("the logo is drawn from pixels, two per row", () => {
+		expect(halfBlocks(["#.#", "##."])).toEqual(["█▄▀"]);
+	});
+});
+
+describe("working line", () => {
+	test("names the state, in lower case, and never repeats the call", () => {
+		expect(describeActivity({ kind: "waiting" })).toBe("waiting");
+		expect(describeActivity({ kind: "thinking" })).toBe("thinking");
+		expect(describeActivity({ kind: "writing" })).toBe("writing");
+		expect(describeActivity({ kind: "drafting", tool: "Bash" })).toBe("drafting bash");
+		expect(describeActivity({ kind: "running", tool: "edit" })).toBe("running edit");
+	});
+
+	test("the drafted tool is the call the model is writing last", () => {
+		expect(draftedTool([{ type: "text" }, { type: "toolCall", name: "read" }])).toBe("read");
+		expect(draftedTool([{ type: "toolCall", name: "read" }, { type: "text" }])).toBeUndefined();
+		expect(draftedTool("not content")).toBeUndefined();
+	});
+});
