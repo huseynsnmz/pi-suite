@@ -54,6 +54,8 @@ More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/
 
 **`pi-sandbox`:** the start card shows `/sandbox-disable` or `/sandbox-enable`, and the bottom line shows `sandbox: on` or `sandbox: off` after the mode. Its longer status moves to `/sandbox`.
 
+**`pi-cloak`:** no changes are needed. Tool boxes, `Alt+O` and the session file all show the masked text, and the automated run covers it.
+
 **`pi-permission-system`, `pi-permission-classifier`:** no conflicts were found, and the automated run covers them together with `pi-modes`.
 
 **`pi-claude-code-ui`:** it also draws tool calls, so list it above pi-frame in `packages`. `pi install` adds packages last, so this is the order you get if you install pi-frame second. Even then, it draws a call to a tool that doesn't exist outside pi-frame's box, so escape sequences in that call's arguments still reach the terminal. In the other order, or with `pi-claude-code-ui` alone, arguments of real tools leak too. To close this, remove `pi-claude-code-ui`.

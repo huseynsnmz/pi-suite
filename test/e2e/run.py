@@ -56,6 +56,10 @@ if any("pi-permission-system" in p for p in EXTRA):
 
 
 (project / "AGENTS.md").write_text("Be brief.\n")
+CLOAK = any("pi-cloak" in p for p in [*EXTRA, *AFTER])
+SECRET = "sk-e2e-hunter2-secret"
+if CLOAK:
+    (agent / "cloak.json").write_text(json.dumps({"patterns": [{"filePattern": ["**/.env", "**/.env.*"], "cloakPattern": {"pattern": "^([A-Z0-9_]+)=(.+)$", "replace": "$1="}}]}))
 
 
 def git(*args, cwd=project):
@@ -323,6 +327,21 @@ try:
         command("/sandbox-enable")
         check("/sandbox-enable turns it back on", term.wait("Sandbox enabled", 8))
 
+    if CLOAK:
+        (project / ".env").write_text(f"API_KEY={SECRET}\n")
+        for prompt in ("CATENV", "READENV"):
+            term.prompt(prompt)
+            term.pump(1.5)
+        os.write(term.fd, b"\x1bo")
+        term.pump(1.5)
+        os.write(term.fd, b"\x1b")
+        term.pump(0.5)
+        sessions = "".join(path.read_text() for path in (agent / "sessions").rglob("*.jsonl"))
+        check("pi-cloak: the mask reaches the screen", "API_KEY=****" in term.plain())
+        check("pi-cloak: the secret never reaches the screen", SECRET not in term.raw)
+        check("pi-cloak: the secret never reaches the session file", SECRET not in sessions and "API_KEY=****" in sessions)
+        check("pi-cloak: no warning at the start", "pi-cloak config" not in term.plain() and "pi-cloak failed" not in term.plain())
+        (project / ".env").unlink()
     CLOCK = r"\d\d:\d\d:\d\d\.\d{3}"
     before = len(term.plain())
     term.send("SLOW")

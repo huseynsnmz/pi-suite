@@ -27,6 +27,8 @@ const SCRIPT = {
 	CUSTOM: { name: "no_such_tool", args: { note: "x\u001b]0;CUSTOMTITLE\u0007\u001b[2Jy" } },
 	TOUCH: { name: "bash", args: { command: "true" } },
 	SLEEP: { name: "bash", args: { command: "sleep 20" } },
+	CATENV: { name: "bash", args: { command: "cat .env" } },
+	READENV: { name: "read", args: { path: ".env" } },
 };
 
 createServer((req, res) => {
