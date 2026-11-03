@@ -91,6 +91,10 @@ npm run e2e        # with the five packages it was built for, in both load order
 
 `npm run e2e` installs those packages from npm with scripts disabled, then starts them.
 
+## Contributing
+
+Issues are welcome, and pull requests are turned off. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT
