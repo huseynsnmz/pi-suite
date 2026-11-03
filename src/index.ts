@@ -27,6 +27,7 @@ import { keyText } from "@earendil-works/pi-coding-agent";
 import { Key, type TUI } from "@earendil-works/pi-tui";
 
 import { type GitState, readGit } from "./data/git.ts";
+import { cmdAsAlt, watchCmdKey } from "./render/keys.ts";
 import { frameColorOf } from "./data/mode.ts";
 import { type GithubState, readGithub } from "./data/github.ts";
 import { emptySnapshot, type LiveInputs, type Snapshot, SnapshotReader } from "./data/snapshot.ts";
@@ -159,11 +160,20 @@ export const frameFeature = defineFeature({
 			handler: (ctx) => openOutputs(ctx),
 		});
 
+		let stopCmdKeys: (() => void) | undefined;
+		watchCmdKey(() => live.tui?.terminal.kittyProtocolActive === true);
+
 		scope.onSessionStart((ctx) => {
 			live.ctx = ctx;
 			telemetry.reset();
 			void probeGit(live);
 			if (ctx.mode !== "tui") return;
+
+			stopCmdKeys?.();
+			stopCmdKeys = ctx.ui.onTerminalInput((data) => {
+				const alt = cmdAsAlt(data);
+				return alt === undefined ? undefined : { data: alt };
+			});
 
 			ctx.ui.setFooter(
 				(tui, _theme, data) =>
@@ -206,6 +216,8 @@ export const frameFeature = defineFeature({
 		});
 
 		scope.onShutdown(() => {
+			stopCmdKeys?.();
+			stopCmdKeys = undefined;
 			stopTicking(live);
 			const ctx = live.ctx;
 			if (ctx?.mode === "tui") {

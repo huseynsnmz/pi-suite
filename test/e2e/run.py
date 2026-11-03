@@ -88,7 +88,9 @@ time.sleep(0.5)
 
 
 class Terminal:
-    def __init__(self):
+    def __init__(self, kitty=False):
+        self.kitty = kitty
+        self.answered = False
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(project)
@@ -105,10 +107,17 @@ class Terminal:
                 except OSError:
                     return
 
+    def answer_kitty(self):
+        # What a terminal with the kitty keyboard protocol says when asked.
+        if self.kitty and not self.answered and "\x1b[?u" in self.raw:
+            self.answered = True
+            os.write(self.fd, b"\x1b[?1u")
+
     def wait(self, text, timeout=30):
         end = time.time() + timeout
         while time.time() < end:
             self.pump(0.2)
+            self.answer_kitty()
             if text in self.plain():
                 return True
         return False
@@ -295,6 +304,21 @@ try:
     term.send("\x03")
     term.pump(3)
     check("the second press exits", not alive())
+
+    if sys.platform == "darwin":
+        term = Terminal(kitty=True)
+        term.wait("Mock", 40)
+        term.pump(3)
+        term.answer_kitty()
+        term.pump(2)
+        term.send("x")
+        term.pump(2)
+        os.write(term.fd, b"\x1b[127u")
+        term.pump(1.5)
+        check("with the kitty protocol, the card says cmd+s", "cmd+s settings" in term.plain())
+        before = len(term.plain())
+        os.write(term.fd, b"\x1b[115;9u")
+        check("cmd+s opens the settings", term.wait("Frame", 8) and "Frame" in term.plain()[before:])
 finally:
     term.close()
     model.terminate()

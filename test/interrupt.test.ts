@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
-import { keyLabel } from "../src/render/keys.ts";
+import { matchesKey } from "@earendil-works/pi-tui";
+
+import { cmdAsAlt, keyLabel } from "../src/render/keys.ts";
 import { EXIT_WINDOW_MS, nextInterrupt } from "../src/ui/interrupt.ts";
 
 describe("Ctrl+C", () => {
@@ -22,8 +24,17 @@ describe("Ctrl+C", () => {
 	});
 });
 
-test("key labels say Option on a Mac", () => {
-	expect(keyLabel("alt+s", "darwin")).toBe("option+s");
-	expect(keyLabel("alt+s", "linux")).toBe("alt+s");
-	expect(keyLabel("shift+tab", "darwin")).toBe("shift+tab");
+test("key labels name the key that works", () => {
+	expect(keyLabel("alt+s", "darwin", false)).toBe("option+s");
+	expect(keyLabel("alt+s", "darwin", true)).toBe("cmd+s");
+	expect(keyLabel("alt+g", "darwin", true)).toBe("option+g");
+	expect(keyLabel("alt+s", "linux", true)).toBe("alt+s");
+	expect(keyLabel("shift+tab", "darwin", true)).toBe("shift+tab");
+});
+
+test("Cmd+S arrives as Alt+S, and other Cmd keys stay out of it", () => {
+	expect(matchesKey(cmdAsAlt("\u001b[115;9u") ?? "", "alt+s")).toBe(true);
+	expect(matchesKey(cmdAsAlt("\u001b[111;9u") ?? "", "alt+o")).toBe(true);
+	expect(cmdAsAlt("\u001b[99;9u")).toBeUndefined();
+	expect(cmdAsAlt("s")).toBeUndefined();
 });

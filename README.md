@@ -17,14 +17,14 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.3.0
+   pi install npm:@huseynsnmz/pi-frame@0.3.1
    ```
 
 3. Restart Pi. The start card says `π-frame`.
 
 Your `pi-look` settings don't carry over. Press `Alt+S` and open the **Frame** tab to set them again.
 
-On a Mac, `Alt` is the Option key, and the start card says `option+s`. It needs "Use Option as Meta" in Terminal.app, or Left Option set to `Esc+` in iTerm2. Terminals don't receive `Cmd`, so `Cmd` can't be used here.
+On a Mac, `Alt` means the Option key, which needs "Use Option as Meta" in Terminal.app, or Left Option set to `Esc+` in iTerm2. In a terminal that uses the kitty keyboard protocol, such as Ghostty or kitty, `Cmd+S` and `Cmd+O` work too, and the start card says `cmd+s`. Others never pass `Cmd` to Pi, so the card says `option+s` there. A terminal that keeps `Cmd+S` for itself won't pass it on either.
 
 ## What you see
 

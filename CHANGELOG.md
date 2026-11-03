@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+### Added
+
+- `Cmd+S` and `Cmd+O` on a Mac, in a terminal with the kitty keyboard protocol, and the start card says so.
+
 ## 0.3.0
 
 ### Added
@@ -11,7 +17,7 @@
 ### Changed
 
 - What Pi loaded at startup (context, skills, prompts, extensions) is drawn in frames.
-- On a Mac, key hints say `option+` instead of `alt+`.
+- On a Mac, key hints say `option+` instead of `alt+`, or `cmd+` where it works: `Cmd+S` and `Cmd+O` in a terminal with the kitty keyboard protocol.
 - A status with no color of its own, like `perm-judge:`, is drawn dim like the rest of the footer.
 - When the start card's bottom edge is short of room, the key hints go before the count of what waits on you.
 
