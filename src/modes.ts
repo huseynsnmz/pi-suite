@@ -45,6 +45,17 @@ export function decideToolCall(mode: Mode, toolName: string, input: unknown): To
   return { action: "block", reason: `${mode} mode blocks ${toolName}. ${leave}` };
 }
 
+/**
+ * Makes a command safe to show in a dialog. Control and bidirectional characters
+ * become visible escapes, so a command can't hide or reorder what the user sees.
+ */
+export function displayCommand(command: string): string {
+  return command.replace(
+    /[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g,
+    (ch) => `\\u${(ch.codePointAt(0) as number).toString(16).padStart(4, "0")}`,
+  );
+}
+
 const PLAN_PROMPT = `Plan mode is on. Research and propose, but do not implement.
 - Do not edit files or change any state. write, edit, subagents and MCP tools are blocked.
 - Read-only shell commands run freely. Any other command asks the user first, so run one only if the plan depends on its result.

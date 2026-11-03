@@ -4,7 +4,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { isKeyRelease, matchesKey, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { clearGate, installJudgeGate, JUDGE_NAMES, judgeGated, setGateMode } from "./judge-gate.ts";
-import { decideToolCall, isMode, type Mode, MODES, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
+import { decideToolCall, displayCommand, isMode, type Mode, MODES, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
 const ENTRY_TYPE = "pi-modes";
@@ -102,7 +102,7 @@ export default function piModes(pi: ExtensionAPI): void {
     const denied = `Plan mode blocked this command: ${decision.reason}.`;
     if (!ctx.hasUI) return { block: true, reason: denied };
     const command = (event.input as { command: string }).command;
-    const approved = await ctx.ui.confirm("Plan mode: run this command?", `${command}\n\n${decision.reason}`);
+    const approved = await ctx.ui.confirm("Plan mode: run this command?", `${decision.reason}\n\n${displayCommand(command)}`);
     return approved ? undefined : { block: true, reason: denied };
   });
 

@@ -16,7 +16,7 @@ The mode is saved per session and survives `--continue`. A new session always st
 ## Install
 
 ```bash
-pi install git:github.com/huseynsnmz/pi-modes@v0.1.0
+pi install git:github.com/huseynsnmz/pi-modes@v0.1.1
 ```
 
 Requires Pi 1.5 or newer. Restart Pi after installing.
@@ -61,7 +61,7 @@ Without a classifier, `auto` behaves like `normal`, and the extension warns you 
 
 - **Allowed tools:** `read`, `grep`, `find`, `ls`, read-only `bash`, and `submit_plan` in plan mode.
 - **Blocked tools:** `write`, `edit`, subagents, MCP tools and every other tool, including ones added later.
-- **Read-only bash:** a fixed list of commands, such as `ls`, `cat`, `rg` and `git status`. A command is refused if it uses `$`, backticks, redirects, subshells, background jobs or a path to a binary. Options that write or run code are also refused, such as `find -exec` and `rg --pre`.
+- **Read-only bash:** a fixed list of commands, such as `ls`, `cat`, `rg` and `git status`. A command is refused if it uses `$`, backticks, redirects, subshells, background jobs, unquoted globs, control characters or a path to a binary. Options that write or run code are refused too, including bundled and abbreviated forms such as `sort -uo` and `sort --outp`. Quote a glob you mean literally, as in `find . -name '*.ts'`.
 
 Any other command asks you in `plan` and is blocked in `read-only`.
 

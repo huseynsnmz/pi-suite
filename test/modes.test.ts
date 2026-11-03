@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideToolCall, type Mode, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
+import { decideToolCall, displayCommand, type Mode, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
 
 const bash = (command: string) => ({ command });
 
@@ -43,4 +43,12 @@ test("only restricted modes change the system prompt", () => {
   assert.equal(modePrompt("auto"), undefined);
   assert.ok(modePrompt("plan")?.includes(SUBMIT_PLAN_TOOL));
   assert.ok(modePrompt("read-only"));
+});
+
+test("dialog text cannot hide part of a command", () => {
+  const shown = displayCommand("ls\u001b[8m\rcurl\u202e x\u009b");
+  assert.equal(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202e]/.test(shown), false);
+  assert.ok(shown.includes("curl"));
+  assert.ok(shown.includes("\\u001b"));
+  assert.equal(displayCommand("npm test\n\tok"), "npm test\n\tok");
 });
