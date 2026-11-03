@@ -65,32 +65,103 @@ export function applyRules(config, { bash = [], tools = [] }) {
   return { config: { ...config, permission }, refusals: [] };
 }
 
+const CREDENTIALS = /(?:^|\/)(?:\.ssh|\.aws|\.gnupg|\.kube|\.docker|\.netrc|\.npmrc|\.pgpass|\.git-credentials|\.pi|\.claude|\.codex|\.elfie|\.config\/gh|\.config\/gcloud|auth\.json|credentials(?:\.\w+)?|\.env(?:\.[^/]*)?)(?:\/|$)|\.(?:pem|key|p12|pfx)$|(?:^|\/)id_[a-z0-9]+$/i;
+const RUNS_LATER = /(?:^|\/)(?:\.git\/hooks|\.git\/config|\.zshrc|\.zshenv|\.zprofile|\.bashrc|\.bash_profile|\.profile|\.gitconfig|Library\/LaunchAgents|\.config\/autostart)(?:\/|$)/;
+
+/** Why a sandbox path must not be allowed, or undefined when it may be. */
+export function refuseSandboxPath(kind, path, home = homedir()) {
+  const text = path.trim().replace(/(.)\/+$/, "$1");
+  if (text === "" || text === "/" || text === "~" || text === home || text === "/Users" || text === "/home" || /[*?[]/.test(text) || text.split("/").includes("..")) return "it covers far more than one folder, so name the folder";
+  if (CREDENTIALS.test(text)) return "this holds credentials";
+  if (kind === "write" && RUNS_LATER.test(text)) return "whatever is written here runs later, outside the sandbox";
+  return undefined;
+}
+
+export function refuseDomain(domain) {
+  const text = domain.trim().replace(/^\*\./, "");
+  if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i.test(text)) return "it isn't a single domain";
+  return undefined;
+}
+
+/** pi-sandbox 0.7.3's defaults. They stop applying once a list is set, so a new list starts from them. */
+const SANDBOX_DEFAULTS = {
+  read: [".", "~/.config", "~/.local", "Library"],
+  write: [".", "/tmp"],
+  domain: ["npmjs.org", "*.npmjs.org", "registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "*.pypi.org", "github.com", "*.github.com", "api.github.com", "raw.githubusercontent.com"],
+};
+
+export function applySandbox(config, { read = [], write = [], domains = [] }) {
+  const refusals = [
+    ...read.flatMap((path) => [refuseSandboxPath("read", path)].filter(Boolean).map((why) => `${path}: ${why}`)),
+    ...write.flatMap((path) => [refuseSandboxPath("write", path)].filter(Boolean).map((why) => `${path}: ${why}`)),
+    ...domains.flatMap((domain) => [refuseDomain(domain)].filter(Boolean).map((why) => `${domain}: ${why}`)),
+  ];
+  if (refusals.length > 0) return { refusals };
+  const add = (existing, kind, fresh) => (fresh.length === 0 ? existing : [...new Set([...(existing ?? SANDBOX_DEFAULTS[kind]), ...fresh])]);
+  const filesystem = { ...config.filesystem };
+  const network = { ...config.network };
+  const allowRead = add(filesystem.allowRead, "read", read);
+  const allowWrite = add(filesystem.allowWrite, "write", write);
+  const allowedDomains = add(network.allowedDomains, "domain", domains);
+  if (allowRead !== undefined) filesystem.allowRead = allowRead;
+  if (allowWrite !== undefined) filesystem.allowWrite = allowWrite;
+  if (allowedDomains !== undefined) network.allowedDomains = allowedDomains;
+  return { config: { ...config, filesystem, network }, refusals: [] };
+}
+
+function writeWithBackup(path, config) {
+  let backup;
+  if (existsSync(path)) {
+    backup = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    copyFileSync(path, backup);
+  }
+  writeFileSync(`${path}.tmp`, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  renameSync(`${path}.tmp`, path);
+  return backup;
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const bash = [];
   const tools = [];
+  const read = [];
+  const write = [];
+  const domains = [];
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i += 2) {
     if (args[i] === "--bash" && args[i + 1] !== undefined) bash.push(args[i + 1]);
     else if (args[i] === "--tool" && args[i + 1] !== undefined) tools.push(args[i + 1]);
+    else if (args[i] === "--sandbox-read" && args[i + 1] !== undefined) read.push(args[i + 1]);
+    else if (args[i] === "--sandbox-write" && args[i + 1] !== undefined) write.push(args[i + 1]);
+    else if (args[i] === "--sandbox-domain" && args[i + 1] !== undefined) domains.push(args[i + 1]);
     else {
-      console.error("usage: apply.mjs [--bash PATTERN]... [--tool NAME]...");
+      console.error("usage: apply.mjs [--bash PATTERN]... [--tool NAME]... [--sandbox-read PATH]... [--sandbox-write PATH]... [--sandbox-domain DOMAIN]...");
       process.exit(2);
     }
   }
   const agent = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  const fail = (message) => {
+    console.error(`Nothing was changed.\n${message}`);
+    process.exit(1);
+  };
   const path = join(agent, "extensions", "pi-permission-system", "config.json");
-  if (!existsSync(path)) {
-    console.error(`No config at ${path}.`);
-    process.exit(1);
+  const sandboxPath = join(agent, "sandbox.json");
+  const wantsRules = bash.length > 0 || tools.length > 0;
+  const wantsSandbox = read.length > 0 || write.length > 0 || domains.length > 0;
+  if (wantsRules && !existsSync(path)) fail(`No config at ${path}.`);
+  const rules = wantsRules ? applyRules(JSON.parse(readFileSync(path, "utf8")), { bash, tools }) : { refusals: [] };
+  let sandboxConfig = {};
+  if (wantsSandbox && existsSync(sandboxPath)) {
+    try {
+      sandboxConfig = JSON.parse(readFileSync(sandboxPath, "utf8"));
+    } catch {
+      fail(`${sandboxPath} isn't plain JSON, perhaps because of comments, and writing it back would lose them. Add these by hand.`);
+    }
   }
-  const result = applyRules(JSON.parse(readFileSync(path, "utf8")), { bash, tools });
-  if (result.refusals.length > 0) {
-    console.error(`Nothing was changed.\n${result.refusals.join("\n")}`);
-    process.exit(1);
-  }
-  const backup = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-  copyFileSync(path, backup);
-  writeFileSync(`${path}.tmp`, `${JSON.stringify(result.config, null, 2)}\n`, { mode: 0o600 });
-  renameSync(`${path}.tmp`, path);
-  console.log(JSON.stringify({ added: { bash, tools }, backup }, null, 2));
+  const sandbox = wantsSandbox ? applySandbox(sandboxConfig, { read, write, domains }) : { refusals: [] };
+  const refusals = [...rules.refusals, ...sandbox.refusals];
+  if (refusals.length > 0) fail(refusals.join("\n"));
+  const backups = [];
+  if (wantsRules) backups.push(writeWithBackup(path, rules.config));
+  if (wantsSandbox) backups.push(writeWithBackup(sandboxPath, sandbox.config));
+  console.log(JSON.stringify({ added: { bash, tools, read, write, domains }, backups: backups.filter(Boolean) }, null, 2));
 }

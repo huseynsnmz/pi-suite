@@ -107,6 +107,62 @@ export function ranCommands(entries) {
   return commands;
 }
 
+const SANDBOX_BLOCKS = [
+  ["read", /^Sandbox: read access denied for "(.+)"$/],
+  ["write", /^Sandbox: write access denied for "(.+)" \(not in allowWrite\)$/],
+  ["domain", /^Network access to "(.+)" is blocked \(not in allowedDomains\)\.$/],
+];
+
+/**
+ * What pi-sandbox blocked, from one session's chat history. Paths in denyWrite are left out, since
+ * someone chose those. What the OS stopped has no clean path to allow, so it comes as examples.
+ */
+export function sandboxBlocks(entries) {
+  const blocks = [];
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.message?.role !== "toolResult" || !Array.isArray(entry.message.content)) continue;
+    const text = entry.message.content.map((part) => part.text ?? "").join("").trim();
+    if (entry.message.isError && entry.message.toolName === "bash" && text.includes("Operation not permitted")) {
+      const example = text.split("\n").find((line) => line.includes("Operation not permitted"));
+      blocks.push({ kind: "os", example, timestamp: entry.timestamp });
+    }
+    for (const [kind, shape] of SANDBOX_BLOCKS) {
+      const value = shape.exec(text)?.[1];
+      if (value !== undefined) blocks.push({ kind, value, timestamp: entry.timestamp });
+    }
+  }
+  return blocks;
+}
+
+/** Blocks grouped by what would have to be allowed, without what the config allows by now. */
+export function collectSandbox(blocks, config = {}) {
+  const allowed = {
+    read: config.filesystem?.allowRead ?? [],
+    write: config.filesystem?.allowWrite ?? [],
+    domain: config.network?.allowedDomains ?? [],
+  };
+  const groups = new Map();
+  let osBlocks = 0;
+  const osExamples = new Set();
+  let skipped = 0;
+  for (const { kind, value, example, timestamp } of blocks) {
+    if (kind === "os") {
+      osBlocks += 1;
+      if (osExamples.size < MAX_EXAMPLES && !SECRET.test(example)) osExamples.add(example.slice(0, 200));
+    } else if (SECRET.test(value)) skipped += 1;
+    else if (!allowed[kind].includes(value)) {
+      const group = groups.get(`${kind} ${value}`) ?? { kind, value, blocks: 0, days: new Set(), last: "" };
+      group.blocks += 1;
+      const at = String(timestamp ?? "");
+      if (at !== "") group.days.add(at.slice(0, 10));
+      if (at > group.last) group.last = at;
+      groups.set(`${kind} ${value}`, group);
+    }
+  }
+  const candidates = [...groups.values()].map((group) => ({ ...group, days: group.days.size })).sort((a, b) => b.blocks - a.blocks);
+  return { candidates, osBlocks, osExamples: [...osExamples], skipped };
+}
+
 function parseLog(text) {
   return text.split("\n").flatMap((line) => {
     try {
@@ -126,7 +182,16 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const permission = existsSync(configPath) ? (JSON.parse(readFileSync(configPath, "utf8")).permission ?? {}) : {};
   const sessions = join(agent, "sessions");
   const files = existsSync(sessions) ? readdirSync(sessions, { recursive: true }).map(String).filter((name) => name.endsWith(".jsonl")) : [];
-  const history = files.flatMap((name) => ranCommands(parseLog(readFileSync(join(sessions, name), "utf8"))));
+  const sessionEntries = files.map((name) => parseLog(readFileSync(join(sessions, name), "utf8")));
+  const history = sessionEntries.flatMap(ranCommands);
   const result = collect(logFound ? parseLog(readFileSync(logPath, "utf8")) : [], permission, history);
-  console.log(JSON.stringify({ logFound, ...result }, null, 2));
+  const sandboxPath = join(agent, "sandbox.json");
+  let sandboxConfig = {};
+  try {
+    if (existsSync(sandboxPath)) sandboxConfig = JSON.parse(readFileSync(sandboxPath, "utf8"));
+  } catch {
+    // Comments are allowed there. Already-allowed entries may show up, and apply won't add them twice.
+  }
+  const sandbox = collectSandbox(sessionEntries.flatMap(sandboxBlocks), sandboxConfig);
+  console.log(JSON.stringify({ logFound, ...result, sandbox }, null, 2));
 }

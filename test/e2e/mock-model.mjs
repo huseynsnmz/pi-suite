@@ -29,6 +29,7 @@ function scriptedCall(text, tools) {
   const off = tools.includes("yolo_bash");
   if (verb === "RUN") return { name: off ? "yolo_bash" : "bash", args: { command: arg } };
   if (verb === "WRITE") return off ? { name: "yolo_write", args: { file: arg, content: "x" } } : { name: "write", args: { path: arg, content: "x" } };
+  if (verb === "READ") return { name: "read", args: { path: arg } };
   if (verb === "SUBAGENT") return { name: "subagent", args: { agent: "scout", task: "x" } };
   if (verb === "PLAN") return { name: "submit_plan", args: { plan: "PLANBODY step one" } };
   return undefined;

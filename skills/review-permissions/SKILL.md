@@ -33,6 +33,16 @@ Give each candidate one rating. Read the examples, not only the pattern. The sug
   - reads secrets
   - a pattern so broad it covers these, like `git *` or `npm *`
 
+### What the sandbox blocked
+
+If `pi-sandbox` is in use, `sandbox.candidates` lists what it blocked, each a `read` path, a `write` path or a `domain`, with how often. These blocks may be the sandbox doing its job, so being blocked often is no reason to allow something. Rate them the same way:
+
+- **Recommend:** a folder or domain the user's normal work needs, such as a package registry or a sibling project to read.
+- **Your call:** write access outside the project, or a domain that accepts uploads. Any domain the sandbox allows can receive data, so say so.
+- **Don't add:** credentials, a whole home folder, paste or file-sharing sites, and anything you can't connect to the work.
+
+`sandbox.osBlocks` counts commands the OS stopped, with some of their errors in `sandbox.osExamples`. Some may be failures that have nothing to do with the sandbox. Mention the count, and if an example names a folder worth allowing, rate it like the others.
+
 ## 3. Present
 
 Show a table with the pattern, the rating, the approval count and a one-line reason. Group by rating. Mention each `Don't add` item with its reason, so the user sees it was considered.
@@ -44,6 +54,8 @@ Ask which rules to add, and wait for the answer. Then pass exactly those:
 ```bash
 node <skill-dir>/scripts/apply.mjs --bash 'npm test*' --bash 'git diff*' --tool 'grep'
 ```
+
+Sandbox choices go in the same way, with `--sandbox-read PATH`, `--sandbox-write PATH` and `--sandbox-domain DOMAIN`, and land in Pi's `sandbox.json`.
 
 The script keeps a backup next to the config, refuses unsafe patterns, and places new rules so that existing `deny` and `ask` rules keep winning. If it refuses a pattern, explain why instead of editing the config by hand.
 

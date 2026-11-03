@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyRules, refuseBash, refuseTool, withBashAllows } from "../skills/review-permissions/scripts/apply.mjs";
-import { collect, ranCommands, ruleFor, suggestPattern } from "../skills/review-permissions/scripts/collect.mjs";
+import { applyRules, applySandbox, refuseBash, refuseDomain, refuseSandboxPath, refuseTool, withBashAllows } from "../skills/review-permissions/scripts/apply.mjs";
+import { collect, collectSandbox, ranCommands, ruleFor, sandboxBlocks, suggestPattern } from "../skills/review-permissions/scripts/collect.mjs";
 
 const approved = (command, extra = {}) => ({ event: "permission_request.approved", resolution: "approved", decidedBy: { kind: "user", via: "dialog" }, surface: "bash", command, timestamp: "2026-11-03T10:00:00Z", ...extra });
 
@@ -111,4 +111,52 @@ test("one bad rule changes nothing", () => {
 test("a deny on a tool stays", () => {
   const { config } = applyRules({ permission: { grep: "deny", other: 1 }, authorizerChain: ["x"] }, { tools: ["grep", "find"] });
   assert.deepEqual(config, { permission: { grep: "deny", find: "allow", other: 1 }, authorizerChain: ["x"] });
+});
+
+const blocked = (text, timestamp = "2026-11-03T10:00:00Z") => ({ type: "message", timestamp, message: { role: "toolResult", content: [{ type: "text", text }] } });
+
+test("sandbox blocks group by what would be allowed, without what someone denied or allows now", () => {
+  const blocks = sandboxBlocks([
+    blocked('Sandbox: read access denied for "/work/other"'),
+    blocked('Sandbox: read access denied for "/work/other"', "2026-11-04T10:00:00Z"),
+    blocked('Sandbox: write access denied for "/out" (not in allowWrite)'),
+    blocked('Sandbox: write access denied for ".env" (in denyWrite). To change this, edit denyWrite in:\n  x'),
+    blocked('Network access to "pkg.example.com" is blocked (not in allowedDomains).'),
+    blocked('Network access to "old.example.com" is blocked (not in allowedDomains).'),
+    blocked('Sandbox: read access denied for "/home/me/token"'),
+    { type: "message", message: { role: "toolResult", toolName: "bash", isError: true, content: [{ type: "text", text: "touch: /out/x: Operation not permitted\n\nCommand exited with code 1" }] } },
+    blocked("this file mentions Operation not permitted"),
+    blocked('some file said Sandbox: read access denied for "/x"'),
+  ]);
+  const { candidates, osBlocks, osExamples, skipped } = collectSandbox(blocks, { network: { allowedDomains: ["old.example.com"] } });
+  assert.deepEqual(candidates.map((c) => [c.kind, c.value, c.blocks, c.days]), [["read", "/work/other", 2, 2], ["write", "/out", 1, 1], ["domain", "pkg.example.com", 1, 1]]);
+  assert.deepEqual([osBlocks, osExamples, skipped], [1, ["touch: /out/x: Operation not permitted"], 1]);
+});
+
+const refusedPaths = [["read", "/"], ["read", "~"], ["read", "/Users"], ["read", "/h/me", "/h/me"], ["read", "/h/*"], ["read", "../up"], ["read", "~/.ssh"], ["read", "~/.ssh/id_rsa"], ["read", "~/.aws/credentials"], ["read", "~/.pi/agent"], ["read", "/p/.env.local"], ["read", "/p/server.pem"], ["write", "/p/.git/hooks"], ["write", "~/.zshrc"], ["write", "~/Library/LaunchAgents"]];
+for (const [kind, path, home] of refusedPaths) test(`refuses ${kind} on ${path}`, () => assert.ok(refuseSandboxPath(kind, path, home)));
+
+test("allows an ordinary folder, and a hook folder only for reading", () => {
+  assert.equal(refuseSandboxPath("read", "~/work/other"), undefined);
+  assert.equal(refuseSandboxPath("write", "/tmp/build"), undefined);
+  assert.equal(refuseSandboxPath("read", "/p/.git/hooks"), undefined);
+});
+
+test("domains must be single domains", () => {
+  for (const bad of ["*", "*.com", "com", "a b.com", "https://x.com"]) assert.ok(refuseDomain(bad), bad);
+  for (const good of ["pkg.example.com", "*.example.com"]) assert.equal(refuseDomain(good), undefined);
+});
+
+test("a new sandbox list keeps the defaults, and only what was chosen changes", () => {
+  const { config } = applySandbox({ filesystem: { denyWrite: [".env"], allowWrite: ["."] } }, { read: ["~/work"], domains: ["pkg.example.com"] });
+  assert.ok(config.filesystem.allowRead.includes(".") && config.filesystem.allowRead.includes("~/work"));
+  assert.deepEqual(config.filesystem.allowWrite, ["."]);
+  assert.deepEqual(config.filesystem.denyWrite, [".env"]);
+  assert.ok(config.network.allowedDomains.includes("github.com") && config.network.allowedDomains.includes("pkg.example.com"));
+});
+
+test("one refused sandbox choice stops all of them", () => {
+  const { config, refusals } = applySandbox({}, { read: ["~/work", "~/.ssh"] });
+  assert.equal(config, undefined);
+  assert.equal(refusals.length, 1);
 });

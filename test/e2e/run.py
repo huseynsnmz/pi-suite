@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Drives real Pi in a real terminal with a fake model.
 
-Usage: run.py <solo|modes-first|modes-last|classifier-last>
+Usage: run.py <solo|modes-first|modes-last|classifier-last|sandbox>
 
   solo         only this extension
   modes-first  your five extensions, with this one loaded first
   modes-last   your five extensions, with this one loaded last
   classifier-last  this one first, and the classifier after the permission system
+  sandbox      this one first, then the permission system, the classifier and pi-sandbox.
+               Needs ripgrep on PATH.
 
 Everything lives in a throwaway home directory, so no real credentials are used.
 The modes-* runs install the third-party packages from npm with scripts disabled
@@ -26,6 +28,8 @@ THIRD_PARTY = [] if SOLO else [
     "npm:pi-claude-code-ui@1.0.107",
     "npm:@adeildo/pi-look@6.0.0",
 ]
+if ORDER == "sandbox":
+    THIRD_PARTY = [*THIRD_PARTY[:2], "npm:pi-sandbox@0.7.3"]
 if ORDER == "classifier-last":
     THIRD_PARTY[0], THIRD_PARTY[1] = THIRD_PARTY[1], THIRD_PARTY[0]
 PORT = 18000 + os.getpid() % 2000
@@ -59,6 +63,9 @@ for source in THIRD_PARTY:
 current = json.loads((agent / "settings.json").read_text())
 installed = current.get("packages", [])
 current["packages"] = installed + [str(REPO)] if ORDER in ("solo", "modes-last") else [str(REPO)] + installed
+WITH_FRAME = os.environ.get("PI_MODES_E2E_FRAME", "")
+if WITH_FRAME:
+    current["packages"].append(WITH_FRAME)
 (agent / "settings.json").write_text(json.dumps(current))
 print("load order:", [str(p).split("/")[-1] for p in current["packages"]], flush=True)
 env["PI_OFFLINE"] = "1"
@@ -167,11 +174,84 @@ def approve_dialog_if_first():
         term.send("y")
 
 
+class SandboxRunDone(Exception):
+    pass
+
+
 term = Terminal()
 try:
     term.wait(r"mode: normal", 40)
     term.pump(1.5)
     check("footer shows the mode", True)
+    if ORDER == "sandbox":
+        outside = home / "outside.txt"
+        term.prompt("RUN:touch inside.txt")
+        term.pump(3)
+        term.send("y")
+        term.wait("FINISHED", 15)
+        check("sandbox: a command in the project runs", (project / "inside.txt").exists())
+        ask_yolo()
+        term.wait("YOLO")
+        term.pump(0.5)
+        check("sandbox: yolo says it stays inside", "inside the sandbox" in term.text)
+        check("sandbox: no way to ignore deny rules", "ignore deny rules" not in term.text)
+        term.send("d")
+        term.pump(0.5)
+        check("sandbox: d does nothing", "IGNORED" not in term.text)
+        confirm_yolo()
+        check("sandbox: yolo starts", True)
+        mark = len(term.text)
+        term.prompt(f"RUN:touch {outside}")
+        term.until(lambda: "FINISHED" in term.text[mark:], "result", 20)
+        check("sandbox: yolo runs without a prompt", True)
+        check("sandbox: yolo can't write outside", not outside.exists())
+        mark = len(term.text)
+        term.prompt("RUN:touch denied.txt")
+        term.until(lambda: "FINISHED" in term.text[mark:], "result", 20)
+        check("sandbox: yolo keeps deny rules", not (project / "denied.txt").exists())
+        term.send("\x1bs")
+        term.wait("Sandbox disabled", 10)
+        term.pump(1)
+        if WITH_FRAME:
+            check("sandbox: pi-frame shows it off", "sandbox: off" in term.text[mark:])
+        term.prompt("RUN:touch after-off.txt")
+        term.wait("yolo ended", 15)
+        term.pump(2)
+        check("sandbox: with it off, yolo ends instead of running", not (project / "after-off.txt").exists())
+        mark = len(term.text)
+        ask_yolo()
+        term.wait("only runs inside the sandbox", 10)
+        check("sandbox: yolo is refused while it's off", True)
+        term.send("\x1bs")
+        term.wait("Sandbox enabled", 10)
+        term.pump(1)
+        # Enter would pick the first choice, which allows it. Esc keeps it blocked.
+        elsewhere = REPO / "README.md"
+        # The permission system asks about the last two first, and the sandbox only sees what it lets by.
+        for prompt, asks in ((f"READ:{elsewhere}", False), (f"WRITE:{outside}", True), ("RUN:curl -s https://blocked.example.test/x", True)):
+            mark = len(term.text)
+            term.prompt(prompt)
+            term.pump(3)
+            if asks:
+                term.send("y")
+                term.pump(3)
+            term.send("\x1b")
+            term.until(lambda: "FINISHED" in term.text[mark:], "result", 25)
+        check("sandbox: a refused write stays out", not outside.exists())
+        collected = subprocess.run(["node", str(REPO / "skills/review-permissions/scripts/collect.mjs")], env=env, capture_output=True, text=True, timeout=30)
+        sandbox = json.loads(collected.stdout)["sandbox"]
+        found = {(c["kind"], c["value"]) for c in sandbox["candidates"]}
+        for kind, value in (("read", str(elsewhere)), ("write", str(outside)), ("domain", "blocked.example.test")):
+            check(f"skill: sees the blocked {kind}", any(k == kind and (value in v or v in value) for k, v in found), str(sandbox))
+        check("skill: counts what the OS stopped", sandbox["osBlocks"] >= 1 and "Operation not permitted" in sandbox["osExamples"][0], str(sandbox))
+        folder = str(project / "sibling")
+        applied = subprocess.run(["node", str(REPO / "skills/review-permissions/scripts/apply.mjs"), "--sandbox-read", folder, "--sandbox-domain", "pkg.example.test"], env=env, capture_output=True, text=True, timeout=30)
+        written = json.loads((agent / "sandbox.json").read_text())
+        check("skill: allows choices in sandbox.json and keeps the defaults", applied.returncode == 0 and folder in written["filesystem"]["allowRead"] and "." in written["filesystem"]["allowRead"] and "github.com" in written["network"]["allowedDomains"], applied.stderr)
+        refused = subprocess.run(["node", str(REPO / "skills/review-permissions/scripts/apply.mjs"), "--sandbox-read", "~/.ssh"], env=env, capture_output=True, text=True, timeout=30)
+        check("skill: refuses credentials", refused.returncode == 1 and "credentials" in refused.stderr)
+        full_text = term.text
+        raise SandboxRunDone
     if not SOLO:
         term.send(SHIFT_TAB)
         term.wait(r"mode: auto")
@@ -376,6 +456,8 @@ try:
     term = Terminal()
     term.wait(r"mode: normal", 40)
     check("a new session starts in normal", True)
+except SandboxRunDone:
+    pass
 finally:
     term.close()
     model.terminate()

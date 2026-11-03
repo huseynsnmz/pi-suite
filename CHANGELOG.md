@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.2]
+
+### Changed
+
+- With `pi-sandbox` installed, yolo only runs inside the sandbox and always keeps deny rules on.
+
+### Added
+
+- The `review-permissions` skill lists what `pi-sandbox` blocked and adds your picks to `sandbox.json`.
+
 ## [0.2.1]
 
 ### Added

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { withAliases, withoutAliases } from "../src/deny-off.ts";
 import { decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
+import { borrowStatusReader, loadsFirst, sandboxInstalled, sandboxIsOn } from "../src/sandbox.ts";
 
 const bash = (command: string) => ({ command });
 
@@ -85,4 +86,29 @@ test("deny off swaps only the tools that are active, and puts them back", () => 
   assert.deepEqual(on.replaced, ["bash", "read"]);
   assert.deepEqual(withoutAliases(on.active, on.replaced).sort(), ["bash", "grep", "read"]);
   assert.deepEqual(withoutAliases(["read", "yolo_write"], []), ["read"]);
+});
+
+test("the sandbox counts as on only while its status says so, and is off with no way to read it", () => {
+  const reader = (text: string) => ({ getExtensionStatuses: () => new Map([["sandbox", text]]) });
+  assert.equal(sandboxIsOn(reader("locked")), true);
+  assert.equal(sandboxIsOn(reader("")), false);
+  assert.equal(sandboxIsOn({ getExtensionStatuses: () => new Map() }), false);
+  assert.equal(sandboxIsOn(undefined), false);
+  assert.equal(sandboxInstalled([{ name: "sandbox-enable" }]), true);
+  assert.equal(sandboxInstalled([{ name: "mode" }]), false);
+});
+
+test("reading the statuses leaves the footer as it found it, and needs to load first", () => {
+  const calls: string[] = [];
+  const data = { getExtensionStatuses: () => new Map() };
+  const reader = borrowStatusReader({
+    setFooter(factory) {
+      calls.push(factory === undefined ? "restored" : "set");
+      factory?.(undefined as never, undefined as never, data);
+    },
+  });
+  assert.equal(reader, data);
+  assert.deepEqual(calls, ["set", "restored"]);
+  for (const first of ["npm:@huseynsnmz/pi-modes@0.2.2", "/work/pi-modes", { source: "npm:@huseynsnmz/pi-modes" }]) assert.equal(loadsFirst([first, "x"]), true);
+  for (const packages of [["npm:pi-sandbox", "npm:@huseynsnmz/pi-modes"], [], undefined]) assert.equal(loadsFirst(packages), false);
 });

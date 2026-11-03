@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { borrowStatusReader, loadsFirst, sandboxInstalled, sandboxIsOn, type StatusReader } from "./sandbox.ts";
 import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
 import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "./judge-gate.ts";
 import { decideToolCall, displayCommand, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
@@ -32,7 +33,7 @@ function chainNamesJudge(): boolean {
  * Only Enter starts it, so no other key, like a stray y, can agree to it. Deny rules stay on
  * unless the user presses d. Undefined means cancelled.
  */
-async function confirmYolo(ctx: ExtensionContext, canIgnoreDeny: boolean): Promise<{ denyOff: boolean } | undefined> {
+async function confirmYolo(ctx: ExtensionContext, canIgnoreDeny: boolean, sandboxed: boolean): Promise<{ denyOff: boolean } | undefined> {
   let denyOff = false;
   const agreed = await ctx.ui.custom<boolean>((tui, theme, _keys, done) => ({
     invalidate() {},
@@ -55,7 +56,7 @@ async function confirmYolo(ctx: ExtensionContext, canIgnoreDeny: boolean): Promi
         "",
         denyOff
           ? red(theme.bold("Deny rules: IGNORED for bash, read, write and edit. Secrets you protected can be read."))
-          : `Deny rules: ${theme.bold("respected")}`,
+          : `Deny rules: ${theme.bold("respected")}${sandboxed ? `, and everything stays inside the ${theme.bold("sandbox")}` : ""}`,
         "",
         `${red(theme.bold("Enter"))} start   ${canIgnoreDeny ? `${theme.fg("dim", denyOff ? "d respect deny rules" : "d ignore deny rules")}   ` : ""}${theme.fg("dim", "Esc cancel")}`,
       ];
@@ -68,6 +69,14 @@ async function confirmYolo(ctx: ExtensionContext, canIgnoreDeny: boolean): Promi
 function loadOrderIsLate(): boolean {
   try {
     return loadsAfterPermissionSystem(JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")).packages);
+  } catch {
+    return false;
+  }
+}
+
+function packagesLoadThisFirst(): boolean {
+  try {
+    return loadsFirst(JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")).packages);
   } catch {
     return false;
   }
@@ -92,6 +101,7 @@ export default function piModes(pi: ExtensionAPI): void {
   let disposeYoloLink: (() => void) | undefined;
   let denyOff = false;
   let replacedTools: string[] = [];
+  let statuses: StatusReader | undefined;
 
   for (const tool of aliasDefinitions(() => mode === "yolo" && denyOff)) pi.registerTool(tool);
 
@@ -147,7 +157,13 @@ export default function piModes(pi: ExtensionAPI): void {
         ctx.ui.notify(`Yolo needs "${YOLO_LINK}" in authorizerChain in pi-permission-system's config.json, then a restart. See the README.`, "error");
         return;
       }
-      const agreed = await confirmYolo(ctx, hasPermissionSystem(ctx.sessionManager.getSessionId()));
+      // The tools that ignore deny rules can't reach the sandbox's bash, so they'd run outside it.
+      const sandboxed = sandboxInstalled(pi.getCommands());
+      if (sandboxed && !sandboxIsOn(statuses)) {
+        ctx.ui.notify("Yolo only runs inside the sandbox. Turn it on with /sandbox-enable. If it is on, move pi-modes first in packages in settings.json.", "error");
+        return;
+      }
+      const agreed = await confirmYolo(ctx, hasPermissionSystem(ctx.sessionManager.getSessionId()) && !sandboxed, sandboxed);
       if (agreed === undefined) return;
       denyOff = agreed.denyOff;
     }
@@ -157,6 +173,7 @@ export default function piModes(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     apply(restoredMode(ctx), ctx);
     if (ctx.mode === "tui") {
+      if (sandboxInstalled(pi.getCommands()) && packagesLoadThisFirst()) statuses = borrowStatusReader(ctx.ui as never);
       if (loadOrderIsLate()) {
         ctx.ui.notify(
           "pi-modes loads after pi-permission-system, so you may be asked to approve actions that are then blocked. Move it first in packages in settings.json.",
@@ -176,6 +193,7 @@ export default function piModes(pi: ExtensionAPI): void {
   pi.on("session_shutdown", (_event, ctx) => {
     stopListening?.();
     stopListening = undefined;
+    statuses = undefined;
     disposeYoloLink?.();
     disposeYoloLink = undefined;
     clearGate(ctx.sessionManager.getSessionId());
@@ -190,6 +208,11 @@ export default function piModes(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_call", async (event, ctx) => {
+    if (mode === "yolo" && sandboxInstalled(pi.getCommands()) && !sandboxIsOn(statuses)) {
+      change("normal", ctx);
+      if (ctx.hasUI) ctx.ui.notify("The sandbox went off, so yolo ended.", "warning");
+      return { block: true, reason: "Yolo ended because the sandbox is off." };
+    }
     const decision = decideToolCall(mode, event.toolName, event.input);
     if (decision.action === "allow") return undefined;
     if (decision.action === "block") return { block: true, reason: decision.reason };
