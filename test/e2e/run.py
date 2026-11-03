@@ -127,6 +127,8 @@ term = Terminal()
 try:
     check("starts", term.wait("Mock", 40))
     term.pump(3)
+    if PACKAGE == str(REPO):
+        check("the start card uses the new name", "\u03c0-frame" in term.plain())
     check("repository's fsmonitor does not run at startup", not marker.exists())
     check("no icon that needs a special font", not PRIVATE_USE.search(term.raw), repr(PRIVATE_USE.findall(term.raw)[:3]))
     check("gh is not started for a GitLab remote", not gh_log.exists())
