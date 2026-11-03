@@ -13,15 +13,33 @@ Switch [Pi](https://pi.dev) between permission modes with `Shift+Tab`.
 
 The mode is saved per session and survives `--continue`. A new session always starts in `normal`, and nothing in a project can change that.
 
-## Install
+## Quick start
 
-```bash
-pi install git:github.com/huseynsnmz/pi-modes@v0.1.2
-```
+Requires Pi 1.5 or newer.
 
-Requires Pi 1.5 or newer. Restart Pi after installing.
+1. Install it:
 
-**Load it first.** `pi install` adds packages to the end of `packages` in `~/.pi/agent/settings.json`. Move `pi-modes` above `@gotgenes/pi-permission-system`. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It's still blocked either way, and the extension warns you at startup.
+   ```bash
+   pi install npm:@huseynsnmz/pi-modes@0.1.3
+   ```
+
+2. Move it above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
+
+   ```bash
+   f=~/.pi/agent/settings.json
+   jq '.packages |= (map(select(tostring | contains("pi-modes"))) + map(select(tostring | contains("pi-modes") | not)))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+   ```
+
+3. If you use `pi-permission-system`, allow plans so you aren't asked twice:
+
+   ```bash
+   f=~/.pi/agent/extensions/pi-permission-system/config.json
+   jq '.permission.submit_plan = "allow"' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+   ```
+
+4. Restart Pi. The footer shows `mode: normal`, and `Shift+Tab` changes the mode.
+
+To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.1.3`.
 
 ## Commands
 
@@ -44,8 +62,6 @@ In plan mode the agent calls the `submit_plan` tool. You then choose one of:
 - **Approve, normal:** switches to `normal` and the agent starts implementing.
 - **Approve, auto:** switches to `auto` and the agent starts implementing.
 - **Keep planning:** stays in `plan` and sends your feedback to the agent.
-
-Set `submit_plan` to `allow` in your permission rules so you aren't asked twice.
 
 ## Using it with other extensions
 

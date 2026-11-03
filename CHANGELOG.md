@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3]
+
+### Changed
+
+- Published to npm as `@huseynsnmz/pi-modes`.
+- Added a quick start to the README.
+
 ## [0.1.2]
 
 ### Changed
