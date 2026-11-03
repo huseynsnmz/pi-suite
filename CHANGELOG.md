@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.2]
+
+### Changed
+
+- Warns at startup if this extension loads after `pi-permission-system`, which causes needless approval prompts in `plan` and `read-only`.
+
 ## [0.1.1]
 
 ### Security

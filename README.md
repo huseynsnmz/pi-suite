@@ -16,10 +16,12 @@ The mode is saved per session and survives `--continue`. A new session always st
 ## Install
 
 ```bash
-pi install git:github.com/huseynsnmz/pi-modes@v0.1.1
+pi install git:github.com/huseynsnmz/pi-modes@v0.1.2
 ```
 
 Requires Pi 1.5 or newer. Restart Pi after installing.
+
+**Load it first.** `pi install` adds packages to the end of `packages` in `~/.pi/agent/settings.json`. Move `pi-modes` above `@gotgenes/pi-permission-system`. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It's still blocked either way, and the extension warns you at startup.
 
 ## Commands
 

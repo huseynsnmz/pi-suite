@@ -4,7 +4,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { isKeyRelease, matchesKey, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { clearGate, installJudgeGate, JUDGE_NAMES, judgeGated, setGateMode } from "./judge-gate.ts";
-import { decideToolCall, displayCommand, isMode, type Mode, MODES, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
+import { decideToolCall, displayCommand, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
 const ENTRY_TYPE = "pi-modes";
@@ -17,6 +17,14 @@ function chainNamesJudge(): boolean {
     const path = join(getAgentDir(), "extensions", "pi-permission-system", "config.json");
     const chain: unknown = JSON.parse(readFileSync(path, "utf8")).authorizerChain;
     return Array.isArray(chain) && chain.some((name) => JUDGE_NAMES.has(name));
+  } catch {
+    return false;
+  }
+}
+
+function loadOrderIsLate(): boolean {
+  try {
+    return loadsAfterPermissionSystem(JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")).packages);
   } catch {
     return false;
   }
@@ -72,6 +80,12 @@ export default function piModes(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     apply(restoredMode(ctx), ctx);
     if (ctx.mode === "tui") {
+      if (loadOrderIsLate()) {
+        ctx.ui.notify(
+          "pi-modes loads after pi-permission-system, so you may be asked to approve actions that are then blocked. Move it first in packages in settings.json.",
+          "warning",
+        );
+      }
       stopListening = ctx.ui.onTerminalInput((data) => {
         if (!matchesKey(data, CYCLE_KEY)) return undefined;
         if (!isKeyRelease(data)) change(nextMode(mode), ctx);

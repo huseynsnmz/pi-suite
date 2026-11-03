@@ -135,11 +135,22 @@ def check(name, ok, detail=""):
 
 
 SHIFT_TAB = "\x1b[Z"
+# Loaded last, this extension's check runs after the permission system's dialog.
+DIALOG_FIRST = ORDER == "modes-last"
+
+
+def approve_dialog_if_first():
+    if DIALOG_FIRST:
+        term.pump(2)
+        term.send("y")
+
+
 term = Terminal()
 try:
     term.wait(r"mode: normal", 40)
     term.pump(1.5)
     check("footer shows the mode", True)
+    check("warns only when loaded after the permission system", ("loads after pi-permission-system" in term.text) == DIALOG_FIRST)
 
     term.prompt("RUN:touch normal.txt")
     if SOLO:
@@ -172,6 +183,7 @@ try:
     check("shift+tab switches to plan", True)
     before = judge_calls()
     term.prompt("WRITE:plan.txt")
+    approve_dialog_if_first()
     term.wait(r"plan mode blocks write")
     check("plan: write is blocked", not (project / "plan.txt").exists())
     check("plan: judge stays out", judge_calls() == before, f"judge={judge_calls()}")
@@ -181,6 +193,7 @@ try:
     term.pump(1)
 
     term.prompt("RUN:touch planask.txt")
+    approve_dialog_if_first()
     term.wait(r"Plan mode: run this command")
     term.pump(0.5)
     term.send("\x1b")
@@ -204,12 +217,16 @@ try:
     check("shift+tab reaches read-only", True)
     before = judge_calls()
     term.prompt("RUN:touch readonly.txt")
+    approve_dialog_if_first()
     term.wait(r"read-only mode blocked this command")
-    check("read-only: other bash is blocked with no prompt", not (project / "readonly.txt").exists())
+    check("read-only: other bash stays blocked", not (project / "readonly.txt").exists())
     check("read-only: judge stays out", judge_calls() == before, f"judge={judge_calls()}")
     term.pump(1)
-    term.prompt("RUN:pwd")
-    term.until(lambda: f"/{project.name}" in term.text, "pwd output")
+    term.prompt("RUN:echo READONLY_OK")
+    if not SOLO:
+        term.pump(2)
+        term.send("y")
+    term.wait(r"FINISHED READONLY_OK")
     check("read-only: read-only bash runs", True)
     term.pump(1)
     term.send(SHIFT_TAB)

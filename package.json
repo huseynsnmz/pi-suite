@@ -1,6 +1,6 @@
 {
   "name": "@huseynsnmz/pi-modes",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Shift+Tab permission modes for Pi: normal, auto, plan and read-only",
   "type": "module",
   "private": true,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideToolCall, displayCommand, type Mode, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
+import { decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
 
 const bash = (command: string) => ({ command });
 
@@ -52,3 +52,17 @@ test("dialog text cannot hide part of a command", () => {
   assert.ok(shown.includes("\\u001b"));
   assert.equal(displayCommand("npm test\n\tok"), "npm test\n\tok");
 });
+
+const loadOrder: Array<[string, unknown, boolean]> = [
+  ["loaded after the gate", ["npm:@gotgenes/pi-permission-system@42.0.0", "git:github.com/huseynsnmz/pi-modes@v1"], true],
+  ["loaded first", ["git:github.com/huseynsnmz/pi-modes@v1", "npm:@gotgenes/pi-permission-system@42.0.0"], false],
+  ["object form", [{ source: "npm:pi-permission-system" }, { source: "pi-modes" }], true],
+  ["no gate installed", ["pi-modes"], false],
+  ["settings without packages", undefined, false],
+];
+
+for (const [name, packages, late] of loadOrder) {
+  test(`load order: ${name}`, () => {
+    assert.equal(loadsAfterPermissionSystem(packages), late);
+  });
+}

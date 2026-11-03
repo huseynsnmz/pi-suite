@@ -56,6 +56,15 @@ export function displayCommand(command: string): string {
   );
 }
 
+/** True when Pi will run the permission system's dialog before this extension's check. */
+export function loadsAfterPermissionSystem(packages: unknown): boolean {
+  if (!Array.isArray(packages)) return false;
+  const names = packages.map((entry) => String((entry as { source?: unknown } | null)?.source ?? entry));
+  const self = names.findIndex((name) => name.includes("pi-modes"));
+  const gate = names.findIndex((name) => name.includes("pi-permission-system"));
+  return self !== -1 && gate !== -1 && self > gate;
+}
+
 const PLAN_PROMPT = `Plan mode is on. Research and propose, but do not implement.
 - Do not edit files or change any state. write, edit, subagents and MCP tools are blocked.
 - Read-only shell commands run freely. Any other command asks the user first, so run one only if the plan depends on its result.
