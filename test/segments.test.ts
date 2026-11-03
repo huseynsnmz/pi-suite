@@ -214,15 +214,15 @@ describe("segments", () => {
 		expect(piece?.text).toBe("sign in again");
 	});
 
-	test("the effort is a meter of six levels, filled up to the one in use", () => {
-		expect(text(["effort"])).toEqual(["|||||| high"]);
+	test("the effort is its level after a divider, with no meter", () => {
+		expect(text(["effort"])).toEqual(["|  high"]);
 		const painted = renderSegments(["effort"], {
-			snapshot: snapshot({ thinking: "medium" }),
-			glyphs: NERD,
-			paint: { ...PLAIN, effort: (level, bar) => `<${level}>${bar}`, dim: (bar) => `.${bar}` },
-			options,
+			snapshot: snapshot(),
+			glyphs: UNICODE,
+			paint: { ...PLAIN, effort: (level, word) => `<${level}>${word}`, dim: (rule) => `.${rule}` },
+			options: { pathLength: 40, gaugeCells: 8, labels: true, claimed: new Set() },
 		});
-		expect(painted[0]?.text).toBe("<minimal>▂<low>▃<medium>▄.▅.▆.▇ <medium>medium");
+		expect(painted[0]?.text).toBe(".│  <high>high");
 	});
 
 	test("a model that does not reason has no effort to show", () => {

@@ -35,7 +35,6 @@ export interface Glyphs {
 	stashed: string;
 	fill: string;
 	empty: string;
-	levels: readonly string[];
 	ellipsis: string;
 	/** Between the folder's agents and each shared room's. */
 	apart: string;
@@ -92,7 +91,6 @@ export const NERD: Glyphs = {
 	stashed: "\u{f01c}", // nf-fa-inbox
 	fill: "█",
 	empty: "░",
-	levels: ["▂", "▃", "▄", "▅", "▆", "▇"],
 	ellipsis: "...",
 };
 
@@ -123,7 +121,6 @@ export const UNICODE: Glyphs = {
 	stashed: "≡",
 	fill: "█",
 	empty: "░",
-	levels: ["▂", "▃", "▄", "▅", "▆", "▇"],
 	ellipsis: "...",
 };
 
@@ -167,7 +164,6 @@ export const ASCII: Glyphs = {
 	stashed: "s",
 	fill: "#",
 	empty: "-",
-	levels: ["|", "|", "|", "|", "|", "|"],
 	ellipsis: "...",
 };
 

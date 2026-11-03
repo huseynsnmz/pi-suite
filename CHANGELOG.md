@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0
+
+### Added
+
+- `/effort` picks the effort, and `/effort high` sets it directly.
+- With pi-modes, the editor frame's color follows the mode.
+
+### Changed
+
+- The effort shows as a divider and its level, without the meter.
+
+### Fixed
+
+- With pi-modes, the start card no longer says `shift+tab` changes the effort. It says `shift+tab mode`, and names `/effort` or your other effort key.
+
 ## 0.1.0
 
 First release, forked from `@adeildo/pi-look` 6.0.0.

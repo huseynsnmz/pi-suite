@@ -26,7 +26,7 @@ import {
 	UNKNOWN,
 } from "./format.ts";
 import type { Glyphs } from "./glyphs.ts";
-import { EFFORT_LEVELS, type Paint, type Role } from "./paint.ts";
+import type { Paint, Role } from "./paint.ts";
 import { styledText } from "./safe.ts";
 
 export const SEGMENT_IDS = [
@@ -313,17 +313,12 @@ export const SEGMENTS: Record<BuiltinSegment, Segment> = {
 	},
 	effort: {
 		priority: 80,
-		describe: "how hard the model thinks, as a meter that warms with the level",
+		describe: "how hard the model thinks, after a divider, in a color that warms with the level",
 		render: ({ snapshot, glyphs, paint }) => {
 			if (snapshot.model?.reasoning !== true) return undefined;
 			const level = snapshot.thinking ?? "off";
-			const reached = EFFORT_LEVELS.indexOf(level as (typeof EFFORT_LEVELS)[number]);
-			const meter = EFFORT_LEVELS.map((step, index) => {
-				const bar = glyphs.levels[index] ?? "|";
-				return index <= reached ? paint.effort(step, bar) : paint.dim(bar);
-			}).join("");
 			const label = level === "off" ? paint.dim(level) : paint.effort(level, level);
-			return { text: `${meter} ${label}`, compact: meter };
+			return { text: `${paint.dim(glyphs.apart)}  ${label}` };
 		},
 	},
 	context: {

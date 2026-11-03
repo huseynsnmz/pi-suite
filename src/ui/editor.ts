@@ -117,7 +117,9 @@ export class FrameEditor extends CustomEditor {
 			this.#framing = false;
 		}
 
-		const paint = this.#screen.paint((text) => this.borderColor(text));
+		const paint = this.#screen.paint(
+			this.#screen.frameColor() ?? ((text) => this.borderColor(text)),
+		);
 		const snapshot = this.#screen.snapshot();
 		const separator = paint.dim(this.#screen.separator());
 		const pieces = (name: SlotName): Piece[] => slotPieces(this.#screen, name, snapshot, paint);

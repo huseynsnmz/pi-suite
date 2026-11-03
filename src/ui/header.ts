@@ -5,6 +5,7 @@ import { keyText } from "@earendil-works/pi-coding-agent";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 import type { GithubState } from "../data/github.ts";
+import { modeOf } from "../data/mode.ts";
 import { type LastVisit, since, type StartNote, startNotes } from "../data/start-notes.ts";
 import { BOXES, border } from "../render/frame.ts";
 import { EFFORT_LEVELS, type Paint } from "../render/paint.ts";
@@ -57,6 +58,7 @@ interface Hint {
 const RISE_STEP_MS = 70;
 const NOTES = 6;
 const REDRAW_MS = 1000;
+const MODE_KEY = "shift+tab";
 /** Read once from the package that ships it. */
 export const PACKAGE_VERSION = packageVersion();
 
@@ -214,8 +216,7 @@ export class HeaderComponent implements Component {
 	}
 
 	#hintPieces(paint: Paint): { text: string; priority: number }[] {
-		return HINTS()
-			.slice(0, 4)
+		return hints(modeOf(this.#screen.snapshot().statuses) !== undefined)
 			.map((hint, index) => ({
 				text: `${paint.role("brand", hint.key)} ${paint.dim(hint.does)}`,
 				priority: 3 + index,
@@ -274,14 +275,18 @@ function packageVersion(): string {
 	}
 }
 
-function HINTS(): Hint[] {
+/** With pi-modes loaded, Shift+Tab changes the mode, whatever pi's own binding says. */
+export function hints(modes: boolean, effortKeys: string = keyText("app.thinking.cycle")): Hint[] {
+	const free = effortKeys
+		.split("/")
+		.filter((key) => key !== "" && !(modes && key === MODE_KEY))
+		.join("/");
 	return [
 		{ key: "/", does: "commands" },
 		{ key: keyText("app.model.select") || "/model", does: "model" },
-		{ key: keyText("app.thinking.cycle") || "/thinking", does: "effort" },
+		...(modes ? [{ key: MODE_KEY, does: "mode" }] : []),
+		{ key: free || "/effort", does: "effort" },
 		{ key: "alt+s", does: "settings" },
-		{ key: "!", does: "shell" },
-		{ key: "/tree", does: "session history" },
 	];
 }
 

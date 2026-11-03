@@ -26,6 +26,7 @@ import type {
 import { Key, type TUI } from "@earendil-works/pi-tui";
 
 import { type GitState, readGit } from "./data/git.ts";
+import { frameColorOf } from "./data/mode.ts";
 import { type GithubState, readGithub } from "./data/github.ts";
 import { emptySnapshot, type LiveInputs, type Snapshot, SnapshotReader } from "./data/snapshot.ts";
 import type { LastVisit } from "./data/start-notes.ts";
@@ -51,6 +52,7 @@ import {
 	userFrame,
 } from "./settings.ts";
 import { applyCursor, FrameEditor } from "./ui/editor.ts";
+import { registerEffort } from "./ui/effort.ts";
 import { FooterComponent, StripComponent } from "./ui/footer.ts";
 import { PACKAGE_VERSION, HeaderComponent, type LoadedCounts } from "./ui/header.ts";
 import { OutputView, outputsOf } from "./ui/outputs.ts";
@@ -108,6 +110,7 @@ export const frameFeature = defineFeature({
 		const glyphs = glyphsOf(() => icons.get(scope));
 		const screen = createScreen(scope, live, reader, telemetry, glyphs);
 		registerToolFrames(scope);
+		registerEffort(scope);
 		framePiEntries(() => {
 			if (live.ctx === undefined) return undefined;
 			return {
@@ -372,6 +375,13 @@ function createScreen(
 		}),
 		slot: (name) => SLOTS[name],
 		frameStyle: () => frame.get(scope),
+		frameColor: () => {
+			const theme = live.ctx?.ui.theme;
+			const color = frameColorOf(live.footerData?.getExtensionStatuses() ?? new Map());
+			return theme === undefined || color === undefined
+				? undefined
+				: (text) => theme.fg(color, text);
+		},
 		cursor: () => cursor,
 		decorate: (line) => {
 			const theme = live.ctx?.ui.theme;

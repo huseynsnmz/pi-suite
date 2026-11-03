@@ -17,7 +17,7 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.1.0
+   pi install npm:@huseynsnmz/pi-frame@0.2.0
    ```
 
 3. Restart Pi. The start card says `π-frame`.
@@ -41,7 +41,7 @@ I found no malicious code in `pi-look` or `pi-kit`. These are bugs, and the auth
 - **Start card:** the folder, branch and model, then only what changed or waits on you since your last session in that folder: conflicts, a branch behind its remote, a failed CI run, a pull request waiting on you. On a quiet day it says nothing is new. Without `gh`, a network or a GitHub remote, those lines stay out.
 - **Tool boxes:** each call shows the command, who allowed it and why, the output and the time. An edit shows the diff, with only the changed words highlighted.
 - **Above the editor:** a stopwatch, the number of model calls, and how the last call went. Messages you send while the agent works wait here in a dashed frame.
-- **Editor frame:** the branch, folder, model and how full the context is.
+- **Editor frame:** the branch, folder, model, effort and how full the context is. With [pi-modes](https://github.com/huseynsnmz/pi-modes), its color follows the mode: yellow for `auto`, the accent color for `plan`, green for `read-only`, using your theme's versions of those colors. In `normal` it stays Pi's own color.
 - **Footer:** cost, tokens, cache, speeds, and anything other extensions report, such as the `mode:` from [pi-modes](https://github.com/huseynsnmz/pi-modes).
 
 Some pieces, such as rooms, boards, peers and the remote page, appear only with other pi-harness packages installed.
@@ -51,12 +51,16 @@ Some pieces, such as rooms, boards, peers and the remote page, appear only with 
 | `Alt+O` | Scroll through the session's tool output, one call at a time |
 | `Ctrl+O` | Expand every call in the transcript |
 | `Alt+S` | Settings: icons, editor frame style, framed messages |
+| `/effort` | Pick how hard the model thinks |
+| `/effort high` | Set it directly: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. If the model can't use that level, Pi picks the closest one and you're told |
 
 More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/reference.md).
 
 ## Using it with other extensions
 
-**`pi-modes`, `pi-permission-system`, `pi-subagents`:** no conflicts were found. The automated run covers `pi-modes` and `pi-subagents` together, and `pi-permission-system` hasn't been run with pi-frame.
+**`pi-modes`:** it takes over `Shift+Tab`, so the start card says `shift+tab mode` and points to `/effort` or whichever other key you've bound for effort. To keep a key for effort, set `app.thinking.cycle` in `~/.pi/agent/keybindings.json`.
+
+**`pi-permission-system`, `pi-subagents`:** no conflicts were found. The automated run covers `pi-modes` and `pi-subagents` together, and `pi-permission-system` hasn't been run with pi-frame.
 
 **`pi-claude-code-ui`:** it also draws tool calls, so list it above pi-frame in `packages`. `pi install` adds packages last, so this is the order you get if you install pi-frame second. Even then, it draws a call to a tool that doesn't exist outside pi-frame's box, so escape sequences in that call's arguments still reach the terminal. In the other order, or with `pi-claude-code-ui` alone, arguments of real tools leak too. To close this, remove `pi-claude-code-ui`.
 

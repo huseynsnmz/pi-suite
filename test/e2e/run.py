@@ -51,7 +51,7 @@ git("config", "core.fsmonitor", str(monitor))
 
 (agent / "models.json").write_text(json.dumps({"providers": {"mock": {
     "baseUrl": f"http://127.0.0.1:{PORT}/v1", "apiKey": "unused", "api": "openai-completions",
-    "models": [{"id": "m", "name": "Mock", "contextWindow": 100000, "maxTokens": 1000, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}],
+    "models": [{"id": "m", "name": "Mock", "reasoning": True, "contextWindow": 100000, "maxTokens": 1000, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}],
 }}}))
 settings = {"defaultProvider": "mock", "defaultModel": "m", "defaultThinkingLevel": "off", "npmCommand": ["npm", "--ignore-scripts"], "packages": []}
 (agent / "settings.json").write_text(json.dumps(settings))
@@ -116,6 +116,19 @@ class Terminal:
 
 
 checks = []
+SHIFT_TAB = b"\x1b[Z"
+MODES_LOADED = any("pi-modes" in source for source in EXTRA)
+
+
+def frame_color():
+    """The color of the most recent editor frame: the start card is drawn only at the top."""
+    found = re.findall(r"(\x1b\[[0-9;:]*m)\u256d\u2500", term.raw)
+    return found[-1] if found else None
+
+
+def effort_on_frame():
+    found = re.findall(r"\u2502 +(off|minimal|low|medium|high|xhigh|max) ", term.plain())
+    return found[-1] if found else None
 
 
 def check(name, ok, detail=""):
@@ -132,6 +145,44 @@ try:
     check("repository's fsmonitor does not run at startup", not marker.exists())
     check("no icon that needs a special font", not PRIVATE_USE.search(term.raw), repr(PRIVATE_USE.findall(term.raw)[:3]))
     check("gh is not started for a GitLab remote", not gh_log.exists())
+
+    if PACKAGE == str(REPO):
+        hints = re.sub(r"\s+", " ", term.plain())
+        check("the effort shows after a divider", "\u2502 off" in hints or "\u2502  off" in hints)
+        check("no effort meter", "\u2582\u2583" not in hints)
+        if MODES_LOADED:
+            check("the start card says shift+tab changes the mode", "shift+tab mode" in hints)
+            check("the start card does not say it changes the effort", "shift+tab effort" not in hints)
+            check("the start card names /effort", "/effort effort" in hints)
+            colors = {"normal": frame_color()}
+            for mode in ("auto", "plan", "read-only", "normal"):
+                os.write(term.fd, SHIFT_TAB)
+                term.wait(f"mode: {mode}")
+                term.pump(1)
+                colors[f"back to {mode}" if mode == "normal" else mode] = frame_color()
+            check(
+                "the frame changes color with the mode",
+                len({colors["normal"], colors["auto"], colors["plan"], colors["read-only"]}) == 4,
+                str(colors).replace(ESC, "ESC"),
+            )
+            check("the frame returns to its color in normal", colors["back to normal"] == colors["normal"])
+        os.write(term.fd, b"/effort high")
+        term.pump(0.5)
+        os.write(term.fd, b"\x1b")
+        term.pump(0.3)
+        os.write(term.fd, b"\r")
+        check("/effort high changes the effort", term.wait("Effort: high", 10))
+        term.pump(1)
+        check("the frame shows the new effort", effort_on_frame() == "high", str(effort_on_frame()))
+        os.write(term.fd, b"/effort")
+        term.pump(0.5)
+        os.write(term.fd, b"\x1b")
+        term.pump(0.3)
+        os.write(term.fd, b"\r")
+        check("/effort opens a picker", term.wait("Effort (now high)", 10))
+        term.pump(0.5)
+        os.write(term.fd, b"\x1b")
+        term.pump(1)
 
     term.prompt("PRINT")
     term.prompt("ARG")

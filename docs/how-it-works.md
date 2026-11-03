@@ -17,7 +17,7 @@ For an `edit` or a `write`, the box shows the diff. The line numbers sit on the 
 
 ## The editor and the footer
 
-The editor's border starts with this session's name. It also shows the branch, the folder, the permission mode, the model with an effort meter, and how full the context is. The border warms up as the model thinks harder, and it takes the shell's color in bash mode.
+The editor's border starts with this session's name. It also shows the branch, the folder, the permission mode, the model with its effort after a divider, and how full the context is. The border warms up as the model thinks harder, and it takes the shell's color in bash mode.
 
 Instead of "Working", the spinner says what the model is doing: `waiting`, `thinking`, `writing`, `drafting bash` or `running bash`.
 

@@ -19,9 +19,9 @@ pi-frame never names a colour. Every piece names a **theme token**, so it follow
 | Received `↓`, speeds, done                    | `success`                                                   |
 | Time to first token, money                    | `syntaxNumber`, then `warning` past $1 and `error` past $10 |
 | Context                                       | `success`, `warning` past 70%, `error` past 90%             |
-| Effort meter, the π                           | `thinkingMinimal` … `thinkingMax`, one per level            |
+| Effort level, the π                           | `thinkingMinimal` … `thinkingMax`, one per level            |
 | Labels, units, separators                     | `dim`                                                       |
-| Editor frame                                  | pi's effort border colour                                   |
+| Editor frame                                  | pi's effort border colour; with pi-modes, `warning` in auto, `accent` in plan, `success` in read-only |
 
 Syntax tokens are borrowed on purpose: a theme spends its hues there, so they give the line variety that stays in the theme's family. The table lives in `src/render/paint.ts` as `ROLE_TOKENS`, and a test fails if any entry is ever a colour instead of a token.
 
@@ -53,7 +53,7 @@ What each piece of the screen shows.
 | `model`        | `provider/model`, with the account in parentheses when one is in use                                                                                                                |
 | `provider`     | The provider on its own                                                                                                                                                             |
 | `quota`        | Every window of the plan, with its percent and its reset                                                                                                                            |
-| `effort`       | The effort meter and level. Hidden for models that do not reason                                                                                                                    |
+| `effort`       | A divider and the effort level. Hidden for models that do not reason                                                                                                                    |
 | `context`      | Context used, the gauge, tokens over the window                                                                                                                                     |
 | `speed`        | This answer's speeds, received `↓` and sent `↑`                                                                                                                                     |
 | `wait`         | Time to the first token                                                                                                                                                             |

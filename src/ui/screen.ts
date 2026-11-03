@@ -24,6 +24,8 @@ export interface Screen {
 	options(): SegmentOptions;
 	slot(name: SlotName): readonly SegmentId[];
 	frameStyle(): FrameStyle | "off";
+	/** Undefined leaves the frame in pi's own color. */
+	frameColor(): ((text: string) => string) | undefined;
 	cursor(): CursorStyle;
 	decorate(line: string): string;
 	skills(): boolean;

@@ -138,6 +138,12 @@ describe("skills in the editor", () => {
 });
 
 describe("editor", () => {
+	test("the frame takes the color the mode asks for, and pi's own otherwise", () => {
+		const colored = editor("rounded", { frameColor: () => (text) => `<${text}>` });
+		expect(colored.render(90)[0]).toContain("<╭");
+		expect(editor().render(90)[0]).not.toContain("<");
+	});
+
 	test("draws a box of the exact width with the slots in its borders", () => {
 		const view = editor();
 		view.setText("hello");
@@ -146,12 +152,8 @@ describe("editor", () => {
 		expect(widths(lines)).toEqual([60, 60, 60]);
 		expect(plain(lines[0] ?? "")).toMatch(/^╭─ main ─+ ~\/Projects\/pi-harness ─╮$/);
 		expect(plain(lines[1] ?? "")).toMatch(/^│ hello +│$/);
-		// At 60 columns the effort meter drops its label, and the context keeps everything.
-		expect(plain(lines[2] ?? "")).toBe(
-			"╰─ Anthropic/Opus 5.5 · |||||| ─ ctx 43% ###----- 431k/1M ─╯",
-		);
 		expect(plain(view.render(90)[2] ?? "")).toMatch(
-			/^╰─ Anthropic\/Opus 5\.5 · \|{6} high ─+ ctx 43% .* ─╯$/,
+			/^╰─ Anthropic\/Opus 5\.5 · \|  high ─+ ctx 43% .* ─╯$/,
 		);
 	});
 
