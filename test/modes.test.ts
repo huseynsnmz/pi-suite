@@ -1,0 +1,46 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { decideToolCall, type Mode, modePrompt, nextMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
+
+const bash = (command: string) => ({ command });
+
+const cases: Array<[string, Mode, string, unknown, string]> = [
+  ["normal leaves write to the permission system", "normal", "write", {}, "allow"],
+  ["auto leaves bash to the permission system", "auto", "bash", bash("rm x"), "allow"],
+  ["plan allows reading", "plan", "read", {}, "allow"],
+  ["plan blocks write", "plan", "write", {}, "block"],
+  ["plan blocks edit", "plan", "edit", {}, "block"],
+  ["plan blocks subagents", "plan", "subagent", {}, "block"],
+  ["plan blocks MCP", "plan", "mcp", {}, "block"],
+  ["plan runs read-only bash", "plan", "bash", bash("git status"), "allow"],
+  ["plan asks before other bash", "plan", "bash", bash("npm test"), "ask"],
+  ["plan can submit its plan", "plan", SUBMIT_PLAN_TOOL, {}, "allow"],
+  ["read-only allows grep", "read-only", "grep", {}, "allow"],
+  ["read-only blocks write", "read-only", "write", {}, "block"],
+  ["read-only blocks other bash", "read-only", "bash", bash("npm test"), "block"],
+  ["read-only runs read-only bash", "read-only", "bash", bash("ls"), "allow"],
+  ["read-only cannot submit a plan", "read-only", SUBMIT_PLAN_TOOL, {}, "block"],
+  ["read-only blocks unknown tools", "read-only", "some_new_tool", {}, "block"],
+  ["malformed bash input is blocked", "plan", "bash", { command: 1 }, "block"],
+  ["null bash input is blocked", "read-only", "bash", null, "block"],
+];
+
+for (const [name, mode, tool, input, action] of cases) {
+  test(name, () => {
+    assert.equal(decideToolCall(mode, tool, input).action, action);
+  });
+}
+
+test("cycle visits every mode and returns to normal", () => {
+  const seen: Mode[] = ["normal"];
+  for (let i = 0; i < 3; i += 1) seen.push(nextMode(seen.at(-1) as Mode));
+  assert.deepEqual(seen, ["normal", "auto", "plan", "read-only"]);
+  assert.equal(nextMode("read-only"), "normal");
+});
+
+test("only restricted modes change the system prompt", () => {
+  assert.equal(modePrompt("normal"), undefined);
+  assert.equal(modePrompt("auto"), undefined);
+  assert.ok(modePrompt("plan")?.includes(SUBMIT_PLAN_TOOL));
+  assert.ok(modePrompt("read-only"));
+});

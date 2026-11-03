@@ -1,0 +1,50 @@
+{
+  "name": "@huseynsnmz/pi-modes",
+  "version": "0.1.0",
+  "description": "Shift+Tab permission modes for Pi: normal, auto, plan and read-only",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "permissions",
+    "plan-mode"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huseynsnmz/pi-modes.git"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "e2e:solo": "python3 test/e2e/run.py solo",
+    "e2e": "python3 test/e2e/run.py modes-first && python3 test/e2e/run.py modes-last"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "@types/node": "24.13.3",
+    "typebox": "1.1.38",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Drives real Pi in a real terminal with a fake model.
+
+Usage: run.py <solo|modes-first|modes-last>
+
+  solo         only this extension
+  modes-first  your five extensions, with this one loaded first
+  modes-last   your five extensions, with this one loaded last
+
+Everything lives in a throwaway home directory, so no real credentials are used.
+The modes-* runs install the third-party packages from npm with scripts disabled
+and start them, so run those yourself.
+"""
+import fcntl, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
+from pathlib import Path
+
+ORDER = sys.argv[1]
+SOLO = ORDER == "solo"
+REPO = Path(__file__).resolve().parents[2]
+PI = REPO / "node_modules/.bin/pi"
+THIRD_PARTY = [] if SOLO else [
+    "npm:pi-permission-classifier@0.6.0",
+    "npm:@gotgenes/pi-permission-system@42.0.0",
+    "npm:pi-subagents@0.84.0",
+    "npm:pi-claude-code-ui@1.0.107",
+    "npm:@adeildo/pi-look@6.0.0",
+]
+PORT = 18000 + os.getpid() % 2000
+root = Path(tempfile.mkdtemp(prefix="pi-modes-e2e-"))
+home, agent, project = root / "home", root / "home/.pi/agent", root / "project"
+(agent / "extensions/pi-permission-system").mkdir(parents=True)
+(agent / "extensions/pi-permission-classifier").mkdir(parents=True)
+project.mkdir()
+log = root / "model.log"
+log.touch()
+
+env = {
+    "PATH": os.environ["PATH"], "HOME": str(home), "TERM": "xterm-256color", "COLUMNS": "140", "LINES": "45",
+    "LANG": "en_US.UTF-8", "PI_CODING_AGENT_DIR": str(agent), "PI_SKIP_VERSION_CHECK": "1",
+}
+
+(agent / "models.json").write_text(json.dumps({"providers": {"mock": {
+    "baseUrl": f"http://127.0.0.1:{PORT}/v1", "apiKey": "unused", "api": "openai-completions",
+    "models": [{"id": "m", "name": "Mock", "contextWindow": 100000, "maxTokens": 1000, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}],
+}}}))
+(agent / "extensions/pi-permission-system/config.json").write_text(json.dumps({
+    "doublePressToConfirm": False, "authorizerChain": ["permission-judge"],
+    "permission": {"*": "ask", "read": "allow", "submit_plan": "allow", "external_directory": "allow"},
+}))
+(agent / "extensions/pi-permission-classifier/config.json").write_text("{}")
+(agent / "settings.json").write_text(json.dumps({
+    "defaultProvider": "mock", "defaultModel": "m", "defaultThinkingLevel": "off", "npmCommand": ["npm", "--ignore-scripts"],
+}))
+for source in THIRD_PARTY:
+    subprocess.run([str(PI), "install", source], env=env, check=True, capture_output=True, cwd=project, timeout=240)
+current = json.loads((agent / "settings.json").read_text())
+installed = current.get("packages", [])
+current["packages"] = [str(REPO)] + installed if ORDER == "modes-first" else installed + [str(REPO)]
+(agent / "settings.json").write_text(json.dumps(current))
+print("load order:", [str(p).split("/")[-1] for p in current["packages"]], flush=True)
+env["PI_OFFLINE"] = "1"
+
+model = subprocess.Popen(["node", str(Path(__file__).parent / "mock-model.mjs"), str(PORT), str(log)])
+time.sleep(0.5)
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+
+class Terminal:
+    def __init__(self, *args):
+        self.pid, self.fd = pty.fork()
+        if self.pid == 0:
+            os.chdir(project)
+            os.execve(str(PI), [str(PI), *args], env)
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 140, 0, 0))
+        self.text = ""
+        self.mark = 0
+
+    def pump(self, seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            ready, _, _ = select.select([self.fd], [], [], 0.1)
+            if ready:
+                try:
+                    data = os.read(self.fd, 65536)
+                except OSError:
+                    return
+                self.text += ANSI.sub("", data.decode("utf8", "replace"))
+
+    def wait(self, pattern, timeout=25):
+        end = time.time() + timeout
+        while time.time() < end:
+            self.pump(0.2)
+            found = re.search(pattern, self.text[self.mark:])
+            if found:
+                self.mark += found.end()
+                return True
+        tail = re.sub(r"\s+", " ", self.text)[-1500:]
+        raise AssertionError(f"timed out waiting for {pattern!r}\n--- screen tail ---\n{tail}\n--- model log ---\n{log.read_text()}")
+
+    def until(self, condition, what, timeout=25):
+        end = time.time() + timeout
+        while time.time() < end:
+            self.pump(0.2)
+            if condition():
+                return
+        tail = re.sub(r"\s+", " ", self.text)[-1500:]
+        raise AssertionError(f"timed out waiting for {what}\n--- screen tail ---\n{tail}\n--- model log ---\n{log.read_text()}")
+
+    def send(self, data):
+        os.write(self.fd, data.encode())
+
+    def prompt(self, text):
+        self.send(text)
+        self.pump(0.4)
+        self.send("\r")
+
+    def close(self):
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+            os.waitpid(self.pid, 0)
+        except OSError:
+            pass
+
+
+def judge_calls():
+    return log.read_text().splitlines().count("judge")
+
+
+checks = []
+
+
+def check(name, ok, detail=""):
+    checks.append((name, ok))
+    print(("PASS " if ok else "FAIL ") + name + (f"  [{detail}]" if detail else ""), flush=True)
+
+
+SHIFT_TAB = "\x1b[Z"
+term = Terminal()
+try:
+    term.wait(r"mode: normal", 40)
+    term.pump(1.5)
+    check("footer shows the mode", True)
+
+    term.prompt("RUN:touch normal.txt")
+    if SOLO:
+        term.until((project / "normal.txt").exists, "normal.txt")
+        check("normal: extension does not restrict tools", True)
+    else:
+        term.wait(r"touch normal\.txt")
+        term.pump(1.5)
+        check("normal: judge is not called", judge_calls() == 0, f"judge={judge_calls()}")
+        check("normal: command waits for the human", not (project / "normal.txt").exists())
+        term.send("y")
+        term.until((project / "normal.txt").exists, "normal.txt")
+        check("normal: approving the prompt runs it", True)
+    term.pump(1)
+
+    term.send(SHIFT_TAB)
+    term.wait(r"mode: auto")
+    check("shift+tab switches to auto", True)
+    if SOLO:
+        term.pump(1)
+        check("auto warns when no judge is installed", "Auto has no permission judge" in term.text)
+    else:
+        term.prompt("RUN:touch auto.txt")
+        term.until((project / "auto.txt").exists, "auto.txt")
+        check("auto: judge decides and the command runs without a prompt", judge_calls() == 1, f"judge={judge_calls()}")
+    term.pump(1)
+
+    term.send(SHIFT_TAB)
+    term.wait(r"mode: plan")
+    check("shift+tab switches to plan", True)
+    before = judge_calls()
+    term.prompt("WRITE:plan.txt")
+    term.wait(r"plan mode blocks write")
+    check("plan: write is blocked", not (project / "plan.txt").exists())
+    check("plan: judge stays out", judge_calls() == before, f"judge={judge_calls()}")
+    chat = log.read_text().splitlines()
+    check("plan: instructions and submit tool reach the model", any("plan=true" in l and "submit=true" in l for l in chat))
+    check("normal: submit tool was hidden from the model", "submit=false" in chat[0])
+    term.pump(1)
+
+    term.prompt("RUN:touch planask.txt")
+    term.wait(r"Plan mode: run this command")
+    term.pump(0.5)
+    term.send("\x1b")
+    term.wait(r"Plan mode blocked this command")
+    check("plan: declining a command blocks it", not (project / "planask.txt").exists())
+    term.pump(1)
+
+    term.prompt("PLAN")
+    term.wait(r"Approve this plan")
+    check("plan: the plan is shown before approval", "PLANBODY" in term.text)
+    term.pump(0.5)
+    term.send("\r")
+    term.wait(r"approved the plan and switched to normal")
+    term.wait(r"mode: normal")
+    check("approving the plan returns to normal", True)
+    term.pump(1)
+
+    term.send(SHIFT_TAB); term.wait(r"mode: auto")
+    term.send(SHIFT_TAB); term.wait(r"mode: plan")
+    term.send(SHIFT_TAB); term.wait(r"mode: read-only")
+    check("shift+tab reaches read-only", True)
+    before = judge_calls()
+    term.prompt("RUN:touch readonly.txt")
+    term.wait(r"read-only mode blocked this command")
+    check("read-only: other bash is blocked with no prompt", not (project / "readonly.txt").exists())
+    check("read-only: judge stays out", judge_calls() == before, f"judge={judge_calls()}")
+    term.pump(1)
+    term.prompt("RUN:pwd")
+    term.until(lambda: f"/{project.name}" in term.text, "pwd output")
+    check("read-only: read-only bash runs", True)
+    term.pump(1)
+    term.send(SHIFT_TAB)
+    term.wait(r"mode: normal")
+    check("shift+tab wraps back to normal", True)
+    term.send(SHIFT_TAB); term.wait(r"mode: auto")
+    term.send(SHIFT_TAB); term.wait(r"mode: plan")
+    term.send(SHIFT_TAB); term.wait(r"mode: read-only")
+    term.pump(1)
+    term.close()
+
+    term = Terminal("--continue")
+    term.wait(r"mode: read-only", 40)
+    check("mode is restored when the session resumes", True)
+    term.close()
+
+    term = Terminal()
+    term.wait(r"mode: normal", 40)
+    check("a new session starts in normal", True)
+finally:
+    term.close()
+    model.terminate()
+
+failed = [name for name, ok in checks if not ok]
+print(f"\n{len(checks) - len(failed)}/{len(checks)} passed ({ORDER})")
+if not failed:
+    shutil.rmtree(root, ignore_errors=True)
+else:
+    print("kept", root)
+sys.exit(1 if failed else 0)
