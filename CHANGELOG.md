@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4]
+
+### Fixed
+
+- Fixed a false "Auto has no permission judge" warning when `pi-permission-classifier` loads after `pi-permission-system`, where it only registers during the first prompt.
+- Moved the "could not take control" check to after every extension has had the chance to register.
+
 ## [0.1.3]
 
 ### Changed

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Drives real Pi in a real terminal with a fake model.
 
-Usage: run.py <solo|modes-first|modes-last>
+Usage: run.py <solo|modes-first|modes-last|classifier-last>
 
   solo         only this extension
   modes-first  your five extensions, with this one loaded first
   modes-last   your five extensions, with this one loaded last
+  classifier-last  this one first, and the classifier after the permission system
 
 Everything lives in a throwaway home directory, so no real credentials are used.
 The modes-* runs install the third-party packages from npm with scripts disabled
@@ -25,6 +26,8 @@ THIRD_PARTY = [] if SOLO else [
     "npm:pi-claude-code-ui@1.0.107",
     "npm:@adeildo/pi-look@6.0.0",
 ]
+if ORDER == "classifier-last":
+    THIRD_PARTY[0], THIRD_PARTY[1] = THIRD_PARTY[1], THIRD_PARTY[0]
 PORT = 18000 + os.getpid() % 2000
 root = Path(tempfile.mkdtemp(prefix="pi-modes-e2e-"))
 home, agent, project = root / "home", root / "home/.pi/agent", root / "project"
@@ -44,7 +47,7 @@ env = {
     "models": [{"id": "m", "name": "Mock", "contextWindow": 100000, "maxTokens": 1000, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}],
 }}}))
 (agent / "extensions/pi-permission-system/config.json").write_text(json.dumps({
-    "doublePressToConfirm": False, "authorizerChain": ["permission-judge"],
+    "doublePressToConfirm": False, "authorizerChain": [] if SOLO else ["permission-judge"],
     "permission": {"*": "ask", "read": "allow", "submit_plan": "allow", "external_directory": "allow"},
 }))
 (agent / "extensions/pi-permission-classifier/config.json").write_text("{}")
@@ -55,7 +58,7 @@ for source in THIRD_PARTY:
     subprocess.run([str(PI), "install", source], env=env, check=True, capture_output=True, cwd=project, timeout=240)
 current = json.loads((agent / "settings.json").read_text())
 installed = current.get("packages", [])
-current["packages"] = [str(REPO)] + installed if ORDER == "modes-first" else installed + [str(REPO)]
+current["packages"] = installed + [str(REPO)] if ORDER in ("solo", "modes-last") else [str(REPO)] + installed
 (agent / "settings.json").write_text(json.dumps(current))
 print("load order:", [str(p).split("/")[-1] for p in current["packages"]], flush=True)
 env["PI_OFFLINE"] = "1"
@@ -150,6 +153,15 @@ try:
     term.wait(r"mode: normal", 40)
     term.pump(1.5)
     check("footer shows the mode", True)
+    if not SOLO:
+        term.send(SHIFT_TAB)
+        term.wait(r"mode: auto")
+        term.pump(1.5)
+        check("auto: no false warning before the first prompt", "Auto has no permission judge" not in term.text)
+        for name in ("plan", "read-only", "normal"):
+            term.send(SHIFT_TAB)
+            term.wait(f"mode: {name}")
+        term.pump(1)
     check("warns only when loaded after the permission system", ("loads after pi-permission-system" in term.text) == DIALOG_FIRST)
 
     term.prompt("RUN:touch normal.txt")
@@ -236,6 +248,7 @@ try:
     term.send(SHIFT_TAB); term.wait(r"mode: plan")
     term.send(SHIFT_TAB); term.wait(r"mode: read-only")
     term.pump(1)
+    full_text = term.text
     term.close()
 
     term = Terminal("--continue")
@@ -250,6 +263,7 @@ finally:
     term.close()
     model.terminate()
 
+check("no false warning about controlling the judge", "could not take control" not in full_text)
 failed = [name for name, ok in checks if not ok]
 print(f"\n{len(checks) - len(failed)}/{len(checks)} passed ({ORDER})")
 if not failed:

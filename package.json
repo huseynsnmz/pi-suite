@@ -1,6 +1,6 @@
 {
   "name": "@huseynsnmz/pi-modes",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Shift+Tab permission modes for Pi: normal, auto, plan and read-only",
   "type": "module",
   "license": "MIT",
@@ -32,7 +32,7 @@
     "check": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "e2e:solo": "python3 test/e2e/run.py solo",
-    "e2e": "python3 test/e2e/run.py modes-first && python3 test/e2e/run.py modes-last"
+    "e2e": "python3 test/e2e/run.py modes-first && python3 test/e2e/run.py modes-last && python3 test/e2e/run.py classifier-last"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

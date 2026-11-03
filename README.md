@@ -20,7 +20,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-modes@0.1.3
+   pi install npm:@huseynsnmz/pi-modes@0.1.4
    ```
 
 2. Move it above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
@@ -39,7 +39,7 @@ Requires Pi 1.5 or newer.
 
 4. Restart Pi. The footer shows `mode: normal`, and `Shift+Tab` changes the mode.
 
-To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.1.3`.
+To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.1.4`.
 
 ## Commands
 
@@ -67,7 +67,7 @@ In plan mode the agent calls the `submit_plan` tool. You then choose one of:
 
 **`@gotgenes/pi-permission-system`:** still runs in every mode. This extension only adds restrictions, so a `deny` rule always wins.
 
-**`pi-permission-classifier`:** runs only in `auto`. In every other mode it defers, and the request goes to your normal prompt. Set it up as its README describes, with `permission-judge` in `authorizerChain`. Its `perm-judge:` footer entry stays visible in all modes, so go by the `mode:` entry.
+**`pi-permission-classifier`:** runs only in `auto`. In every other mode it defers, and the request goes to your normal prompt. Set it up as its README describes, with `permission-judge` in `authorizerChain`. Its `perm-judge:` footer entry stays visible in all modes, so go by the `mode:` entry. If the classifier is listed after `pi-permission-system`, it only registers during your first prompt, and `auto` starts working from then on.
 
 Without a classifier, `auto` behaves like `normal`, and the extension warns you when you switch to it.
 
@@ -104,7 +104,7 @@ The end-to-end test drives real Pi in a real terminal against a fake model, usin
 
 ```bash
 npm run e2e:solo   # only this extension
-npm run e2e        # with the five packages it was built for, in both load orders
+npm run e2e        # with the five packages it was built for, in three load orders
 ```
 
 `npm run e2e` installs those packages from npm with scripts disabled, then starts them.

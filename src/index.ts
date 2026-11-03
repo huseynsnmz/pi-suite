@@ -69,7 +69,9 @@ export default function piModes(pi: ExtensionAPI): void {
     apply(next, ctx);
     pi.appendEntry(ENTRY_TYPE, { mode: next });
     if (!ctx.hasUI) return;
-    if (next === "auto" && !judgeGated(ctx.sessionManager.getSessionId())) {
+    // A judge named in the chain may not have registered yet: some load orders
+    // only register it during the first prompt. agent_start checks that case.
+    if (next === "auto" && !judgeGated(ctx.sessionManager.getSessionId()) && !chainNamesJudge()) {
       ctx.ui.notify(
         "Auto has no permission judge, so it behaves like normal. Set up pi-permission-classifier to use it.",
         "warning",
@@ -102,8 +104,10 @@ export default function piModes(pi: ExtensionAPI): void {
     clearGate(ctx.sessionManager.getSessionId());
   });
 
-  pi.on("before_agent_start", (event, ctx) => {
-    warnIfJudgeUncontrolled(ctx);
+  // Runs after every before_agent_start handler, which is the judge's last chance to register.
+  pi.on("agent_start", (_event, ctx) => warnIfJudgeUncontrolled(ctx));
+
+  pi.on("before_agent_start", (event) => {
     const prompt = modePrompt(mode);
     return prompt ? { systemPrompt: `${event.systemPrompt}\n\n${prompt}` } : undefined;
   });
