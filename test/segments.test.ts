@@ -341,6 +341,20 @@ describe("segments", () => {
 		expect(text(["status:missing"], data)).toEqual([]);
 	});
 
+	test("the mode leads the statuses, after which a divider", () => {
+		const data = snapshot({
+			statuses: new Map([
+				["perm", "perm-judge: x"],
+				["pi-modes", "mode: auto"],
+				["other", "mem 12"],
+			]),
+		});
+		const [piece] = renderSegments(["statuses"], { snapshot: data, glyphs: UNICODE, paint: PLAIN, options });
+		expect(piece?.text).toBe(`mode: auto  ${UNICODE.apart}  perm-judge: x  mem 12`);
+		expect(piece?.compact).toBe("mode: auto");
+		expect(text(["statuses"], snapshot({ statuses: new Map([["pi-modes", "mode: auto"]]) }))).toEqual(["mode: auto"]);
+	});
+
 	test("a status with no color takes the footer's, and one with a color keeps it", () => {
 		const paint = { ...PLAIN, dim: (value: string) => `dim(${value})` };
 		const drawn = renderSegments(["status:plain", "status:colored"], {

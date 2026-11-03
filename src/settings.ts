@@ -27,8 +27,8 @@ export const topRight: readonly SegmentId[] = ["path", "host"];
 export const bottomLeft: readonly SegmentId[] = [PERMISSION_MODE, "model", "effort"];
 /** How full the context is. */
 export const bottomRight: readonly SegmentId[] = ["context"];
-/** The session: cost, tokens, cache, speeds, and what other packages report. */
-export const below: readonly SegmentId[] = ["cost", "tokens", "cache", "average", "statuses"];
+/** What other packages report, the mode first, then the session: cost, tokens, cache, speeds. */
+export const below: readonly SegmentId[] = ["statuses", "cost", "tokens", "cache", "average"];
 /** The plan's quota: what each window spent, and when it resets. */
 export const belowRight: readonly SegmentId[] = ["quota"];
 

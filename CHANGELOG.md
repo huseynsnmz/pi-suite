@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+### Changed
+
+- The bottom line starts with the mode, then a divider and the other statuses, then the session's numbers.
+
 ## 0.3.2
 
 ### Changed

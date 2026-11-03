@@ -63,6 +63,8 @@ type StatusSegment = `status:${string}`;
 export type SegmentId = BuiltinSegment | StatusSegment;
 
 const STATUS_PREFIX = "status:";
+/** pi-modes reports the mode here, and it leads the statuses. */
+const MODE_STATUS = "pi-modes";
 const STATUS_PRIORITY = 95;
 
 export function isSegmentId(value: string): value is SegmentId {
@@ -538,9 +540,16 @@ export const SEGMENTS: Record<BuiltinSegment, Segment> = {
 		priority: 50,
 		describe: "what other packages report through setStatus, minus the ones placed on their own",
 		render: ({ snapshot, glyphs, paint, options }) => {
-			const texts = [...snapshot.statuses]
-				.filter(([key]) => !options.claimed.has(key))
+			const shown = [...snapshot.statuses].filter(([key]) => !options.claimed.has(key));
+			const mode = shown.find(([key]) => key === MODE_STATUS)?.[1];
+			const texts = shown
+				.filter(([key]) => key !== MODE_STATUS)
 				.map(([, text]) => quietStatus(text, paint));
+			if (mode !== undefined) {
+				const lead = quietStatus(mode, paint);
+				if (texts.length === 0) return { text: lead };
+				return { text: `${lead}  ${paint.dim(glyphs.apart)}  ${texts.join("  ")}`, compact: lead };
+			}
 			if (texts.length === 0) return undefined;
 			const icon = glyphs.plug === "" ? "" : `${paint.dim(glyphs.plug)} `;
 			return {

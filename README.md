@@ -17,7 +17,7 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.3.2
+   pi install npm:@huseynsnmz/pi-frame@0.3.3
    ```
 
 3. Restart Pi. The start card says `π-frame`.
@@ -32,7 +32,7 @@ On a Mac, `Alt` means the Option key, which needs "Use Option as Meta" in Termin
 - **Tool boxes:** each call shows the command, who allowed it and why, the output and the time. An edit shows the diff, with only the changed words highlighted.
 - **Above the editor:** a stopwatch, the number of model calls, and how the last call went. Messages you send while the agent works wait here in a dashed frame.
 - **Editor frame:** the branch, folder, model, effort and how full the context is. With [pi-modes](https://github.com/huseynsnmz/pi-modes), its color follows the mode: yellow for `auto`, the accent color for `plan`, green for `read-only`, red for `yolo`, using your theme's versions of those colors. In `normal` it stays Pi's own color.
-- **Footer:** cost, tokens, cache, speeds, and anything other extensions report, such as the `mode:` from [pi-modes](https://github.com/huseynsnmz/pi-modes).
+- **Footer:** first the `mode:` from [pi-modes](https://github.com/huseynsnmz/pi-modes), then a divider and what other extensions report, then cost, tokens, cache and speeds.
 
 Some pieces, such as rooms, boards, peers and the remote page, appear only with other pi-harness packages installed.
 

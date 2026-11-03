@@ -257,6 +257,8 @@ try:
     if any("pi-permission-system" in p for p in EXTRA):
         drawn = re.search(r"(\x1b\[[\d;]*m)perm-judge: ", term.raw)
         check("the judge's status is drawn dim", drawn is not None, repr(drawn.group(1)) if drawn else "not drawn")
+        check("the mode comes first, then a divider, then the judge", bool(re.search(r"mode: \S+ +\u2502 +perm-judge: ", term.plain())))
+    Path(os.environ.get("PI_FRAME_E2E_CHAT", os.devnull)).write_text(term.raw)
     check("git counts still show", "?2" in term.plain() or "? 2" in term.plain())
     term.close()
 
