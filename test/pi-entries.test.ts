@@ -9,9 +9,9 @@ import {
 	SkillInvocationMessageComponent,
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
+import { Container, Spacer, stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 
-import { framed, framePiEntries } from "../src/ui/pi-entries.ts";
+import { extensionName, framed, framePiEntries, loadedLists } from "../src/ui/pi-entries.ts";
 
 const plain = {
 	fg: (_color: string, text: string) => text,
@@ -164,4 +164,50 @@ describe("what pi lists at startup", () => {
 		expect(visible(new Text("[Skills] are great", 0, 0).render(40))).toEqual(["[Skills] are great"]);
 		expect(visible(new Text("hello\nworld", 0, 0).render(40))).toEqual(["hello", "world"]);
 	});
+});
+
+describe("what the start card takes over", () => {
+	const look = { theme: plain, set: "unicode" as const, you: false };
+	function listing(expanded = false) {
+		const box = new Container();
+		const section = new Text("\u001b[36m[Skills]\u001b[39m\n  one, two", 0, 0);
+		(section as unknown as { state: { expanded: boolean } }).state = { expanded };
+		box.addChild(new Spacer(1));
+		box.addChild(section);
+		box.addChild(new Spacer(1));
+		return box;
+	}
+
+	test("a collapsed list draws nothing here and reaches the card", () => {
+		framePiEntries(() => look);
+		expect(listing().render(80)).toEqual([]);
+		expect(loadedLists()).toEqual([{ name: "skills", items: ["one", "two"] }]);
+	});
+
+	test("an expanded list and a problem still draw", () => {
+		framePiEntries(() => look);
+		expect(visible(listing(true).render(80)).join("\n")).toContain("skills");
+		const box = listing();
+		box.addChild(new Text("[Extension issues]\n  broke", 0, 0));
+		expect(visible(box.render(80)).join("\n")).toContain("broke");
+	});
+
+	test("too narrow for the card, the frame stays", () => {
+		framePiEntries(() => look);
+		expect(visible(listing().render(40)).join("\n")).toContain("skills");
+	});
+
+	test("other containers are untouched", () => {
+		framePiEntries(() => look);
+		const box = new Container();
+		box.addChild(new Text("hello", 0, 0));
+		expect(visible(box.render(80))).toEqual(["hello"]);
+	});
+});
+
+test("an extension goes by its package's name", () => {
+	expect(extensionName("@gotgenes/pi-permission-system@42.0.0:src")).toBe("pi-permission-system");
+	expect(extensionName("pi-subagents@0.84.0:src/extension")).toBe("pi-subagents");
+	expect(extensionName("pi-frame/src")).toBe("pi-frame");
+	expect(extensionName("my-tool")).toBe("my-tool");
 });

@@ -17,7 +17,7 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.3.1
+   pi install npm:@huseynsnmz/pi-frame@0.3.2
    ```
 
 3. Restart Pi. The start card says `π-frame`.
@@ -28,10 +28,9 @@ On a Mac, `Alt` means the Option key, which needs "Use Option as Meta" in Termin
 
 ## What you see
 
-- **Start card:** the folder, branch and model, then only what changed or waits on you since your last session in that folder: conflicts, a branch behind its remote, a failed CI run, a pull or merge request waiting on you. On a quiet day it says nothing is new. CI and request lines use `gh` for a GitHub remote and `glab` for a GitLab one, and stay out without the tool or a network.
+- **Start card:** the folder, branch and model, then only what changed or waits on you since your last session in that folder: conflicts, a branch behind its remote, a failed CI run, a pull or merge request waiting on you. On a quiet day it says nothing is new. Below that, a row each for the context, skills, prompts and extensions Pi loaded, with `+N` for what doesn't fit. `Ctrl+O` shows them in full. CI and request lines use `gh` for a GitHub remote and `glab` for a GitLab one, and stay out without the tool or a network.
 - **Tool boxes:** each call shows the command, who allowed it and why, the output and the time. An edit shows the diff, with only the changed words highlighted.
 - **Above the editor:** a stopwatch, the number of model calls, and how the last call went. Messages you send while the agent works wait here in a dashed frame.
-- **Startup list:** what Pi loaded (context, skills, prompts, extensions), each in a frame of its own.
 - **Editor frame:** the branch, folder, model, effort and how full the context is. With [pi-modes](https://github.com/huseynsnmz/pi-modes), its color follows the mode: yellow for `auto`, the accent color for `plan`, green for `read-only`, red for `yolo`, using your theme's versions of those colors. In `normal` it stays Pi's own color.
 - **Footer:** cost, tokens, cache, speeds, and anything other extensions report, such as the `mode:` from [pi-modes](https://github.com/huseynsnmz/pi-modes).
 

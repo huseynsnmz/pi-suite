@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { matchesKey } from "@earendil-works/pi-tui";
+import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 
 import { cmdAsAlt, keyLabel } from "../src/render/keys.ts";
+import { fitNames } from "../src/ui/header.ts";
 import { EXIT_WINDOW_MS, nextInterrupt } from "../src/ui/interrupt.ts";
 
 describe("Ctrl+C", () => {
@@ -37,4 +38,10 @@ test("Cmd+S arrives as Alt+S, and other Cmd keys stay out of it", () => {
 	expect(matchesKey(cmdAsAlt("\u001b[111;9u") ?? "", "alt+o")).toBe(true);
 	expect(cmdAsAlt("\u001b[99;9u")).toBeUndefined();
 	expect(cmdAsAlt("s")).toBeUndefined();
+});
+
+test("a row of names ends in how many did not fit", () => {
+	expect(fitNames(["ab", "cd"], 20)).toBe("ab, cd");
+	expect(fitNames(["ab", "cd", "ef", "gh"], 10)).toBe("ab, cd, +2");
+	expect(visibleWidth(fitNames(["abcdefghijklmnop", "cd"], 8))).toBeLessThanOrEqual(8);
 });

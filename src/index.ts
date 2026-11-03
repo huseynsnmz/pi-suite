@@ -59,7 +59,7 @@ import { FooterComponent, StripComponent } from "./ui/footer.ts";
 import { PACKAGE_VERSION, HeaderComponent, type LoadedCounts } from "./ui/header.ts";
 import { EXIT_WINDOW_MS, type InterruptState, nextInterrupt } from "./ui/interrupt.ts";
 import { OutputView, outputsOf } from "./ui/outputs.ts";
-import { framePiEntries } from "./ui/pi-entries.ts";
+import { framePiEntries, loadedLists, onLoadedListsChange } from "./ui/pi-entries.ts";
 import { frameQueue } from "./ui/queue.ts";
 import type { Screen, SlotName } from "./ui/screen.ts";
 import { registerToolFrames } from "./ui/tool-frame.ts";
@@ -129,6 +129,7 @@ export const frameFeature = defineFeature({
 				from: (text: string) => PROMPT_FROM.current(scope, text)?.name,
 			};
 		});
+		onLoadedListsChange(() => queueMicrotask(() => live.repaint?.()));
 		frameQueue(() => live.ctx?.ui.theme);
 		const repaint = () => {
 			screen.bump();
@@ -500,6 +501,7 @@ function installHeader(
 					counts: () => loadedCounts(scope),
 					lastVisit,
 					github,
+					loaded: loadedLists,
 				},
 				tui,
 			),

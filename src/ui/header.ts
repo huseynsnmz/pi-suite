@@ -13,6 +13,7 @@ import { EFFORT_LEVELS, type Paint } from "../render/paint.ts";
 import { styledText } from "../render/safe.ts";
 import { renderSegments, type SegmentId } from "../render/segments.ts";
 import type { HeaderStyle } from "../settings.ts";
+import type { StartupList } from "./pi-entries.ts";
 import type { Screen } from "./screen.ts";
 
 /** The π the start card draws, and the docs draw the project's icon from. */
@@ -48,6 +49,8 @@ export interface HeaderSource {
 	lastVisit(): LastVisit | undefined;
 	/** Undefined while it is still being asked. */
 	github?(): GithubState | undefined;
+	/** What Pi loaded, one row each. */
+	loaded?(): readonly StartupList[];
 }
 
 interface Hint {
@@ -80,16 +83,29 @@ export class HeaderComponent implements Component {
 
 	/** Kept for a moment: the card changes rarely and pi redraws on every keystroke. */
 	#drawn:
-		| { width: number; at: number; github: GithubState | undefined; lines: string[] }
+		| {
+				width: number;
+				at: number;
+				github: GithubState | undefined;
+				loaded: readonly StartupList[] | undefined;
+				lines: string[];
+		  }
 		| undefined;
 
 	render(width: number): string[] {
 		const now = Date.now();
 		const github = this.#source.github?.();
+		const loaded = this.#source.loaded?.();
 		const risen = now - this.#born > LOGO.length * RISE_STEP_MS;
 		const drawn = this.#drawn;
 		// GitHub answers after the card is up, and that must not wait for the next keystroke.
-		if (risen && drawn?.width === width && drawn.github === github && now - drawn.at < REDRAW_MS)
+		if (
+			risen &&
+			drawn?.width === width &&
+			drawn.github === github &&
+			drawn.loaded === loaded &&
+			now - drawn.at < REDRAW_MS
+		)
 			return drawn.lines;
 		const notes = startNotes(
 			this.#screen.snapshot(),
@@ -103,7 +119,7 @@ export class HeaderComponent implements Component {
 				? this.#compact(width, notes)
 				: this.#card(width, notes)
 		).map(styledText);
-		this.#drawn = { width, at: now, github, lines };
+		this.#drawn = { width, at: now, github, loaded, lines };
 		return lines;
 	}
 
@@ -130,6 +146,7 @@ export class HeaderComponent implements Component {
 			this.#segments(["model", "effort"], paint),
 			"",
 			...this.#notes(notes, paint, last, snapshot.now),
+			...this.#loaded(paint, rightWidth),
 		];
 		const left = ["", ...this.#logo(paint), ""];
 
@@ -201,6 +218,19 @@ export class HeaderComponent implements Component {
 		});
 		if (notes.length > NOTES) shown.push(paint.dim(`and ${notes.length - NOTES} more`));
 		return shown;
+	}
+
+	#loaded(paint: Paint, width: number): string[] {
+		const lists = (this.#source.loaded?.() ?? []).filter((list) => list.items.length > 0);
+		if (lists.length === 0) return [];
+		const label = Math.max(...lists.map((list) => list.name.length)) + 2;
+		return [
+			"",
+			...lists.map(
+				({ name, items }) =>
+					`${paint.dim(name.padEnd(label))}${paint.muted(fitNames(items, width - label))}`,
+			),
+		];
 	}
 
 	#closing(
@@ -290,6 +320,17 @@ export function hints(modes: boolean, effortKeys: string = keyText("app.thinking
 		{ key: free || "/effort", does: "effort" },
 		{ key: keyLabel("alt+s"), does: "settings" },
 	];
+}
+
+/** As many names as fit, then how many did not. */
+export function fitNames(names: readonly string[], width: number): string {
+	let fitted = names.join(", ");
+	if (visibleWidth(fitted) <= width) return fitted;
+	for (let shown = names.length - 1; shown > 0; shown--) {
+		fitted = `${names.slice(0, shown).join(", ")}, +${names.length - shown}`;
+		if (visibleWidth(fitted) <= width) return fitted;
+	}
+	return truncateToWidth(`${names[0] ?? ""}, +${names.length - 1}`, width, CUT);
 }
 
 export function halfBlocks(pixels: readonly string[]): string[] {

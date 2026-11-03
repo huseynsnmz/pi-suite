@@ -55,6 +55,9 @@ if any("pi-permission-system" in p for p in EXTRA):
         (agent / "extensions" / name / "config.json").write_text(json.dumps(config))
 
 
+(project / "AGENTS.md").write_text("Be brief.\n")
+
+
 def git(*args, cwd=project):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
 
@@ -213,7 +216,7 @@ try:
             term.pump(1)
             plain = term.plain()
             check("the skill is listed", "review-permissions" in plain)
-            check("the skills list is framed", "\u2500 skills " in plain and "[Skills]" not in plain)
+            check("the card has a skills row", bool(re.search(r"skills +\S", plain)) and "[Skills]" not in plain)
         os.write(term.fd, b"/effort high")
         term.pump(0.5)
         os.write(term.fd, b"\x1b")
@@ -254,7 +257,7 @@ try:
     if any("pi-permission-system" in p for p in EXTRA):
         drawn = re.search(r"(\x1b\[[\d;]*m)perm-judge: ", term.raw)
         check("the judge's status is drawn dim", drawn is not None, repr(drawn.group(1)) if drawn else "not drawn")
-    check("git counts still show", "?1" in term.plain() or "? 1" in term.plain())
+    check("git counts still show", "?2" in term.plain() or "? 2" in term.plain())
     term.close()
 
     git("remote", "set-url", "origin", "git@github.com:team/app.git")
@@ -276,8 +279,15 @@ try:
     plain = term.plain()
     check("the start card shows the failed pipeline", "CI failed on" in plain, plain[-300:] if "CI failed on" not in plain else "")
     check("the start card shows the merge request", "MR !7" in plain)
-    for section in ("extensions",):
-        check(f"Pi's {section} list is framed", f"\u2500 {section} " in plain)
+    check("the card lists the context", bool(re.search(r"\u2502.*context +AGENTS\.md.*\u2502", plain)))
+    check("the card lists the extensions", bool(re.search(r"\u2502.*extensions +\S.*\u2502", plain)))
+    check("Pi's own lists are not drawn too", "\u2500 extensions " not in plain)
+    os.write(term.fd, b"\x0f")
+    term.pump(1.5)
+    check("ctrl+o shows the full list in a frame", "\u2500 extensions " in term.plain())
+    os.write(term.fd, b"\x0f")
+    term.pump(1)
+    Path(os.environ.get("PI_FRAME_E2E_CARD", os.devnull)).write_text(term.raw)
     check("no bracketed section names", "[Extensions]" not in plain)
     if sys.platform == "darwin":
         check("the card says option, not alt", "option+s settings" in plain and "alt+s" not in plain)

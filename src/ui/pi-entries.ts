@@ -10,7 +10,7 @@ import {
 	type Theme,
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
+import { Container, Spacer, stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 
 import type { IconSet } from "../render/glyphs.ts";
 import { isBlank } from "./tool-frame.ts";
@@ -73,6 +73,78 @@ export function framePiEntries(source: EntryPaint): void {
 	});
 	wrap(BashExecutionComponent, (self, look) => shellFrame(self, look));
 	wrap(Text, (self, look) => startupFrame(self, look));
+	liftLoadedLists();
+}
+
+const CARD_MIN_WIDTH = 48;
+
+export interface StartupList {
+	name: string;
+	items: string[];
+}
+
+let startupLists: readonly StartupList[] = [];
+let startupChanged: () => void = () => {};
+
+/** What Pi loaded, in its order, read from the list the start card takes over. */
+export function loadedLists(): readonly StartupList[] {
+	return startupLists;
+}
+
+export function onLoadedListsChange(listener: () => void): void {
+	startupChanged = listener;
+}
+
+/** `@scope/pi-modes@0.2.1:src` and `pi-modes/src` are both `pi-modes`. */
+export function extensionName(label: string): string {
+	return label
+		.replace(/^@[^/]+\//, "")
+		.replace(/(?:[@:]|\/src\b).*$/, "");
+}
+
+/** A section Pi shows as one line of names, and not yet expanded with Ctrl+O. */
+function compactSection(child: unknown): StartupList | undefined {
+	if (!(child instanceof Text) || (child as { state?: { expanded?: boolean } }).state?.expanded === true)
+		return undefined;
+	const name = STARTUP_SECTION.exec((child as unknown as { text?: string }).text ?? "")?.[1];
+	if (name === undefined || !STARTUP_LOADED.has(name)) return undefined;
+	const [, body] = stripTerminalSequences((child as unknown as { text: string }).text).split("\n");
+	const items = (body ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+	return {
+		name: name.toLowerCase(),
+		items: name === "Extensions" ? [...new Set(items.map(extensionName))] : items,
+	};
+}
+
+/**
+ * The start card shows these lists, so Pi's own section and the spacer after it draw nothing.
+ * Ctrl+O and problem sections still draw here. Pi has no hook for this, so it wraps the
+ * container's render and leaves anything it doesn't recognize alone.
+ */
+function liftLoadedLists(): void {
+	const prototype = Container.prototype as unknown as { render: Render };
+	const own = prototype.render;
+	prototype.render = function render(this: Container, width: number) {
+		const first = this.children.find((child) => !(child instanceof Spacer));
+		if (paint() === undefined || width < CARD_MIN_WIDTH || !(first instanceof Text)) return own.call(this, width);
+		// Pi fills in a section's text as it draws.
+		first.render(width);
+		if (compactSection(first) === undefined) return own.call(this, width);
+		const lists: StartupList[] = [];
+		const lines: string[] = [];
+		for (const child of this.children) {
+			if (child instanceof Spacer) continue;
+			const drawn = child.render(width);
+			const list = compactSection(child);
+			if (list === undefined) lines.push(...drawn, "");
+			else lists.push(list);
+		}
+		if (JSON.stringify(lists) !== JSON.stringify(startupLists)) {
+			startupLists = lists;
+			startupChanged();
+		}
+		return lines;
+	};
 }
 
 /** Pi lists what it loaded as `[Skills]` above a plain list, and says it with `Text`. */

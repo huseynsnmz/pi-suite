@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+### Changed
+
+- The context, skills, prompts and extensions Pi loaded are rows in the start card, with `+N` for what doesn't fit. `Ctrl+O` still shows them in full, and problems still get their own frame.
+
 ## 0.3.1
 
 ### Added
