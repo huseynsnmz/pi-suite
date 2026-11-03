@@ -1,6 +1,6 @@
 {
 	"name": "@huseynsnmz/pi-frame",
-	"version": "0.3.5",
+	"version": "0.3.6",
 	"description": "Pi's start screen, a framed editor, a box around every tool call and a session footer. A fork of @adeildo/pi-look.",
 	"keywords": [
 		"pi",

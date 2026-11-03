@@ -249,7 +249,7 @@ export class HeaderComponent implements Component {
 
 	#hintPieces(paint: Paint): { text: string; priority: number }[] {
 		const snapshot = this.#screen.snapshot();
-		return hints(modeOf(snapshot.statuses) !== undefined, snapshot.sandbox !== undefined)
+		return hints(modeOf(snapshot.statuses) !== undefined, snapshot.sandbox)
 			.map((hint, index) => ({
 				text: `${paint.role("brand", hint.key)} ${paint.dim(hint.does)}`,
 				priority: 3 + index,
@@ -309,12 +309,13 @@ function packageVersion(): string {
 }
 
 /** With pi-modes loaded, Shift+Tab changes the mode, whatever pi's own binding says. */
-export function hints(modes: boolean, sandbox: boolean): Hint[] {
+export function hints(modes: boolean, sandbox: "on" | "off" | undefined): Hint[] {
 	return [
 		{ key: "/", does: "commands" },
 		{ key: keyText("app.model.select") || "/model", does: "model" },
 		...(modes ? [{ key: MODE_KEY, does: "mode" }] : []),
-		...(sandbox ? [{ key: keyLabel("alt+s"), does: "sandbox" }] : []),
+		...(sandbox === "on" ? [{ key: "/sandbox-disable", does: "sandbox off" }] : []),
+		...(sandbox === "off" ? [{ key: "/sandbox-enable", does: "sandbox on" }] : []),
 		{ key: keyLabel(SETTINGS_KEY), does: "settings" },
 	];
 }

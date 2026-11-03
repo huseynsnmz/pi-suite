@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 
-import { cmdAsKey, optionSAsAlt, SETTINGS_SHORTCUT, SETTINGS_SHORTCUT_INPUT, keyLabel } from "../src/render/keys.ts";
+import { cmdAsKey, SETTINGS_SHORTCUT, SETTINGS_SHORTCUT_INPUT, keyLabel } from "../src/render/keys.ts";
 import { fitNames } from "../src/ui/header.ts";
 import { EXIT_WINDOW_MS, nextInterrupt } from "../src/ui/interrupt.ts";
 
@@ -33,13 +33,6 @@ test("key labels name the key that works", () => {
 	expect(keyLabel("alt+g", "darwin", true)).toBe("option+g");
 	expect(keyLabel("alt+s", "linux", true)).toBe("alt+s");
 	expect(keyLabel("shift+tab", "darwin", true)).toBe("shift+tab");
-});
-
-test("Option+S on a Mac reaches Alt+S, wherever the terminal leaves Option", () => {
-	expect(matchesKey(optionSAsAlt("ß", "darwin") ?? "", "alt+s")).toBe(true);
-	expect(matchesKey(optionSAsAlt("\u001b[223u", "darwin") ?? "", "alt+s")).toBe(true);
-	expect(optionSAsAlt("ß", "linux")).toBeUndefined();
-	expect(optionSAsAlt("s", "darwin")).toBeUndefined();
 });
 
 test("the settings shortcut is reached with and without the kitty protocol", () => {

@@ -300,7 +300,7 @@ try:
     check("no shortcut conflict warnings", "shortcut conflict" not in plain.lower() and "conflicts with" not in plain.lower())
     if SANDBOX:
         check("the card gives an extension's version", "pi-sandbox@0.7.3" in plain)
-    check("the sandbox key is on the card only with pi-sandbox", ("option+s sandbox" in plain or "alt+s sandbox" in plain) == SANDBOX)
+    check("the sandbox command is on the card only with pi-sandbox", ("/sandbox-disable" in plain) == SANDBOX)
     before = len(term.plain())
     os.write(term.fd, b"\x13")
     check("ctrl+s opens the settings", term.wait("Frame", 8) and "Frame" in term.plain()[before:])
@@ -308,17 +308,20 @@ try:
     term.pump(1)
     if SANDBOX:
         check("the footer says the sandbox is on", "sandbox: on" in term.plain())
+        def command(text):
+            # Esc closes the autocomplete list, which would otherwise take the Enter.
+            term.send(text)
+            term.pump(0.4)
+            os.write(term.fd, b"\x1b")
+            term.pump(0.4)
+            term.send("\r")
         before = len(term.plain())
-        os.write(term.fd, b"\x1bs")
-        check("option+s turns the sandbox off", term.wait("Sandbox disabled", 8))
+        command("/sandbox-disable")
+        check("/sandbox-disable turns the sandbox off", term.wait("Sandbox disabled", 8))
         term.pump(1)
         check("the footer says the sandbox is off", "sandbox: off" in term.plain()[before:])
-        os.write(term.fd, b"\x1bs")
-        check("option+s turns it back on", term.wait("Sandbox enabled", 8))
-        os.write(term.fd, "ß".encode())
-        check("option+s works when the terminal just types ß", term.wait("Sandbox disabled", 8))
-        os.write(term.fd, "ß".encode())
-        term.wait("Sandbox enabled", 8)
+        command("/sandbox-enable")
+        check("/sandbox-enable turns it back on", term.wait("Sandbox enabled", 8))
 
     started = time.time()
     term.send("SLEEP")

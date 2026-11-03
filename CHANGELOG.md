@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.6
+
+### Changed
+
+- The start card shows `/sandbox-disable` or `/sandbox-enable` instead of a key, and Option+S no longer turns `ß` into the sandbox's key.
+
 ## 0.3.5
 
 ### Changed

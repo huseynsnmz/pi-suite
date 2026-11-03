@@ -17,14 +17,14 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.3.5
+   pi install npm:@huseynsnmz/pi-frame@0.3.6
    ```
 
 3. Restart Pi. The start card says `π-frame`.
 
 Your `pi-look` settings don't carry over. Press `Ctrl+S` and open the **Frame** tab to set them again.
 
-On a Mac, `Alt` means the Option key, which (other than `Option+S` for `pi-sandbox`, which always works) needs Left Option set to `Esc+` in iTerm2, `"terminal": { "option_as_meta": true }` in Zed, or "Use Option as Meta" in Terminal.app. Otherwise Option types a character such as `ß`. In a terminal that uses the kitty keyboard protocol, such as Ghostty or kitty, `Cmd+S` and `Cmd+O` work too, and the start card says so.
+On a Mac, `Alt` means the Option key, which needs Left Option set to `Esc+` in iTerm2, `"terminal": { "option_as_meta": true }` in Zed, or "Use Option as Meta" in Terminal.app. Otherwise Option types a character such as `ß`. In a terminal that uses the kitty keyboard protocol, such as Ghostty or kitty, `Cmd+S` and `Cmd+O` work too, and the start card says so.
 
 ## What you see
 
@@ -51,7 +51,7 @@ More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/
 
 **`pi-modes`:** it takes over `Shift+Tab`, so the start card says `shift+tab mode`. To keep a key for effort, set `app.thinking.cycle` in `~/.pi/agent/keybindings.json`, or use `/effort`.
 
-**`pi-sandbox`:** the start card shows `option+s sandbox`, which is `pi-sandbox`'s own on/off key, and the bottom line shows `sandbox: on` or `sandbox: off` after the mode. Its longer status moves to `/sandbox`.
+**`pi-sandbox`:** the start card shows `/sandbox-disable` or `/sandbox-enable`, and the bottom line shows `sandbox: on` or `sandbox: off` after the mode. Its longer status moves to `/sandbox`.
 
 **`pi-permission-system`, `pi-permission-classifier`:** no conflicts were found, and the automated run covers them together with `pi-modes`.
 

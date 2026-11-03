@@ -27,7 +27,7 @@ import { keyText } from "@earendil-works/pi-coding-agent";
 import { Key, type KeyId, type TUI } from "@earendil-works/pi-tui";
 
 import { type GitState, readGit } from "./data/git.ts";
-import { cmdAsKey, optionSAsAlt, SETTINGS_SHORTCUT, watchCmdKey } from "./render/keys.ts";
+import { cmdAsKey, SETTINGS_SHORTCUT, watchCmdKey } from "./render/keys.ts";
 import { frameColorOf } from "./data/mode.ts";
 import { type GithubState, readGithub } from "./data/github.ts";
 import { emptySnapshot, type LiveInputs, type Snapshot, SnapshotReader } from "./data/snapshot.ts";
@@ -172,8 +172,7 @@ export const frameFeature = defineFeature({
 
 			stopCmdKeys?.();
 			stopCmdKeys = ctx.ui.onTerminalInput((data) => {
-				const option = optionSAsAlt(data);
-				const key = option !== undefined && sandboxInstalled(scope) ? option : cmdAsKey(data);
+				const key = cmdAsKey(data);
 				return key === undefined ? undefined : { data: key };
 			});
 

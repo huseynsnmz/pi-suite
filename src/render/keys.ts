@@ -35,14 +35,6 @@ export function keyLabel(
 	return key.replace(/\balt\+/g, "option+");
 }
 
-/**
- * On a Mac, Option+S types `ß` unless the terminal sends Option as Alt, so the sandbox's Alt+S
- * never fires. Without the sandbox this stays a plain `ß`.
- */
-export function optionSAsAlt(data: string, platform: string = process.platform): string | undefined {
-	return platform === "darwin" && (data === "ß" || data === "\u001b[223u") ? "\u001b[115;3u" : undefined;
-}
-
 /** A Cmd key as the key its shortcut listens for. Undefined for any other input. */
 export function cmdAsKey(data: string): string | undefined {
 	for (const [letter, { sends }] of Object.entries(CMD_KEYS))
