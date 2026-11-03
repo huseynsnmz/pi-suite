@@ -17,7 +17,7 @@ export interface RequestRecord {
 	generationMs: number;
 }
 
-export const REQUEST_CHANGES = "pi-look:request";
+export const REQUEST_CHANGES = "pi-frame:request";
 /** Entries from this package's old name. They have no `prompt`, so they count only for decode. */
 const LEGACY_CHANGES = "pi-statusline:turn";
 

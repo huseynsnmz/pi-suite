@@ -7,7 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteProvider, EditorTheme, TUI } from "@earendil-works/pi-tui";
 
-import { LookEditor } from "../src/ui/editor.ts";
+import { FrameEditor } from "../src/ui/editor.ts";
 import { FooterComponent, StripComponent } from "../src/ui/footer.ts";
 import { halfBlocks, HeaderComponent } from "../src/ui/header.ts";
 import { draftedTool, describe as describeActivity } from "../src/ui/working.ts";
@@ -38,7 +38,7 @@ function editor(
 	overrides: Parameters<typeof screen>[1] = {},
 ) {
 	const keybindings = { matches: () => false } as unknown as KeybindingsManager;
-	return new LookEditor(
+	return new FrameEditor(
 		fakeTui(),
 		editorTheme,
 		keybindings,
@@ -68,7 +68,7 @@ const BACKSPACE = "\x7f";
 const ESCAPE = "\x1b";
 
 /** Each key waits for the list it asks for, as a person typing would. */
-async function press(view: LookEditor, ...keys: string[]): Promise<void> {
+async function press(view: FrameEditor, ...keys: string[]): Promise<void> {
 	for (const key of keys) {
 		view.handleInput(key);
 		// oxlint-disable-next-line no-await-in-loop -- the next key lands on the list this one opened
@@ -168,7 +168,7 @@ describe("editor", () => {
 		view.setWorkingStatusIndicator({
 			renderInBorder: () => "* thinking",
 			renderSpinnerInBorder: () => "*",
-		} as unknown as Parameters<LookEditor["setWorkingStatusIndicator"]>[0]);
+		} as unknown as Parameters<FrameEditor["setWorkingStatusIndicator"]>[0]);
 		const [top] = view.render(80).map(plain);
 		expect(top).toMatch(/^╭─ main · \* thinking ─+ ~\/Projects\/pi-harness ─╮$/);
 	});
@@ -328,7 +328,7 @@ describe("header", () => {
 
 	test("draws the π, the folder and the model, and says when nothing waits on you", () => {
 		const lines = new HeaderComponent(screen(), source).render(100).map(plain);
-		expect(lines[0]).toMatch(/^╭─ π-harness \S+ ─+ pi \S+ ─╮$/);
+		expect(lines[0]).toMatch(/^╭─ π-frame \S+ ─+ pi \S+ ─╮$/);
 		expect(lines.some((line) => line.includes("▀▀▀██▀▀▀▀██▀▀▀"))).toBe(true);
 		expect(lines.some((line) => line.includes("Anthropic/Opus 5.5"))).toBe(true);
 		expect(lines.some((line) => line.includes("First session in this folder."))).toBe(true);
@@ -341,7 +341,7 @@ describe("header", () => {
 		const lines = new HeaderComponent(screen(), { ...source, lastVisit: () => last })
 			.render(100)
 			.map(plain);
-		expect(lines.some((line) => /π-harness \S+ is new +was 0\.0\.1/.test(line))).toBe(true);
+		expect(lines.some((line) => /π-frame \S+ is new +was 0\.0\.1/.test(line))).toBe(true);
 		expect(lines.findLast(Boolean)).toMatch(/^╰─ 1 thing since .+ \/ commands/);
 	});
 
@@ -362,7 +362,7 @@ describe("header", () => {
 
 	test("plain lines when compact", () => {
 		const lines = new HeaderComponent(screen(), { ...source, style: () => "compact" }).render(120);
-		expect(plain(lines[0] ?? "")).toContain("π-harness");
+		expect(plain(lines[0] ?? "")).toContain("π-frame");
 		expect(plain(lines[1] ?? "")).toContain("First session in this folder.");
 	});
 

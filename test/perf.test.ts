@@ -7,13 +7,13 @@ import { fakePi } from "@adeildo/pi-kit/testing";
 import type { Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-import { look } from "../src/index.ts";
+import { frameFeature } from "../src/index.ts";
 import { StripComponent } from "../src/ui/footer.ts";
 import { screen, snapshot } from "./helpers.ts";
 
 function frame(theme: Theme) {
 	const fake = fakePi();
-	createApp(fake.pi, { name: "look" }).use(look).build();
+	createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 	RULING.provide({ events: fake.pi.events, warn: () => {} }, () => ({
 		tone: "success",
 		head: "judge approved",
@@ -45,7 +45,7 @@ function frame(theme: Theme) {
 /** An edit pi has finished, holding its diff the way pi's edit component does. */
 function editFrame(theme: Theme, diff: string) {
 	const fake = fakePi();
-	createApp(fake.pi, { name: "look" }).use(look).build();
+	createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 	const base: ToolRenderers = {
 		renderCall: () => Object.assign(new Text("edit a.ts", 0, 0), { preview: { diff } }),
 	};

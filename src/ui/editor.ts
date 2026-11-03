@@ -30,7 +30,7 @@ const CURSOR_SEQUENCES: Record<CursorStyle, string> = {
 	underline: "\x1b[4 q",
 };
 
-export class LookEditor extends CustomEditor {
+export class FrameEditor extends CustomEditor {
 	readonly #screen: Screen;
 	#indicator: WorkingIndicator;
 	#framing = false;

@@ -77,7 +77,7 @@ export function startNotes(
 		notes.push({
 			mark: GLYPH.up,
 			color: "accent",
-			text: `${GLYPH.pi}-harness ${version} is new`,
+			text: `${GLYPH.pi}-frame ${version} is new`,
 			detail: `was ${last.version}`,
 		});
 	return notes;

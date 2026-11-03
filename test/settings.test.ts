@@ -2,14 +2,14 @@ import { expect, test } from "bun:test";
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { LOOK_SETTINGS } from "../src/settings.ts";
+import { FRAME_SETTINGS } from "../src/settings.ts";
 import { framePreview, iconsPreview, userFramePreview } from "../src/ui/previews.ts";
 
 test("only what depends on the terminal or on taste in lines is a setting", () => {
-	expect(LOOK_SETTINGS.map((entry) => entry.id)).toEqual([
-		"look.icons",
-		"look.frame.style",
-		"look.userFrame",
+	expect(FRAME_SETTINGS.map((entry) => entry.id)).toEqual([
+		"frame.icons",
+		"frame.style",
+		"frame.userFrame",
 	]);
 });
 

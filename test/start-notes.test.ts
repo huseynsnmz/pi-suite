@@ -55,7 +55,7 @@ describe("what the start screen says", () => {
 			["main is 3 behind", "pull before you start"],
 			["@claude-probe", "works here"],
 			["week at 82%", "resets in 5d"],
-			["\u03c0-harness 5.9.2 is new", "was 5.9.1"],
+			["\u03c0-frame 5.9.2 is new", "was 5.9.1"],
 		]);
 	});
 

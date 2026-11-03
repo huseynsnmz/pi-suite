@@ -43,16 +43,16 @@ import {
 	header,
 	icons,
 	labels,
-	LOOK_SETTINGS,
+	FRAME_SETTINGS,
 	pathLength,
 	SECTIONS,
 	SEPARATOR,
 	SLOTS,
 	userFrame,
 } from "./settings.ts";
-import { applyCursor, LookEditor } from "./ui/editor.ts";
+import { applyCursor, FrameEditor } from "./ui/editor.ts";
 import { FooterComponent, StripComponent } from "./ui/footer.ts";
-import { HARNESS_VERSION, HeaderComponent, type LoadedCounts } from "./ui/header.ts";
+import { PACKAGE_VERSION, HeaderComponent, type LoadedCounts } from "./ui/header.ts";
 import { OutputView, outputsOf } from "./ui/outputs.ts";
 import { framePiEntries } from "./ui/pi-entries.ts";
 import { frameQueue } from "./ui/queue.ts";
@@ -65,7 +65,7 @@ export { SEGMENT_IDS, SEGMENTS, type SegmentId } from "./render/segments.ts";
 import type { SegmentId } from "./render/segments.ts";
 export { ROLE_TOKENS } from "./render/paint.ts";
 
-const STRIP_WIDGET = "pi-look:strip";
+const STRIP_WIDGET = "pi-frame:strip";
 const TICK_MS = 500;
 // Once per process, however many sessions it opens.
 let probedGithub = false;
@@ -83,12 +83,12 @@ interface Live {
 	activity: string | undefined;
 }
 
-export const look = defineFeature({
-	id: "look",
+export const frameFeature = defineFeature({
+	id: "frame",
 	description:
 		"The start screen, a framed editor, the footer and a working line that says what runs",
 	sections: SECTIONS,
-	settings: LOOK_SETTINGS,
+	settings: FRAME_SETTINGS,
 	setup(scope) {
 		const telemetry = new Telemetry();
 		const reader = new SnapshotReader();
@@ -123,9 +123,9 @@ export const look = defineFeature({
 			live.repaint?.();
 		};
 
-		for (const entry of LOOK_SETTINGS) entry.listen(scope, repaint);
+		for (const entry of FRAME_SETTINGS) entry.listen(scope, repaint);
 		frame.listen(scope, () => live.ctx && installEditor(live.ctx, screen, live, scope));
-		const visitsFile = join(dirname(scope.settings.globalPath), "look-visits.json");
+		const visitsFile = join(dirname(scope.settings.globalPath), "frame-visits.json");
 		let visited = false;
 		let lastVisit: LastVisit | undefined;
 
@@ -136,7 +136,7 @@ export const look = defineFeature({
 				const source = sourceFor(scope.events, address);
 				if (ctx === undefined || ctx.mode !== "tui" || source === undefined) return false;
 				openView(ctx, screen, source).catch((error: unknown) => {
-					scope.warn(`pi-look: could not show ${address.session}: ${String(error)}`);
+					scope.warn(`pi-frame: could not show ${address.session}: ${String(error)}`);
 				});
 				return true;
 			},
@@ -178,7 +178,7 @@ export const look = defineFeature({
 			// A new session in the same pi is not a return to the folder.
 			if (!visited) {
 				visited = true;
-				lastVisit = visit(visitsFile, ctx.cwd, HARNESS_VERSION, Date.now());
+				lastVisit = visit(visitsFile, ctx.cwd, PACKAGE_VERSION, Date.now());
 			}
 			// Off the critical path: the card shows these lines when the answers arrive.
 			if (!probedGithub) {
@@ -418,7 +418,7 @@ function installEditor(
 	ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 		live.tui = tui;
 		applyCursor(tui, cursor);
-		return new LookEditor(tui, theme, keybindings, screen);
+		return new FrameEditor(tui, theme, keybindings, screen);
 	});
 }
 
@@ -505,7 +505,7 @@ function stopTicking(live: Live): void {
 }
 
 export default function piLook(pi: ExtensionAPI): void {
-	createApp(pi, { name: "pi-look" }).use(look).build();
+	createApp(pi, { name: "pi-frame" }).use(frameFeature).build();
 }
 
 async function openView(

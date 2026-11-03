@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 
-import { look } from "../src/index.ts";
+import { frameFeature } from "../src/index.ts";
 
 interface ScriptedCall {
 	id: string;
@@ -49,7 +49,7 @@ export interface Harness {
 export function harness(cwd: string): Harness {
 	initTheme("dark", false);
 	const fake = fakePi();
-	createApp(fake.pi, { name: "look" }).use(look).build();
+	createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 	const ctx = {} as ExtensionContext;
 	const live = new Map<string, Live>();
 	const content: Live["block"][] = [];

@@ -8,7 +8,7 @@ import { fakePi } from "@adeildo/pi-kit/testing";
 import type { AgentToolResult, Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { Container, stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 
-import { look } from "../src/index.ts";
+import { frameFeature } from "../src/index.ts";
 import { editLines } from "../src/render/streaming.ts";
 import { stateMark, toolIcon } from "../src/render/tools.ts";
 import { hidden } from "../src/ui/tool-frame.ts";
@@ -63,7 +63,7 @@ function context(overrides: Record<string, unknown> = {}) {
 /** A call and its result share one context, which is where the frame keeps the clock. */
 function whole(ruling?: CallRuling, output = "583 pass") {
 	const fake = fakePi();
-	createApp(fake.pi, { name: "look" }).use(look).build();
+	createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 	RULING.provide({ events: fake.pi.events, warn: () => {} }, (toolCallId) =>
 		toolCallId === "call-1" ? ruling : undefined,
 	);
@@ -89,7 +89,7 @@ function whole(ruling?: CallRuling, output = "583 pass") {
 
 function framed(ruling?: CallRuling, toolName = "bash", overrides: Record<string, unknown> = {}) {
 	const fake = fakePi();
-	createApp(fake.pi, { name: "look" }).use(look).build();
+	createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 	RULING.provide({ events: fake.pi.events, warn: () => {} }, (toolCallId) =>
 		toolCallId === "call-1" ? ruling : undefined,
 	);
@@ -171,7 +171,7 @@ describe("the frame around a tool call", () => {
 
 	test("closes a call that is still running with the time so far", () => {
 		const fake = fakePi();
-		createApp(fake.pi, { name: "look" }).use(look).build();
+		createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 		const chain = resolve(fake, renderers());
 		if (chain === undefined) throw new Error("no renderers");
 		const shared = context({ state: { startedAt: Date.now() - 3_200 } });
@@ -203,7 +203,7 @@ describe("the frame around a tool call", () => {
 
 	test("frames a tool that brings no renderers of its own", () => {
 		const fake = fakePi();
-		createApp(fake.pi, { name: "look" }).use(look).build();
+		createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 		const chain = resolve(fake, {}, "memory_read");
 		if (chain === undefined) throw new Error("no renderers");
 
@@ -226,7 +226,7 @@ describe("the frame around a tool call", () => {
 
 	test("keeps the half a tool brings, and stands in for the other", () => {
 		const fake = fakePi();
-		createApp(fake.pi, { name: "look" }).use(look).build();
+		createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 		const chain = resolve(fake, { renderCall: () => new Text("mine", 0, 0) }, "memory_read");
 		if (chain === undefined) throw new Error("no renderers");
 
@@ -246,7 +246,7 @@ describe("the frame around a tool call", () => {
 
 	test("shortens a long result, and shows it all when expanded", () => {
 		const fake = fakePi();
-		createApp(fake.pi, { name: "look" }).use(look).build();
+		createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 		const chain = resolve(fake, {}, "memory_read");
 		if (chain === undefined) throw new Error("no renderers");
 		const output = Array.from({ length: 14 }, (_, index) => `line ${index + 1}`).join("\n");
@@ -274,7 +274,7 @@ describe("the frame around a tool call", () => {
 
 	test("stays open for a call replayed with its result, instead of closing early", () => {
 		const fake = fakePi();
-		createApp(fake.pi, { name: "look" }).use(look).build();
+		createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 		const chain = resolve(fake, renderers());
 		if (chain === undefined) throw new Error("no renderers");
 
@@ -299,7 +299,7 @@ describe("the frame around a tool call", () => {
 describe("an edit or a write while the model writes it", () => {
 	function streaming(toolName: string, args: unknown, overrides: Record<string, unknown> = {}) {
 		const fake = fakePi();
-		createApp(fake.pi, { name: "look" }).use(look).build();
+		createApp(fake.pi, { name: "look" }).use(frameFeature).build();
 		let asked = 0;
 		const own: ToolRenderers = {
 			renderCall: () => {

@@ -52,7 +52,7 @@ export const gaugeCells = 8;
 export const labels = true;
 
 export const icons = setting<IconMode>({
-	id: "look.icons",
+	id: "frame.icons",
 	default: "auto",
 	decoder: literal("auto", "nerd", "unicode", "ascii"),
 	ui: {
@@ -64,7 +64,7 @@ export const icons = setting<IconMode>({
 });
 
 export const frame = setting<FrameStyle | "off">({
-	id: "look.frame.style",
+	id: "frame.style",
 	default: "rounded",
 	decoder: literal("rounded", "square", "heavy", "line", "off"),
 	project: true,
@@ -78,7 +78,7 @@ export const frame = setting<FrameStyle | "off">({
 });
 
 export const userFrame = setting({
-	id: "look.userFrame",
+	id: "frame.userFrame",
 	default: true,
 	decoder: boolean,
 	ui: {
@@ -90,4 +90,4 @@ export const userFrame = setting({
 	},
 });
 
-export const LOOK_SETTINGS = [icons, frame, userFrame];
+export const FRAME_SETTINGS = [icons, frame, userFrame];

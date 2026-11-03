@@ -101,6 +101,6 @@ describe("the session's name on the start card", () => {
 		const [first] = new HeaderComponent(screen(snapshot({ me: { handle: "quokka" } })), style)
 			.render(100)
 			.map(plain);
-		expect(first).toMatch(/π-harness .* · quokka · /);
+		expect(first).toMatch(/π-frame .* · quokka · /);
 	});
 });

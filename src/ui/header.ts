@@ -57,7 +57,7 @@ const RISE_STEP_MS = 70;
 const NOTES = 6;
 const REDRAW_MS = 1000;
 /** Read once from the package that ships it. */
-export const HARNESS_VERSION = harnessVersion();
+export const PACKAGE_VERSION = packageVersion();
 
 export class HeaderComponent implements Component {
 	readonly #screen: Screen;
@@ -89,7 +89,7 @@ export class HeaderComponent implements Component {
 			return drawn.lines;
 		const notes = startNotes(
 			this.#screen.snapshot(),
-			HARNESS_VERSION,
+			PACKAGE_VERSION,
 			this.#source.lastVisit(),
 			github,
 		);
@@ -240,7 +240,7 @@ export class HeaderComponent implements Component {
 
 	#title(paint: Paint): string {
 		const glyph = paint.bold(paint.role("brand", GLYPH.pi));
-		return `${glyph}${paint.bold("-harness")} ${paint.dim(HARNESS_VERSION)}`;
+		return `${glyph}${paint.bold("-frame")} ${paint.dim(PACKAGE_VERSION)}`;
 	}
 
 	/** The name the rooms and the remote page use for this session, with pi's /name beside it. */
@@ -262,7 +262,7 @@ export class HeaderComponent implements Component {
 	}
 }
 
-function harnessVersion(): string {
+function packageVersion(): string {
 	try {
 		const file = new URL("../../package.json", import.meta.url);
 		return (JSON.parse(readFileSync(file, "utf8")) as { version?: string }).version ?? "";
