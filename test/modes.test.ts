@@ -11,6 +11,8 @@ const cases: Array<[string, Mode, string, unknown, string]> = [
   ["auto leaves bash to the permission system", "auto", "bash", bash("rm x"), "allow"],
   ["yolo leaves bash to the permission system", "yolo", "bash", bash("rm x"), "allow"],
   ["plan allows reading", "plan", "read", {}, "allow"],
+  ["plan allows pi-web fetch", "plan", "web_fetch", {}, "allow"],
+  ["read-only allows pi-web search", "read-only", "web_search", {}, "allow"],
   ["plan blocks write", "plan", "write", {}, "block"],
   ["plan blocks edit", "plan", "edit", {}, "block"],
   ["plan blocks subagents", "plan", "subagent", {}, "block"],

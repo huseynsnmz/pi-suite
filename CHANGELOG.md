@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- `plan` and `read-only` allow `web_fetch` and `web_search` from `pi-web`, for research while planning.
+
 ## [0.4.0]
 
 ### Security

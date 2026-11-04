@@ -110,6 +110,8 @@ In plan mode the agent calls the `submit_plan` tool. You then choose one of:
 
 Without a classifier, `auto` behaves like `normal`, and the extension warns you when you switch to it.
 
+**`pi-web`:** `web_fetch` and `web_search` are allowed in `plan` and `read-only`, as they only read.
+
 **`pi-subagents`:** blocked in `plan` and `read-only`, because a child agent could write files. In `normal` and `auto` it is unchanged.
 
 **`pi-frame`:** the editor frame follows the mode, and turns red in `yolo`.

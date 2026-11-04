@@ -8,7 +8,8 @@ const CYCLE: readonly Mode[] = ["normal", "auto", "plan", "read-only"];
 
 export const SUBMIT_PLAN_TOOL = "submit_plan";
 
-const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
+// pi-web's tools only read, and a separate model reads the page for them.
+const READ_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search"]);
 
 export function isMode(value: unknown): value is Mode {
   return (MODES as readonly unknown[]).includes(value);
