@@ -10,9 +10,11 @@ const CYCLE: readonly Mode[] = ["normal", "auto", "plan", "read-only"];
 
 export const SUBMIT_PLAN_TOOL = "submit_plan";
 export const ASK_TOOL = "ask_questions";
+const CODEMODE_TOOL = "codemode";
 
 // pi-web's tools only read, and a separate model reads the page for them.
-const READ_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search", "todo", ASK_TOOL]);
+// Each tool a codemode script calls comes through this check itself, so the script needs none of its own.
+const READ_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search", "todo", ASK_TOOL, CODEMODE_TOOL]);
 
 /** Allowed for what pi-suite's own do. Another package's tool with the name could do anything. */
 const SUITE_TOOLS: ReadonlySet<string> = new Set(["todo", "web_fetch", "web_search", ASK_TOOL]);
@@ -28,6 +30,7 @@ function realPath(path: string): string | undefined {
 
 /** The whole suite loads from one file, so that file is what these tools must come from. */
 export function fromExpectedPackage(toolName: string, path: string | undefined, entry = SUITE_ENTRY): boolean {
+  if (toolName === CODEMODE_TOOL) return path === "builtin:codemode";
   if (!SUITE_TOOLS.has(toolName)) return true;
   const expected = realPath(entry);
   return path !== undefined && expected !== undefined && realPath(path) === expected;
@@ -82,6 +85,20 @@ export function decideToolCall(mode: Mode, toolName: string, input: unknown): To
   }
 
   return { action: "block", reason: `${mode} mode blocks ${toolName}. ${leave}` };
+}
+
+/**
+ * Why a tool can't make this call from inside a script, if it can't. The transcript only shows the script,
+ * so a change must be its own step: you can see it, and the router can see that editing has started.
+ */
+export function scriptedChange(toolName: string, input: unknown): string | undefined {
+  const asOwnStep = "Call it directly, not from a script.";
+  if (/(^|_)(edit|write)$/.test(toolName) || toolName === "powershell") return `${toolName} changes files. ${asOwnStep}`;
+  if (!/(^|_)bash$/.test(toolName)) return undefined;
+  const command = (input as { command?: unknown } | null)?.command;
+  if (typeof command !== "string") return `${toolName} needs a command. ${asOwnStep}`;
+  const verdict = classifyBash(command);
+  return verdict.readOnly ? undefined : `${verdict.reason}. ${asOwnStep}`;
 }
 
 /**

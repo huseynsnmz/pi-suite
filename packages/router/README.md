@@ -9,7 +9,7 @@ Adds `router/auto` to [Pi](https://pi.dev): one choice in `/model` that uses a s
 Requires Pi 1.5 or newer.
 
 ```bash
-pi install npm:@huseynsnmz/pi-suite@0.2.1
+pi install npm:@huseynsnmz/pi-suite@0.2.2
 ```
 
 Log in to the providers you want with `/login`, run `/router` to choose a model for each role, then pick `router/auto` in `/model`.

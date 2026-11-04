@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { withAliases, withoutAliases } from "../src/deny-off.ts";
-import { fromExpectedPackage, decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
+import { fromExpectedPackage, scriptedChange, decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
 import { borrowStatusReader, loadsFirst, sandboxInstalled, sandboxIsOn } from "../src/sandbox.ts";
 
 const bash = (command: string) => ({ command });
@@ -32,6 +32,8 @@ const cases: Array<[string, Mode, string, unknown, string]> = [
   ["read-only blocks other bash", "read-only", "bash", bash("npm test"), "block"],
   ["read-only runs read-only bash", "read-only", "bash", bash("ls"), "allow"],
   ["read-only cannot submit a plan", "read-only", SUBMIT_PLAN_TOOL, {}, "block"],
+  ["plan runs codemode scripts", "plan", "codemode", {}, "allow"],
+  ["read-only runs codemode scripts", "read-only", "codemode", {}, "allow"],
   ["read-only blocks unknown tools", "read-only", "some_new_tool", {}, "block"],
   ["malformed bash input is blocked", "plan", "bash", { command: 1 }, "block"],
   ["null bash input is blocked", "read-only", "bash", null, "block"],
@@ -42,6 +44,30 @@ for (const [name, mode, tool, input, action] of cases) {
     assert.equal(decideToolCall(mode, tool, input).action, action);
   });
 }
+
+for (const [name, tool, input, blocked] of [
+  ["edit", "edit", {}, true],
+  ["write", "write", {}, true],
+  ["yolo_write", "yolo_write", {}, true],
+  ["powershell", "powershell", { command: "dir" }, true],
+  ["bash that changes things", "bash", bash("npm test"), true],
+  ["yolo_bash that changes things", "yolo_bash", bash("touch x"), true],
+  ["malformed bash", "bash", { command: 1 }, true],
+  ["read-only bash", "bash", bash("git status"), false],
+  ["read", "read", {}, false],
+  ["web_fetch", "web_fetch", {}, false],
+  ["an MCP tool", "mcp__x__search", {}, false],
+] as const) {
+  test(`from a script: ${name} is ${blocked ? "blocked" : "allowed"}`, () => {
+    assert.equal(scriptedChange(tool, input) !== undefined, blocked);
+  });
+}
+
+test("codemode counts only as Pi's own, not another package's tool with the name", () => {
+  assert.equal(fromExpectedPackage("codemode", "builtin:codemode"), true);
+  assert.equal(fromExpectedPackage("codemode", "/somewhere/else/index.ts"), false);
+  assert.equal(fromExpectedPackage("codemode", undefined), false);
+});
 
 test("cycle visits every mode and returns to normal", () => {
   const seen: Mode[] = ["normal"];

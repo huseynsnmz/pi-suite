@@ -30,6 +30,7 @@ function scriptedCall(text, tools) {
   if (verb === "RUN") return { name: off ? "yolo_bash" : "bash", args: { command: arg } };
   if (verb === "WRITE") return off ? { name: "yolo_write", args: { file: arg, content: "x" } } : { name: "write", args: { path: arg, content: "x" } };
   if (verb === "READ") return { name: "read", args: { path: arg } };
+  if (verb === "CODE") return { name: "codemode", args: { code: arg } };
   if (verb === "SUBAGENT") return { name: "subagent", args: { agent: "scout", task: "x" } };
   if (verb === "APPLY") return { name: "permissions_apply", args: { bash: [arg] } };
   if (verb === "PLAN") return { name: "submit_plan", args: { plan: "PLANBODY step one" } };
@@ -54,6 +55,7 @@ createServer((req, res) => {
       return reply(res, "", { name: "report_verdict", args: { verdict: "allow" } });
     }
     const last = body.messages?.at(-1);
+    if (last?.role === "tool") appendFileSync(`${logPath}.results`, `${JSON.stringify(last.content)}\n`);
     if (last?.role === "tool") return reply(res, `FINISHED ${String(last.content).slice(0, 500)}`);
     const text = typeof last?.content === "string" ? last.content : (last?.content ?? []).map((part) => part.text ?? "").join("");
     const system = JSON.stringify(body.messages?.[0] ?? "");

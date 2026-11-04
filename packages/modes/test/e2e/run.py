@@ -549,6 +549,61 @@ try:
         term.send("\r")
         term.until(lambda: "FINISHED" in term.text[mark:], "the result", 15)
         check("skill: agreeing adds the rule", "npm test*" in json.loads(config.read_text())["permission"]["bash"])
+
+    term.close()
+    (project / "seen.txt").write_text("SCRIPTSAW")
+    # So only the modes and the deny rules decide, with no dialogs.
+    config = agent / "extensions/pi-permission-system/config.json"
+    rules = json.loads(config.read_text())
+    rules["permission"].update({"codemode": "allow", "write": "allow", "bash": {"*": "allow", "touch denied*": "deny"}})
+    config.write_text(json.dumps(rules))
+    term = Terminal("--tools", "+codemode")
+    term.wait(r"mode: normal", 40)
+
+    def script(code):
+        """What the model got back. A UI extension can hide script output from the screen."""
+        results = Path(f"{log}.results")
+        mark, before = len(term.text), len(results.read_text()) if results.exists() else 0
+        term.prompt(f"CODE:{code}")
+        term.until(lambda: "FINISHED" in term.text[mark:], "the script's result", 25)
+        term.pump(0.5)
+        return results.read_text()[before:]
+
+    def writes(name):
+        return f'return await tools.write({{path:"{name}",content:"x"}})'
+
+    READS = 'return await tools.read({path:"seen.txt"})'
+    TOUCHES = 'return await tools.bash({command:"touch scripted-bash.txt"})'
+    check("codemode: a script reads in normal", "SCRIPTSAW" in script(READS))
+    if not SOLO:
+        (project / "hidden.secret").write_text("TOPSECRET")
+        check("codemode: a deny rule stops a script", "TOPSECRET" not in script('return await tools.read({path:"hidden.secret"})'))
+    script(writes("scripted-normal.txt"))
+    check("codemode: a script can't write in normal", not (project / "scripted-normal.txt").exists())
+    script(TOUCHES)
+    check("codemode: a script can't run changing bash in normal", not (project / "scripted-bash.txt").exists())
+    listed = script('return await tools.bash({command:"ls"})')
+    check("codemode: a script runs read-only bash", "seen.txt" in listed, listed)
+    term.send(SHIFT_TAB); term.wait(r"mode: auto")
+    term.send(SHIFT_TAB); term.wait(r"mode: plan")
+    check("codemode: a script reads in plan", "SCRIPTSAW" in script(READS))
+    script(writes("scripted-plan.txt"))
+    check("codemode: a script can't write in plan", not (project / "scripted-plan.txt").exists())
+    term.send(SHIFT_TAB); term.wait(r"mode: read-only")
+    check("codemode: a script reads in read-only", "SCRIPTSAW" in script(READS))
+    script(writes("scripted-readonly.txt"))
+    check("codemode: a script can't write in read-only", not (project / "scripted-readonly.txt").exists())
+    term.close()
+    current = json.loads((agent / "settings.json").read_text())
+    (agent / "settings.json").write_text(json.dumps({**current, "codemode": {"mode": "only"}}))
+    term = Terminal("--tools", "+codemode")
+    term.wait(r"mode: normal", 40)
+    script(writes("scripted-only.txt"))
+    check("codemode: with mode only, a script can write in normal", (project / "scripted-only.txt").exists())
+    term.send(SHIFT_TAB); term.wait(r"mode: auto")
+    term.send(SHIFT_TAB); term.wait(r"mode: plan")
+    script(writes("scripted-only-plan.txt"))
+    check("codemode: with mode only, plan still blocks a script's write", not (project / "scripted-only-plan.txt").exists())
 except SandboxRunDone:
     pass
 finally:

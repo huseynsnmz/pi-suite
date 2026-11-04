@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2]
+
+### Fixes
+
+- Pi's `codemode` tool now works in plan and read-only modes. Each tool a script calls is still checked, so a script can't write there. Another package's tool named `codemode` stays blocked.
+- A script or other tool can no longer call `edit`, `write`, `powershell`, or bash that isn't read-only, in any mode. The model makes those as their own tool calls, so you see each one and `router/auto` sees that editing has started. With `codemode.mode` set to `only` this is off in normal, auto and yolo, because scripts are then the only way to reach tools.
+
 ## [0.2.1]
 
 ### Fixes

@@ -23,7 +23,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-suite@0.2.1
+   pi install npm:@huseynsnmz/pi-suite@0.2.2
    ```
 
 2. Move pi-suite above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
@@ -123,6 +123,8 @@ Without a classifier, `auto` behaves like `normal`, and the extension warns you 
 **`web`:** `web_fetch` and `web_search` are allowed in `plan` and `read-only`, as they only read. The same names from another package are blocked there.
 
 
+**Codemode with `pi-permission-system`:** it asks about `codemode` like any tool, once for each script. To skip that, add `"codemode": "allow"` to `permission` in its config. Each tool a script calls is still checked against your rules.
+
 **`pi-subagents`:** blocked in `plan` and `read-only`, because a child agent could write files. In `normal` and `auto` it is unchanged.
 
 **`pi-router`:** `plan` mode uses its plan model, and approving a plan moves to its build model.
@@ -135,6 +137,7 @@ Without a classifier, `auto` behaves like `normal`, and the extension warns you 
 
 - **Allowed tools:** `read`, `grep`, `find`, `ls`, read-only `bash`, and `submit_plan` in plan mode.
 - **Blocked tools:** `write`, `edit`, subagents, MCP tools and every other tool, including ones added later.
+- **Codemode:** Pi's `codemode` tool runs, and each tool a script calls is checked like any other. Its `models` calls aren't tools, so they aren't checked: a script can still send data to a classifier or image model you have a login for, at your cost.
 - **Read-only bash:** a fixed list of commands, such as `ls`, `cat`, `rg` and `git status`. A command is refused if it uses `$`, backticks, redirects, subshells, background jobs, unquoted globs, control characters or a path to a binary. Options that write or run code are refused too, including bundled and abbreviated forms such as `sort -uo` and `sort --outp`. Quote a glob you mean literally, as in `find . -name '*.ts'`.
 
 Any other command asks you in `plan` and is blocked in `read-only`.
@@ -145,6 +148,7 @@ These modes keep an honest agent on track. They are not a sandbox.
 
 - **Reads are not restricted by this extension.** A read-only command can still read secrets, so keep `deny` rules for them in your permission system.
 - **A repo can already be malicious.** Git can run code from a repository's config and hooks, even for `git status`, and a plain clone can bring them. In `plan` and `read-only`, git commands stop counting as read-only where a repository sets anything unusual or has a hook that reading can fire, which covers what's known today. Other tools can have their own ways in, so use a container for repos you don't trust.
+- **Scripts can't change things, in any mode.** A script or other tool can't call `edit`, `write`, `powershell`, or bash that isn't read-only, so each change is its own visible step. The exception is `codemode.mode` set to `only` in `normal`, `auto` and `yolo`, where scripts are the only way to reach tools. There a script's edits aren't in the transcript, so `router/auto` can stay on its plan model. The same goes for any setup with `modes` turned off in `/suite`.
 - **Child agents started earlier keep running.** Switching mode doesn't stop a subagent that is already running.
 - **The classifier hook relies on an internal detail.** There is no public way to switch a registered judge on and off, so this extension wraps it when it registers. It uses the global key that `pi-permission-system` documents for its service map. If that breaks, you get a warning on your first prompt that the judge may auto-approve outside `auto`.
 

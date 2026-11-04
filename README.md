@@ -17,7 +17,7 @@ One package for [Pi](https://pi.dev): modes and permissions, a framed screen, a 
 Requires Pi 1.5 or newer.
 
 ```bash
-pi install npm:@huseynsnmz/pi-suite@0.2.1
+pi install npm:@huseynsnmz/pi-suite@0.2.2
 ```
 
 If you installed any of these separately, remove them first:

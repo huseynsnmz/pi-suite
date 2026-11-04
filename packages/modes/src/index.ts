@@ -10,7 +10,7 @@ import { registerInterview } from "./interview.ts";
 import { registerReviewTools } from "./review/tools.ts";
 import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
 import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "./judge-gate.ts";
-import { decideToolCall, displayCommand, fromExpectedPackage, notReadOnly, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
+import { decideToolCall, displayCommand, fromExpectedPackage, notReadOnly, isMode, scriptedChange, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
 const DENY_STATUS_KEY = "pi-modes-deny";
@@ -238,6 +238,11 @@ export default function piModes(pi: ExtensionAPI): void {
       change("normal", ctx);
       if (ctx.hasUI) ctx.ui.notify("The sandbox went off, so yolo ended.", "warning");
       return { block: true, reason: "Yolo ended because the sandbox is off." };
+    }
+    // With codemode.mode set to "only", scripts are the one way to reach any tool, so they have to be able to write.
+    if (event.parentToolCallId !== undefined && pi.getSettings().codemode?.mode !== "only") {
+      const reason = scriptedChange(event.toolName, event.input);
+      if (reason !== undefined) return { block: true, reason };
     }
     let decision = decideToolCall(mode, event.toolName, event.input);
     if (decision.action === "allow" && (mode === "plan" || mode === "read-only") && event.toolName === "bash") {
