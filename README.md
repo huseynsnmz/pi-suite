@@ -21,7 +21,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-modes@0.5.0
+   pi install npm:@huseynsnmz/pi-modes@0.6.0
    ```
 
 2. Move it above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
@@ -102,9 +102,17 @@ In plan mode the agent calls the `submit_plan` tool. You then choose one of:
 - **Approve, auto:** switches to `auto` and the agent starts implementing.
 - **Keep planning:** stays in `plan` and sends your feedback to the agent.
 
+## Interviews
+
+The agent can ask you questions with the `ask_questions` tool, in any mode: typed answers, yes or no, pick one, or pick several. It asks one dialog at a time, up to 6 questions a call, and you can always type your own answer instead of the options. `Esc` stops the rest, and the agent is told not to guess them.
+
+Each dialog starts with `Agent question`, so you can tell it from Pi's permission prompts, and a typed answer says it goes to the model. An answer is only information. It doesn't approve anything, so permission rules and modes still apply to whatever the agent does next. Don't type a secret because a question asks for one: it goes to your model provider and into the session file, and no permission rule covers it.
+
+In `pi -p` the agent is told nobody can answer. A client without the terminal's dialogs, using RPC, gets pick-several as a typed answer.
+
 ## Using it with other extensions
 
-**`@gotgenes/pi-permission-system`:** still runs in every mode. This extension only adds restrictions, so a `deny` rule always wins.
+**`@gotgenes/pi-permission-system`:** still runs in every mode. This extension only adds restrictions, so a `deny` rule always wins. With `"*": "ask"`, it asks before `ask_questions` and `todo` too. Add `"ask_questions": "allow"` and `"todo": "allow"` to its `permission` rules to skip that.
 
 **`pi-permission-classifier`:** runs only in `auto`. In every other mode it defers, and the request goes to your normal prompt. Set it up as its README describes, with `permission-judge` in `authorizerChain`. Its `perm-judge:` footer entry stays visible in all modes, so go by the `mode:` entry. If the classifier is listed after `pi-permission-system`, it only registers during your first prompt, and `auto` starts working from then on.
 
@@ -112,9 +120,10 @@ Without a classifier, `auto` behaves like `normal`, and the extension warns you 
 
 **`pi-web`:** `web_fetch` and `web_search` are allowed in `plan` and `read-only`, as they only read.
 
+
 **`pi-subagents`:** blocked in `plan` and `read-only`, because a child agent could write files. In `normal` and `auto` it is unchanged.
 
-**`pi-frame`:** the editor frame follows the mode, and turns red in `yolo`.
+**`pi-frame`:** the editor frame follows the mode, and turns red in `yolo`. Its `todo` checklist is allowed in `plan` and `read-only`, as it changes nothing outside the session. A tool named `todo` or `ask_questions` from any other package is still blocked there.
 
 **`pi-look` and `pi-claude-code-ui`:** no conflicts are expected, as neither uses `Shift+Tab`. The mode appears through Pi's standard status API.
 

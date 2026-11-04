@@ -7,9 +7,21 @@ export type Mode = (typeof MODES)[number];
 const CYCLE: readonly Mode[] = ["normal", "auto", "plan", "read-only"];
 
 export const SUBMIT_PLAN_TOOL = "submit_plan";
+export const ASK_TOOL = "ask_questions";
 
 // pi-web's tools only read, and a separate model reads the page for them.
-const READ_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search"]);
+const READ_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search", "todo", ASK_TOOL]);
+
+/** Allowed for what these packages do. Another package's tool with the name could write anything. */
+const EXPECTED_PACKAGE: Readonly<Record<string, RegExp>> = {
+  todo: /[\\/]pi-frame[^\\/]*[\\/]/,
+  [ASK_TOOL]: /[\\/]pi-modes[^\\/]*[\\/]/,
+};
+
+export function fromExpectedPackage(toolName: string, path: string | undefined): boolean {
+  const expected = EXPECTED_PACKAGE[toolName];
+  return expected === undefined || (path !== undefined && expected.test(path));
+}
 
 export function isMode(value: unknown): value is Mode {
   return (MODES as readonly unknown[]).includes(value);
@@ -68,7 +80,7 @@ export function decideToolCall(mode: Mode, toolName: string, input: unknown): To
  */
 export function displayCommand(command: string): string {
   return command.replace(
-    /[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g,
+    /[\x00-\x08\x0b-\x1f\x7f-\x9f\u00ad\u034f\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\u3164\ufeff\ufff9-\ufffb\u{e0000}-\u{e007f}]/gu,
     (ch) => `\\u${(ch.codePointAt(0) as number).toString(16).padStart(4, "0")}`,
   );
 }
@@ -85,6 +97,7 @@ export function loadsAfterPermissionSystem(packages: unknown): boolean {
 const PLAN_PROMPT = `Plan mode is on. Research and propose, but do not implement.
 - Do not edit files or change any state. write, edit, subagents and MCP tools are blocked.
 - Read-only shell commands run freely. Any other command asks the user first, so run one only if the plan depends on its result.
+- If a decision is the user's to make, call ${ASK_TOOL} instead of guessing.
 - When the plan is ready, call ${SUBMIT_PLAN_TOOL} with the full plan. Do not start implementing until it is approved.`;
 
 const READ_ONLY_PROMPT = `Read-only mode is on. Answer from what you can read.

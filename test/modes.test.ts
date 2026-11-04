@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { withAliases, withoutAliases } from "../src/deny-off.ts";
-import { decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
+import { fromExpectedPackage, decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
 import { borrowStatusReader, loadsFirst, sandboxInstalled, sandboxIsOn } from "../src/sandbox.ts";
 
 const bash = (command: string) => ({ command });
@@ -12,6 +12,10 @@ const cases: Array<[string, Mode, string, unknown, string]> = [
   ["yolo leaves bash to the permission system", "yolo", "bash", bash("rm x"), "allow"],
   ["plan allows reading", "plan", "read", {}, "allow"],
   ["plan allows pi-web fetch", "plan", "web_fetch", {}, "allow"],
+  ["plan allows pi-frame todo", "plan", "todo", {}, "allow"],
+  ["read-only allows pi-frame todo", "read-only", "todo", {}, "allow"],
+  ["plan allows asking the user", "plan", "ask_questions", {}, "allow"],
+  ["read-only allows asking the user", "read-only", "ask_questions", {}, "allow"],
   ["read-only allows pi-web search", "read-only", "web_search", {}, "allow"],
   ["plan blocks write", "plan", "write", {}, "block"],
   ["plan blocks edit", "plan", "edit", {}, "block"],
@@ -120,4 +124,13 @@ test("a new session starts in the configured mode, but never in yolo", () => {
   assert.equal(startingMode("yolo"), "normal");
   assert.equal(startingMode("nonsense"), "normal");
   assert.equal(startingMode(undefined), "normal");
+});
+
+test("todo and ask_questions are only trusted from the packages that make them harmless", () => {
+  assert.equal(fromExpectedPackage("todo", "/n/node_modules/@huseynsnmz/pi-frame/src/index.ts"), true);
+  assert.equal(fromExpectedPackage("ask_questions", "/n/node_modules/@huseynsnmz/pi-modes/src/index.ts"), true);
+  assert.equal(fromExpectedPackage("todo", "/n/node_modules/writes-todo-md/index.ts"), false);
+  assert.equal(fromExpectedPackage("ask_questions", "/n/node_modules/@x/pi-frame/index.ts"), false);
+  assert.equal(fromExpectedPackage("todo", undefined), false);
+  assert.equal(fromExpectedPackage("read", undefined), true);
 });

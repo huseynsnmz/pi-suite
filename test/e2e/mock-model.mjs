@@ -33,6 +33,13 @@ function scriptedCall(text, tools) {
   if (verb === "SUBAGENT") return { name: "subagent", args: { agent: "scout", task: "x" } };
   if (verb === "APPLY") return { name: "permissions_apply", args: { bash: [arg] } };
   if (verb === "PLAN") return { name: "submit_plan", args: { plan: "PLANBODY step one" } };
+  if (verb === "ASK") return { name: "ask_questions", args: { questions: [
+    { question: "Which database?\u001b]0;ASKTITLE\u0007", type: "select", options: ["Postgres", "SQLite"] },
+    { question: "Add tests?", type: "yes_no" },
+    { question: "Which targets?", type: "multi_select", options: ["web", "ios", "android"] },
+    { question: "Anything else?", type: "text" },
+  ] } };
+  if (verb === "ASKBAD") return { name: "ask_questions", args: { questions: [{ question: "Pick", type: "select", options: ["one"] }] } };
   return undefined;
 }
 
@@ -47,7 +54,7 @@ createServer((req, res) => {
       return reply(res, "", { name: "report_verdict", args: { verdict: "allow" } });
     }
     const last = body.messages?.at(-1);
-    if (last?.role === "tool") return reply(res, `FINISHED ${String(last.content).slice(0, 120)}`);
+    if (last?.role === "tool") return reply(res, `FINISHED ${String(last.content).slice(0, 500)}`);
     const text = typeof last?.content === "string" ? last.content : (last?.content ?? []).map((part) => part.text ?? "").join("");
     const system = JSON.stringify(body.messages?.[0] ?? "");
     appendFileSync(logPath, `chat plan=${system.includes("Plan mode is on")} readonly=${system.includes("Read-only mode is on")} submit=${tools.includes("submit_plan")} bash=${tools.includes("bash")} alias=${tools.includes("yolo_bash")}\n`);

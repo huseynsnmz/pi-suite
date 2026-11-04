@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0]
+
+### Features
+
+- The agent can interview you with the `ask_questions` tool: typed answers, yes or no, pick one or pick several, and you can always type your own answer.
+- `plan` and `read-only` allow `ask_questions` and `todo` from `pi-frame`. The same names from any other package stay blocked there.
+
+### Security
+
+- Command dialogs now show more invisible characters as visible escapes, including soft hyphens, tag characters and line separators.
+
 ## [0.5.0]
 
 ### Features

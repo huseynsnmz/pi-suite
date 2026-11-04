@@ -6,10 +6,11 @@ import { Type } from "typebox";
 import { borrowStatusReader, loadsFirst, sandboxInstalled, sandboxIsOn, type StatusReader } from "./sandbox.ts";
 import { runsGit } from "./bash.ts";
 import { gitRisk } from "./git-safety.ts";
+import { registerInterview } from "./interview.ts";
 import { registerReviewTools } from "./review/tools.ts";
 import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
 import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "./judge-gate.ts";
-import { decideToolCall, displayCommand, notReadOnly, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
+import { decideToolCall, displayCommand, fromExpectedPackage, notReadOnly, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
 const DENY_STATUS_KEY = "pi-modes-deny";
@@ -238,6 +239,10 @@ export default function piModes(pi: ExtensionAPI): void {
       const risk = runsGit((event.input as { command: string }).command) ? await gitRisk(ctx.cwd) : undefined;
       if (risk !== undefined) decision = notReadOnly(mode, risk);
     }
+    if (decision.action === "allow" && (mode === "plan" || mode === "read-only")) {
+      const path = pi.getAllTools().find((tool) => tool.name === event.toolName)?.sourceInfo.path;
+      if (!fromExpectedPackage(event.toolName, path)) decision = { action: "block", reason: `${mode} mode blocks ${event.toolName} from another package.` };
+    }
     if (decision.action === "allow") return undefined;
     if (decision.action === "block") return { block: true, reason: decision.reason };
 
@@ -249,6 +254,8 @@ export default function piModes(pi: ExtensionAPI): void {
   });
 
   registerReviewTools(pi);
+
+  registerInterview(pi);
 
   pi.registerTool({
     name: SUBMIT_PLAN_TOOL,
