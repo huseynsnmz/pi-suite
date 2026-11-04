@@ -1,6 +1,6 @@
 {
   "name": "@huseynsnmz/pi-web",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Web search and fetch for Pi, where a separate model with no tools reads every page so the agent never sees it",
   "type": "module",
   "license": "MIT",
