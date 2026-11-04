@@ -1,0 +1,676 @@
+import { dirname, join } from "node:path";
+
+import {
+	ACCOUNT,
+	type AccountState,
+	BOARD,
+	createApp,
+	PEERS,
+	PROMPT_FROM,
+	defineFeature,
+	drawSkillRefs,
+	type FeatureScope,
+	hideImagesUnderOverlays,
+	NAMES,
+	SKILL_REF,
+	provideViews,
+	type SessionSource,
+	skillNames,
+	sourceFor,
+} from "@adeildo/pi-kit";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	ReadonlyFooterDataProvider,
+} from "@earendil-works/pi-coding-agent";
+import { keyText } from "@earendil-works/pi-coding-agent";
+import { Key, type KeyId, type TUI } from "@earendil-works/pi-tui";
+
+import { type GitState, readGit } from "./data/git.ts";
+import { cmdAsKey, SETTINGS_SHORTCUT, watchCmdKey } from "./render/keys.ts";
+import { frameColorOf } from "./data/mode.ts";
+import { type GithubState, readGithub } from "./data/github.ts";
+import { emptySnapshot, type LiveInputs, type Snapshot, SnapshotReader } from "./data/snapshot.ts";
+import type { LastVisit } from "./data/start-notes.ts";
+import { Telemetry } from "./data/telemetry.ts";
+import type { DeltaKind } from "./data/telemetry.ts";
+import { REQUEST_CHANGES, type RequestRecord } from "./data/totals.ts";
+import { visit } from "./data/visits.ts";
+import { type Glyphs, glyphsOf } from "./render/glyphs.ts";
+import { PLAIN, themePaint } from "./render/paint.ts";
+import { claimedStatuses, renderSegments, SEGMENTS } from "./render/segments.ts";
+import {
+	cursor,
+	frame,
+	gaugeCells,
+	header,
+	icons,
+	labels,
+	FRAME_SETTINGS,
+	pathLength,
+	SECTIONS,
+	SEPARATOR,
+	SLOTS,
+	userFrame,
+	timing,
+} from "./settings.ts";
+import { pastPrompts } from "./data/past-prompts.ts";
+import { applyCursor, FrameEditor } from "./ui/editor.ts";
+import { registerEffort } from "./ui/effort.ts";
+import { FooterComponent, StripComponent } from "./ui/footer.ts";
+import { PACKAGE_VERSION, HeaderComponent, type LoadedCounts } from "./ui/header.ts";
+import { EXIT_WINDOW_MS, type InterruptState, nextInterrupt } from "./ui/interrupt.ts";
+import { OutputView, outputsOf } from "./ui/outputs.ts";
+import { framePiEntries, loadedLists, onLoadedListsChange } from "./ui/pi-entries.ts";
+import { showTimings } from "./ui/timings.ts";
+import { timingLine } from "./render/timing.ts";
+import { frameQueue } from "./ui/queue.ts";
+import type { Screen, SlotName } from "./ui/screen.ts";
+import { registerTodos } from "./ui/todos.ts";
+import { registerToolFrames } from "./ui/tool-frame.ts";
+import { type Activity, describe, draftedTool } from "./ui/working.ts";
+import { SessionView } from "./view/view.ts";
+
+export { SEGMENT_IDS, SEGMENTS, type SegmentId } from "./render/segments.ts";
+import type { SegmentId } from "./render/segments.ts";
+export { ROLE_TOKENS } from "./render/paint.ts";
+
+const STRIP_WIDGET = "pi-frame:strip";
+const TICK_MS = 500;
+// Once per process, however many sessions it opens.
+let probedGithub = false;
+
+interface Live {
+	ctx: ExtensionContext | undefined;
+	footerData: ReadonlyFooterDataProvider | undefined;
+	tui: TUI | undefined;
+	repaint: (() => void) | undefined;
+	git: GitState | undefined;
+	github: GithubState | undefined;
+	probing: boolean;
+	ticker: ReturnType<typeof setInterval> | undefined;
+	frame: Snapshot | undefined;
+	activity: string | undefined;
+	interrupts: InterruptState;
+	notice: string | undefined;
+	noticeTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+export const frameFeature = defineFeature({
+	id: "frame",
+	description:
+		"The start screen, a framed editor, the footer and a working line that says what runs",
+	sections: SECTIONS,
+	settings: FRAME_SETTINGS,
+	setup(scope) {
+		const telemetry = new Telemetry();
+		const reader = new SnapshotReader();
+		const live: Live = {
+			ctx: undefined,
+			footerData: undefined,
+			tui: undefined,
+			repaint: undefined,
+			git: undefined,
+			github: undefined,
+			probing: false,
+			ticker: undefined,
+			frame: undefined,
+			activity: undefined,
+			interrupts: {},
+			notice: undefined,
+			noticeTimer: undefined,
+		};
+
+		const glyphs = glyphsOf(() => icons.get(scope));
+		const screen = createScreen(scope, live, reader, telemetry, glyphs);
+		registerToolFrames(scope);
+		registerEffort(scope);
+		registerTodos(scope, () => glyphs().set);
+		framePiEntries(() => {
+			if (live.ctx === undefined) return undefined;
+			return {
+				theme: live.ctx.ui.theme,
+				set: glyphs().set,
+				you: userFrame.get(scope),
+				from: (text: string) => PROMPT_FROM.current(scope, text)?.name,
+			};
+		});
+		showTimings((message, width) => {
+			if (live.ctx === undefined || !timing.get(scope)) return undefined;
+			const line = timingLine(telemetry.timingOf(message.timestamp), message, width);
+			return live.ctx.ui.theme.fg("dim", line);
+		});
+		onLoadedListsChange(() => queueMicrotask(() => live.repaint?.()));
+		frameQueue(() => live.ctx?.ui.theme);
+		const repaint = () => {
+			screen.bump();
+			live.repaint?.();
+		};
+
+		for (const entry of FRAME_SETTINGS) entry.listen(scope, repaint);
+		frame.listen(scope, () => live.ctx && installEditor(live.ctx, screen, live, scope));
+		const visitsFile = join(dirname(scope.settings.globalPath), "frame-visits.json");
+		let visited = false;
+		let lastVisit: LastVisit | undefined;
+
+		provideViews(
+			scope.events,
+			(address) => {
+				const ctx = live.ctx;
+				const source = sourceFor(scope.events, address);
+				if (ctx === undefined || ctx.mode !== "tui" || source === undefined) return false;
+				openView(ctx, screen, source).catch((error: unknown) => {
+					scope.warn(`pi-frame: could not show ${address.session}: ${String(error)}`);
+				});
+				return true;
+			},
+			() => live.ctx?.mode === "tui",
+		);
+
+		scope.registerShortcut(Key.alt("o"), {
+			description: "A tool call's whole output, to scroll; the arrows move between calls",
+			handler: (ctx) => openOutputs(ctx),
+		});
+
+		let stopCmdKeys: (() => void) | undefined;
+		watchCmdKey(() => live.tui?.terminal.kittyProtocolActive === true);
+
+		const installFooter = (ctx: ExtensionContext) =>
+			ctx.ui.setFooter(
+				(tui, _theme, data) =>
+					new FooterComponent(tui, data, screen, {
+						attach: (footerData, paint) => {
+							live.footerData = footerData;
+							// Anything that asks for a redraw bumps the revision that kept drawings compare.
+							live.repaint = () => {
+								screen.bump();
+								paint();
+							};
+						},
+						detach: () => {
+							live.footerData = undefined;
+							live.repaint = undefined;
+						},
+					}),
+			);
+
+		const showHeader = (ctx: ExtensionContext) =>
+			installHeader(
+				ctx,
+				screen,
+				scope,
+				() => lastVisit,
+				() => live.github,
+			);
+
+		// A board blanks these while it's up, and Pi can only give back its own.
+		scope.events.on("agent-board:closed", () => {
+			const ctx = live.ctx;
+			if (ctx?.mode !== "tui") return;
+			installFooter(ctx);
+			showHeader(ctx);
+		});
+
+		scope.onSessionStart((ctx) => {
+			live.ctx = ctx;
+			telemetry.reset();
+			telemetry.restore(ctx.sessionManager.getEntries());
+			void probeGit(live);
+			if (ctx.mode !== "tui") return;
+
+			stopCmdKeys?.();
+			stopCmdKeys = ctx.ui.onTerminalInput((data) => {
+				const key = cmdAsKey(data);
+				return key === undefined ? undefined : { data: key };
+			});
+
+			installFooter(ctx);
+			ctx.ui.setWidget(STRIP_WIDGET, () => new StripComponent(screen), {
+				placement: "aboveEditor",
+			});
+			installEditor(ctx, screen, live, scope);
+			// A new session in the same pi is not a return to the folder.
+			if (!visited) {
+				visited = true;
+				lastVisit = visit(visitsFile, ctx.cwd, PACKAGE_VERSION, Date.now());
+			}
+			// Off the critical path: the card shows these lines when the answers arrive.
+			if (!probedGithub) {
+				probedGithub = true;
+				void probeGithub(live, lastVisit?.at);
+			}
+			showHeader(ctx);
+		});
+
+		scope.onShutdown(() => {
+			stopCmdKeys?.();
+			stopCmdKeys = undefined;
+			stopTicking(live);
+			const ctx = live.ctx;
+			if (ctx?.mode === "tui") {
+				ctx.ui.setFooter(undefined);
+				ctx.ui.setWidget(STRIP_WIDGET, undefined);
+				ctx.ui.setHeader(undefined);
+				ctx.ui.setEditorComponent(undefined);
+				ctx.ui.setWorkingMessage();
+			}
+			if (live.tui !== undefined) applyCursor(live.tui, "block");
+			live.ctx = undefined;
+			live.tui = undefined;
+		});
+
+		// Only for the agent's calls, not pi's cache warming.
+		scope.on("before_provider_request", () => telemetry.providerRequestSent());
+		scope.on("after_provider_response", () => telemetry.providerResponseArrived());
+
+		scope.on("agent_start", () => {
+			telemetry.runStarted();
+			setActivity(live, { kind: "waiting" });
+			startTicking(live);
+		});
+
+		scope.on("turn_start", () => {
+			telemetry.requestStarted();
+			setActivity(live, { kind: "waiting" });
+		});
+
+		scope.on("message_start", (event) => {
+			if (event.message.role === "assistant") telemetry.answerStarted(event.message.timestamp);
+		});
+
+		scope.on("message_update", (event) => {
+			const message = event.message;
+			if (message.role !== "assistant") return;
+			const update = event.assistantMessageEvent;
+			const delta = "delta" in update ? update.delta : "";
+			const kind: DeltaKind = update.type.startsWith("thinking") ? "thinking" : "writing";
+			telemetry.answerGrew(delta, message.usage, kind);
+
+			if (update.type === "thinking_start" || update.type === "thinking_delta") {
+				setActivity(live, { kind: "thinking" });
+			} else if (update.type === "text_delta" || update.type === "text_start") {
+				setActivity(live, { kind: "writing" });
+			} else if (update.type === "toolcall_start" || update.type === "toolcall_delta") {
+				const tool = draftedTool(message.content);
+				if (tool !== undefined) setActivity(live, { kind: "drafting", tool });
+			}
+		});
+
+		scope.on("message_end", (event) => {
+			if (event.message.role !== "assistant") return;
+			const record = telemetry.answerEnded(event.message.usage);
+			// Pi records usage without a duration, so the session keeps it for the speeds after a resume.
+			if (record !== undefined) scope.appendEntry<RequestRecord>(REQUEST_CHANGES, record);
+			repaint();
+		});
+
+		scope.on("tool_execution_start", (event) => {
+			setActivity(live, { kind: "running", tool: event.toolName });
+		});
+
+		scope.on("tool_execution_end", () => void probeGit(live));
+
+		scope.on("agent_end", () => {
+			telemetry.runEnded();
+			stopTicking(live);
+			live.activity = undefined;
+			live.ctx?.ui.setWorkingMessage();
+			repaint();
+		});
+
+		scope.on("agent_settled", () => void probeGit(live));
+		scope.on("model_select", repaint);
+		scope.on("thinking_level_select", repaint);
+		scope.on("session_compact", repaint);
+		scope.on("session_tree", repaint);
+
+		scope.screen.action({
+			id: "explain",
+			section: "Appearance",
+			label: "What is on screen",
+			description: "Every piece around the editor right now, and what it means.",
+			run: () => explain(screen),
+		});
+	},
+});
+
+const SLOT_TITLES: Record<SlotName, string> = {
+	strip: "Above the editor, this answer",
+	stripRight: "Above the editor, on the right",
+	topLeft: "Frame, top left",
+	topRight: "Frame, top right",
+	bottomLeft: "Frame, bottom left",
+	bottomRight: "Frame, bottom right",
+	below: "Below the editor, the session",
+	belowRight: "Below the editor, on the right",
+};
+
+function explain(screen: Screen): string {
+	const snapshot = screen.snapshot();
+	const paint = screen.paint();
+	const lines: string[] = [paint.bold("What is on screen")];
+	const groups: [string, readonly SegmentId[]][] = [
+		...(Object.keys(SLOT_TITLES) as SlotName[]).map((name): [string, readonly SegmentId[]] => [
+			SLOT_TITLES[name],
+			screen.slot(name),
+		]),
+		// Not on screen: kept for when an answer feels slow.
+		["The last call to the model", ["last", "wait", "speed", "server", "request"]],
+	];
+	for (const [title, ids] of groups) {
+		if (ids.length === 0) continue;
+		lines.push("", paint.role("brand", title));
+		for (const id of ids) {
+			const [piece] = renderSegments([id], {
+				snapshot,
+				glyphs: screen.glyphs(),
+				paint,
+				options: screen.options(),
+			});
+			const meaning = id.startsWith("status:")
+				? `what ${id.slice("status:".length)} reports`
+				: (SEGMENTS[id as keyof typeof SEGMENTS]?.describe ?? "");
+			const shown = piece === undefined ? paint.dim("(nothing yet)") : piece.text;
+			lines.push(`  ${shown}`, `    ${paint.dim(`${id}: ${meaning}`)}`);
+		}
+	}
+	lines.push("", paint.dim("In is what was sent to the model, out is what came back."));
+	return lines.join("\n");
+}
+
+function createScreen(
+	scope: FeatureScope,
+	live: Live,
+	reader: SnapshotReader,
+	telemetry: Telemetry,
+	glyphs: () => Glyphs,
+): Screen {
+	let revision = 0;
+	return {
+		snapshot() {
+			const ctx = live.ctx;
+			if (ctx === undefined) return emptySnapshot();
+			if (live.frame !== undefined) return live.frame;
+			const snapshot = reader.read(ctx, {
+				branch: live.footerData?.getGitBranch() ?? null,
+				git: live.git,
+				account: accountOf(scope, ctx.model?.provider),
+				request: telemetry.request(),
+				last: telemetry.last(),
+				run: telemetry.run(),
+				statuses: live.footerData?.getExtensionStatuses() ?? new Map(),
+				sandboxInstalled: sandboxInstalled(scope),
+				...boardAndPeersOf(scope),
+			});
+			live.frame = snapshot;
+			queueMicrotask(() => {
+				live.frame = undefined;
+			});
+			return snapshot;
+		},
+		glyphs,
+		revision: () => revision,
+		bump: () => {
+			revision++;
+		},
+		paint: (border) => (live.ctx === undefined ? PLAIN : themePaint(live.ctx.ui.theme, border)),
+		separator: () => SEPARATOR,
+		options: () => ({
+			pathLength,
+			gaugeCells,
+			labels,
+			claimed: claimedStatuses(Object.values(SLOTS)),
+		}),
+		statusesKey: () => [...(live.footerData?.getExtensionStatuses().values() ?? [])].join("\u0000"),
+		notice: () => {
+			const theme = live.ctx?.ui.theme;
+			return live.notice === undefined || theme === undefined
+				? undefined
+				: theme.fg("warning", live.notice);
+		},
+		interrupt: (clearEditor) => pressCtrlC(live, clearEditor),
+		slot: (name) => SLOTS[name],
+		promptColor: (kind) => {
+			const theme = live.ctx?.ui.theme;
+			if (theme === undefined) return (text) => text;
+			return (text) => theme.fg(kind === "bash" ? "bashMode" : "accent", text);
+		},
+		pastPrompts: () => {
+			try {
+				return pastPrompts(live.ctx?.sessionManager.getSessionDir() ?? "");
+			} catch {
+				return [];
+			}
+		},
+		frameStyle: () => frame.get(scope),
+		frameColor: () => {
+			const theme = live.ctx?.ui.theme;
+			const color = frameColorOf(live.footerData?.getExtensionStatuses() ?? new Map());
+			return theme === undefined || color === undefined
+				? undefined
+				: (text) => theme.fg(color, text);
+		},
+		cursor: () => cursor,
+		decorate: (line) => {
+			const theme = live.ctx?.ui.theme;
+			if (theme === undefined) return line;
+			return drawSkillRefs(line, skillNames(scope), (name) =>
+				theme.fg("customMessageLabel", `${SKILL_REF}${name}`),
+			);
+		},
+		skills: () => skillNames(scope).length > 0,
+	};
+}
+
+function accountOf(scope: FeatureScope, provider: string | undefined): AccountState | undefined {
+	return provider === undefined ? undefined : ACCOUNT.current(scope, provider);
+}
+
+function boardAndPeersOf(
+	scope: FeatureScope,
+): Pick<LiveInputs, "board" | "me" | "peers" | "peersRooms" | "peersUnread" | "peersWriting"> {
+	const peers = PEERS.current(scope);
+	const handle = NAMES.current(scope)?.handle;
+	const color = peers?.me?.handle === handle ? peers?.me?.color : undefined;
+	return {
+		board: BOARD.current(scope),
+		me: handle === undefined ? undefined : { handle, ...(color === undefined ? {} : { color }) },
+		peers: peers?.peers,
+		peersRooms: peers?.rooms,
+		peersUnread: peers?.unread,
+		peersWriting: peers?.writing,
+	};
+}
+
+function pressCtrlC(live: Live, clearEditor: () => void): void {
+	const ctx = live.ctx;
+	if (ctx === undefined) return;
+	const now = Date.now();
+	const step = nextInterrupt(live.interrupts, ctx.isIdle(), now);
+	live.interrupts = step.state;
+	if (step.action === "exit") {
+		ctx.shutdown();
+		return;
+	}
+	if (step.action === "abort") ctx.abort();
+	else clearEditor();
+	live.notice = step.action === "abort" ? "Aborted" : `Press ${keyText("app.clear")} again to exit`;
+	if (live.noticeTimer !== undefined) clearTimeout(live.noticeTimer);
+	live.noticeTimer = setTimeout(() => {
+		live.notice = undefined;
+		live.interrupts = {};
+		live.repaint?.();
+	}, EXIT_WINDOW_MS);
+	live.noticeTimer.unref?.();
+	live.repaint?.();
+}
+
+function installEditor(
+	ctx: ExtensionContext,
+	screen: Screen,
+	live: Live,
+	scope: FeatureScope,
+): void {
+	if (ctx.mode !== "tui") return;
+	if (frame.get(scope) === "off") {
+		ctx.ui.setEditorComponent(undefined);
+		return;
+	}
+	ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+		live.tui = tui;
+		applyCursor(tui, cursor);
+		return new FrameEditor(tui, theme, keybindings, screen);
+	});
+}
+
+function installHeader(
+	ctx: ExtensionContext,
+	screen: Screen,
+	scope: FeatureScope,
+	lastVisit: () => LastVisit | undefined,
+	github: () => GithubState | undefined,
+): void {
+	if (ctx.mode !== "tui") return;
+	ctx.ui.setHeader(
+		(tui) =>
+			new HeaderComponent(
+				screen,
+				{
+					style: () => header,
+					counts: () => loadedCounts(scope),
+					lastVisit,
+					github,
+					loaded: loadedLists,
+				},
+				tui,
+			),
+	);
+}
+
+function sandboxInstalled(pi: ExtensionAPI): boolean {
+	return pi.getCommands().some((command) => command.name === "sandbox-enable");
+}
+
+function loadedCounts(pi: ExtensionAPI): LoadedCounts {
+	const commands = pi.getCommands();
+	const extensions = new Set<string>();
+	for (const command of commands) {
+		if (command.source === "extension") extensions.add(command.sourceInfo.path);
+	}
+	for (const tool of pi.getAllTools()) {
+		const source = tool.sourceInfo.source;
+		if (source !== "builtin" && source !== "sdk") extensions.add(tool.sourceInfo.path);
+	}
+	return {
+		tools: pi.getActiveTools().length,
+		skills: commands.filter((command) => command.source === "skill").length,
+		prompts: commands.filter((command) => command.source === "prompt").length,
+		extensions: extensions.size,
+	};
+}
+
+function setActivity(live: Live, activity: Activity): void {
+	const message = describe(activity);
+	if (message === live.activity) return;
+	live.activity = message;
+	live.ctx?.ui.setWorkingMessage(message);
+}
+
+async function probeGithub(live: Live, since: number | undefined): Promise<void> {
+	const ctx = live.ctx;
+	if (ctx === undefined) return;
+	const github = await readGithub(ctx.cwd, since);
+	if (live.ctx === undefined) return;
+	live.github = github;
+	// The card keeps its drawing for a second; this makes the new lines appear.
+	live.repaint?.();
+}
+
+async function probeGit(live: Live): Promise<void> {
+	const ctx = live.ctx;
+	if (ctx === undefined || live.probing) return;
+	live.probing = true;
+	try {
+		live.git = await readGit(ctx.cwd);
+		live.repaint?.();
+	} finally {
+		live.probing = false;
+	}
+}
+
+function startTicking(live: Live): void {
+	stopTicking(live);
+	live.ticker = setInterval(() => live.repaint?.(), TICK_MS);
+	live.ticker.unref?.();
+}
+
+function stopTicking(live: Live): void {
+	if (live.ticker === undefined) return;
+	clearInterval(live.ticker);
+	live.ticker = undefined;
+}
+
+/** The kit's settings screen asks for Alt+S, which pi-sandbox also needs and can't give up. */
+function withSettingsKey(pi: ExtensionAPI): ExtensionAPI {
+	return new Proxy(pi, {
+		get(target, name) {
+			if (name === "registerShortcut") {
+				return (key: KeyId, options: Parameters<ExtensionAPI["registerShortcut"]>[1]) =>
+					target.registerShortcut(key === Key.alt("s") ? SETTINGS_SHORTCUT : key, options);
+			}
+			if (name === "registerCommand") {
+				return (command: string, options: Parameters<ExtensionAPI["registerCommand"]>[1]) =>
+					target.registerCommand(command, {
+						...options,
+						description: options.description?.replace("Alt+S", "Ctrl+S"),
+					});
+			}
+			const value: unknown = Reflect.get(target, name);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
+
+export default function piLook(pi: ExtensionAPI): void {
+	createApp(withSettingsKey(pi), { name: "pi-frame" }).use(frameFeature).build();
+}
+
+async function openView(
+	ctx: ExtensionContext,
+	screen: Screen,
+	source: SessionSource,
+): Promise<void> {
+	let view: SessionView | undefined;
+	await ctx.ui.custom<void>(
+		(tui, theme, _keybindings, done) => {
+			hideImagesUnderOverlays(tui);
+			view = new SessionView({ tui, theme, screen, source, close: () => done() });
+			return view;
+		},
+		{
+			overlay: true,
+			overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" },
+		},
+	);
+	view?.dispose();
+}
+
+async function openOutputs(ctx: ExtensionContext): Promise<void> {
+	if (ctx.mode !== "tui") return;
+	const outputs = outputsOf(ctx.sessionManager.getBranch());
+	await ctx.ui.custom<void>(
+		(tui, theme, _keybindings, done) => {
+			hideImagesUnderOverlays(tui);
+			return new OutputView({
+				theme,
+				outputs,
+				rows: () => Math.floor(tui.terminal.rows * 0.85),
+				close: () => done(),
+			});
+		},
+		{
+			overlay: true,
+			overlayOptions: { anchor: "center", width: "90%", minWidth: 60, maxHeight: "85%" },
+		},
+	);
+}

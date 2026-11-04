@@ -1,0 +1,75 @@
+{
+	"name": "@huseynsnmz/pi-frame",
+	"version": "0.5.0",
+	"description": "Pi's start screen, a framed editor, a box around every tool call and a session footer. A fork of @adeildo/pi-look.",
+	"keywords": [
+		"pi",
+		"pi-coding-agent",
+		"pi-extension",
+		"pi-package",
+		"statusline",
+		"theme",
+		"tui"
+	],
+	"homepage": "https://github.com/huseynsnmz/pi-frame#readme",
+	"bugs": "https://github.com/huseynsnmz/pi-frame/issues",
+	"license": "MIT",
+	"author": {
+		"name": "Hüseyin Sönmez",
+		"email": "huseyin@snmz.org",
+		"url": "https://github.com/huseynsnmz"
+	},
+	"contributors": [
+		{
+			"name": "adeildo",
+			"url": "https://github.com/felipeadeildo"
+		}
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/huseynsnmz/pi-frame.git"
+	},
+	"files": [
+		"src",
+		"docs",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE"
+	],
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"scripts": {
+		"check": "tsc --noEmit",
+		"test": "bun test",
+		"e2e": "python3 test/e2e/run.py"
+	},
+	"dependencies": {
+		"@adeildo/pi-kit": "6.0.0",
+		"diff": "9.0.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "1.5.0",
+		"@earendil-works/pi-coding-agent": "1.5.0",
+		"@earendil-works/pi-tui": "1.5.0",
+		"@types/bun": "1.4.4",
+		"@types/node": "26.6.6",
+		"typebox": "1.4.3",
+		"typescript": "7.0.2"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	}
+}

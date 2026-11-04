@@ -1,0 +1,75 @@
+// Messages sent while the agent works, in a dashed frame above the editor. Pi has no hook for
+// drawing them, so this wraps its method.
+import { CUT, drawnByWidth, CHANGES_X, entryFrame } from "@adeildo/pi-kit";
+import { InteractiveMode, type Theme } from "@earendil-works/pi-coding-agent";
+import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+
+/** Undefined leaves pi's list as it is. */
+export type QueuePaint = () => Theme | undefined;
+
+interface Queued {
+	steering: readonly string[];
+	followUp: readonly string[];
+}
+
+interface Host {
+	pendingMessagesContainer: { clear(): void; addChild(component: Component): void };
+	getAllQueuedMessages(): Queued;
+	getAppKeyDisplay(action: string): string;
+}
+
+let installed = false;
+let paint: QueuePaint = () => undefined;
+
+export function frameQueue(source: QueuePaint): void {
+	paint = source;
+	if (installed) return;
+	installed = true;
+	const prototype = InteractiveMode.prototype as unknown as {
+		updatePendingMessagesDisplay(): void;
+	};
+	const own = prototype.updatePendingMessagesDisplay;
+	// Same guard as `peers/src/cleared.ts`: fail loudly if pi renames this method.
+	if (typeof own !== "function")
+		throw new Error("pi has no InteractiveMode.updatePendingMessagesDisplay: write to the pi");
+	prototype.updatePendingMessagesDisplay = function update(this: Host) {
+		const theme = paint();
+		if (theme === undefined) return own.call(this);
+		const queued = this.getAllQueuedMessages();
+		this.pendingMessagesContainer.clear();
+		if (queued.steering.length + queued.followUp.length === 0) return;
+		const key = this.getAppKeyDisplay("app.message.dequeue");
+		this.pendingMessagesContainer.addChild(queueBlock(queued, key, theme));
+	};
+}
+
+const MODES = [
+	["steer", "steering"],
+	["next", "followUp"],
+] as const;
+const LABEL = Math.max(...MODES.map(([label]) => label.length));
+
+export function queueBlock(queued: Queued, key: string, theme: Theme): Component {
+	return drawnByWidth((width) => {
+		const room = Math.max(1, width - CHANGES_X - LABEL - 2);
+		const rows = MODES.flatMap(([label, mode]) =>
+			queued[mode].map((text) => {
+				const color = label === "steer" ? "accent" : "muted";
+				return `${theme.fg(color, label.padEnd(LABEL))}  ${theme.fg("text", oneLine(text, room))}`;
+			}),
+		);
+		return entryFrame(rows, width, theme, {
+			top: theme.fg("dim", "queued"),
+			bottom: `${theme.fg("muted", key)} ${theme.fg("dim", "to edit")}`,
+			color: "borderMuted",
+			dashed: true,
+		});
+	});
+}
+
+function oneLine(text: string, room: number): string {
+	const lines = text.trim().split("\n");
+	const first = lines[0] ?? "";
+	if (lines.length === 1 && visibleWidth(first) <= room) return first;
+	return `${truncateToWidth(first, Math.max(1, room - CUT.length), "")}${CUT}`;
+}
