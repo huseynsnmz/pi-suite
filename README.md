@@ -14,7 +14,7 @@ It started as a fork of [`@zhuxixi/pi-agent-board`](https://github.com/zhuxixi/p
   ● update the changelog   my-app       Running git log                    12s
 ╭─ new session ──────────────────────────────────────────────────────────────╮
 │ › type a task to start a session                                           │
-╰─ enter resume   space peek   / filter   ctrl+x stop   ? keys ──────────────╯
+╰─ enter resume   space peek   ctrl+f filter   ctrl+x stop   ? keys ─────────╯
 ```
 
 ## Quick start
@@ -24,7 +24,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-board@0.16.0
+   pi install npm:@huseynsnmz/pi-board@0.17.0
    ```
 
 2. Restart Pi, and press `Left` twice on an empty prompt, or run `/agent-board`.
@@ -43,12 +43,14 @@ Installing it runs `node-pty`'s install script, which sets up its terminal suppo
 | `Left` / `Right` | Attach to the selected session |
 | `Ctrl+\` | Back to the board from a session. `Left` also works on an empty prompt |
 | `Space` | Peek at a session, and type there to reply |
-| `/` | Filter |
+| `/` | Pi's commands, as at the prompt. Templates and skills start a session |
+| `Ctrl+F` | Filter |
 | `Ctrl+X` | Stop a session, and press again within 2 seconds to delete it |
 | `Ctrl+N` | While typing, choose the folder, model and thinking level |
 | `!` | `node-pty` diagnostics |
 | `?` | All the keys |
 | `Esc` | Clear the input, or leave the board |
+| `Ctrl+C` twice | Quit Pi, from the board or a session. Sessions keep running |
 
 The full list is in the [reference](docs/reference.md).
 

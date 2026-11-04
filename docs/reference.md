@@ -19,7 +19,8 @@ Typing goes straight into the input, as in Claude Code's agent view, so there's 
 | `Alt+Up` / `Alt+Down` | Previous or next group. |
 | `Alt+1`..`Alt+9` | Attach to that row. |
 | `Space` | Open or close Peek. |
-| `/` / `Ctrl+F` | Filter the list. |
+| `/` | Pick one of Pi's commands. It closes the board and runs in the Pi you opened it from. A template or skill starts a session instead, like any task. |
+| `Ctrl+F` | Filter the list. |
 | `Ctrl+S` | Group by state or by directory. |
 | `Shift+Up` / `Shift+Down` | Move the row up or down its group. |
 | `Ctrl+G` | Write the task in `$VISUAL` or `$EDITOR`. |
@@ -35,7 +36,7 @@ Typing goes straight into the input, as in Claude Code's agent view, so there's 
 | `!` | node-pty diagnostics and fix steps. |
 | `?` | Help. |
 | `Esc` | Clear a draft, or leave the board. |
-| `Ctrl+C` | Clear a draft; press twice to leave. |
+| `Ctrl+C` | Clear a draft; press twice within a second to quit Pi, from the board or an attached session. Background sessions keep running. |
 
 On macOS, the `Alt` keys need your terminal to send Option as Alt.
 
@@ -134,7 +135,7 @@ The board separates a session's semantic task state from whether a worker proces
 
 Rows are grouped by state. When a state contains sessions from multiple directories, rows are grouped by folder within that state. Pinned rows and folders come first, then creation order remains stable; activity does not reshuffle the list. New agent activity is marked unread with stronger row glyphs and header/footer counts. Replies sent while a session is busy enter a durable FIFO follow-up queue and are delivered when the session is ready; a `qN` badge shows queued follow-ups.
 
-Press `/` to enter filter mode. Filter tokens are case-insensitive and can be combined with free-text terms:
+Press `Ctrl+F` to enter filter mode. Filter tokens are case-insensitive and can be combined with free-text terms:
 
 ```text
 s:running

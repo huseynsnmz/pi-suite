@@ -36,7 +36,7 @@ test("enter, both arrows and alt+number attach", () => {
 
 test("the shortcuts open what they say", () => {
 	assert.deepEqual(out.modes, {
-		peek: "peek", filter: "filter", find: "filter", help: "help", pty: "ptyHelp",
+		peek: "peek", filter: "filter", help: "help", pty: "ptyHelp",
 		select: "select", session: "session", evidence: "evidence", rename: "rename",
 	});
 });
@@ -47,16 +47,29 @@ test("space closes peek, and typing there is a reply", () => {
 	assert.deepEqual(out.peek.reply, { mode: "reply", input: "hi" });
 });
 
-test("esc leaves at once, and ctrl+c takes two presses", () => {
+test("esc leaves at once, and ctrl+c twice quits", () => {
 	assert.deepEqual(out.esc, ["exit"]);
 	assert.equal(out.ctrlC.once, 0);
-	assert.deepEqual(out.ctrlC.twice, ["exit"]);
+	assert.deepEqual(out.ctrlC.twice, ["quit"]);
+	assert.deepEqual(out.ctrlCFromTyping, ["quit"]);
+});
+
+test("/ opens the commands, which run in Pi; templates and skills start a session", () => {
+	assert.equal(out.slash.mode, "dispatch");
+	assert.equal(out.slash.menu, true);
+	assert.ok(out.slash.drawn, "the menu is drawn");
+	assert.equal(out.slash.ruleInside, false);
+	assert.deepEqual(out.slash.ran, [{ action: "command", text: "/model" }]);
+	assert.deepEqual(out.slash.started, ["/tldr", "/not-a-command"]);
+	assert.equal(out.slash.filterMenu, false);
+	assert.equal(out.slash.filterMode, "filter");
+
 });
 
 test("it's drawn in frames, with the keys on the bottom edge", () => {
 	assert.match(out.frame.top, /^╭─ π-board \S+ ─+ .* ─╮$/);
 	assert.equal(out.frame.card, true);
-	assert.match(out.frame.hints, /^╰─ enter .*space peek.*\/ filter.*─╯$/);
+	assert.match(out.frame.hints, /^╰─ enter .*space peek.*ctrl\+f filter.*─╯$/);
 });
 
 test("the session on screen is never prewarmed", () => {

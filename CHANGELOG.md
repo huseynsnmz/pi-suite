@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.0] - 2026-11-04
+
+### Features
+
+- **keys**: `/` opens Pi's commands, with the usual menu. Commands run in the Pi the board was opened from; templates and skills start a session
+- **keys**: `Ctrl+C` twice quits Pi from the board and from an attached session, and leaves background sessions running
+
+### Changes
+
+- **keys**: `Ctrl+F` is now the only way to filter
+
 ## [0.16.0] - 2026-11-04
 
 ### Features

@@ -145,6 +145,10 @@ export async function attach(
 		void service.markVisited?.(viewId)?.catch(() => {});
 		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, plan.socketPath);
 		void service.markVisited?.(viewId)?.catch(() => {});
+		if (result.action === "quit") {
+			ctx.shutdown();
+			return { action: "switched" }; // Nothing to come back to.
+		}
 		return { action: result.action === "closed" ? "closed" : "detached" };
 	}
 	if (plan.plan === "session-switch") {

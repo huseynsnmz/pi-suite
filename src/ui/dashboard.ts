@@ -9,7 +9,9 @@
 import { readFileSync } from "node:fs";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { createDoublePress, QUIT_PRESS_MS } from "../core/double-press.mjs";
+import { runsInPi } from "../core/slash-commands.mjs";
 import { readConfig, writeConfig } from "../core/config.mjs";
 import { editExternally } from "./external-editor.ts";
 import { requestDashboardRender } from "../core/dashboard-render.mjs";
@@ -57,7 +59,11 @@ interface ThemeLike {
 	strikethrough(text: string): string;
 }
 
-export type DashboardResult = { action: "exit" } | { action: "attach"; viewId: string; stopFirst: boolean };
+export type DashboardResult =
+	| { action: "exit" }
+	| { action: "attach"; viewId: string; stopFirst: boolean }
+	| { action: "quit" }
+	| { action: "command"; text: string };
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 type LaunchModel = {
@@ -125,6 +131,7 @@ export interface DashboardDeps {
 	currentThinkingLevel: ThinkingLevel;
 	initialSelectedId?: string | null;
 	initialNotice?: string;
+	commands?: { name: string; description?: string; source: string }[];
 }
 
 export class DashboardComponent implements Component {
@@ -137,7 +144,7 @@ export class DashboardComponent implements Component {
 	private filterQuery = "";
 	private pending: PendingConfirm | null = null;
 	private deleteArm: { id: string; at: number } | null = null;
-	private exitArmedAt: number | null = null;
+	private readonly quitPresses = createDoublePress(Date.now, QUIT_PRESS_MS);
 	private groupBy: "state" | "directory" = readConfig().groupBy === "directory" ? "directory" : "state";
 	private readonly groupOf = new Map<string, string>();
 	private readonly neighborsOf = new Map<string, string>();
@@ -182,6 +189,7 @@ export class DashboardComponent implements Component {
 			}
 		};
 		this.editor.onSubmit = (text) => this.submitEditor(text);
+		this.editor.setAutocompleteProvider(this.commandMenu());
 		this.selectedId = deps.initialSelectedId ?? null;
 		// Issue #147: the post-delete reopen carries the Deleted notice here —
 		// the component is new each open, so an inline notice cannot travel.
@@ -335,6 +343,8 @@ export class DashboardComponent implements Component {
 	// ---- input --------------------------------------------------------------
 
 	handleInput(data: string): void {
+		if (!matchesKey(data, Key.ctrl("c"))) this.quitPresses.reset();
+		else if (this.quitPresses.press()) return this.done({ action: "quit" });
 		switch (this.mode) {
 			case "list":
 				this.handleListKey(data);
@@ -381,11 +391,10 @@ export class DashboardComponent implements Component {
 
 	private handleListKey(data: string): void {
 		if (!matchesKey(data, Key.ctrl("x"))) this.deleteArm = null;
-		if (!matchesKey(data, Key.ctrl("c"))) this.exitArmedAt = null;
 		if (this.handleRowKey(data)) return;
 		if (matchesKey(data, Key.right) || matchesKey(data, Key.left) || matchesKey(data, Key.enter)) return this.attachSelected();
 		if (matchesKey(data, Key.space)) return this.openPeek();
-		if (data === "/" || matchesKey(data, Key.ctrl("f"))) return this.startFilter();
+		if (matchesKey(data, Key.ctrl("f"))) return this.startFilter();
 		if (data === "?") return this.openHelp("list");
 		if (data === "!") return this.openPtyHelp("list");
 		if (matchesKey(data, Key.ctrl("r"))) return this.startRename();
@@ -405,13 +414,7 @@ export class DashboardComponent implements Component {
 			if (matchesKey(data, Key.alt(String(n) as never))) return this.attachInFolder(n - 1);
 		}
 		if (matchesKey(data, Key.escape)) return this.done({ action: "exit" });
-		if (matchesKey(data, Key.ctrl("c"))) {
-			const now = Date.now();
-			if (this.exitArmedAt !== null && now - this.exitArmedAt <= DELETE_DOUBLE_PRESS_MS) return this.done({ action: "exit" });
-			this.exitArmedAt = now;
-			this.notifyInputState("Press ctrl+c again to exit", "accent");
-			return;
-		}
+		if (matchesKey(data, Key.ctrl("c"))) return this.notifyInputState("Press ctrl+c again to quit Pi", "accent");
 		if (isPrintable(data) || isBracketedPaste(data)) {
 			this.mode = "dispatch";
 			this.handleEditorInput(data);
@@ -509,6 +512,12 @@ export class DashboardComponent implements Component {
 	}
 
 	private handleDispatchKey(data: string): void {
+		// The menu has its own use for Enter, Tab, Esc and the arrows.
+		if (this.editor.isShowingAutocomplete() && !matchesKey(data, Key.ctrl("c"))) {
+			this.handleEditorInput(data);
+			if (!this.input && this.mode === "dispatch") this.mode = "list";
+			return;
+		}
 		if (matchesKey(data, Key.ctrl("n"))) return this.openLaunchDialog();
 		if (matchesKey(data, Key.ctrl("g"))) return void this.openExternalEditor();
 		if (matchesKey(data, Key.ctrl("enter"))) return this.startNow(true);
@@ -801,6 +810,11 @@ export class DashboardComponent implements Component {
 
 	/** In this folder, with this session's model. Ctrl+N is there for anything else. */
 	private startNow(attach = false): void {
+		const text = this.input.trim();
+		if (runsInPi(text, this.deps.commands ?? [])) {
+			this.setInput("");
+			return this.done({ action: "command", text });
+		}
 		const cwd = this.deps.defaultCwd;
 		const { model, thinking } = this.buildLaunchState(cwd, this.deps.currentModel, this.deps.currentThinkingLevel);
 		this.submitDispatch({ cwd, model: model ? canonicalModelRef(model) : null, thinkingLevel: thinking, attach });
@@ -934,6 +948,17 @@ export class DashboardComponent implements Component {
 		if (matchesKey(data, Key.enter)) return onSubmit();
 		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) return onCancel();
 		this.handleEditorInput(data);
+	}
+
+	/** Only for a task that starts with `/`: the same editor takes filters, names and replies. */
+	private commandMenu(): CombinedAutocompleteProvider {
+		const menu = new CombinedAutocompleteProvider(this.deps.commands ?? [], this.deps.defaultCwd);
+		const suggest = menu.getSuggestions.bind(menu);
+		menu.getSuggestions = async (lines, line, col, options) => {
+			if (this.mode !== "dispatch" || line !== 0 || !lines[0]?.startsWith("/")) return null;
+			return suggest(lines, line, col, options);
+		};
+		return menu;
 	}
 
 	private handleEditorInput(data: string): void {
@@ -1441,7 +1466,7 @@ export class DashboardComponent implements Component {
 		if (this.mode === "select") {
 			return [`${this.selectionCount()} selected`, ...dots, "space toggle", "a all", "u clear", "d done", "ctrl+x delete", "esc cancel"];
 		}
-		return [selected ? (live ? "enter attach live" : "enter resume") : "type to start", "space peek", "/ filter", "ctrl+x stop", "? keys", ...dots];
+		return [selected ? (live ? "enter attach live" : "enter resume") : "type to start", "space peek", "ctrl+f filter", "ctrl+x stop", "? keys", ...dots];
 	}
 
 	private hintLine(label: string, color: InputNoticeColor, hints: string[]): string {
@@ -1485,8 +1510,10 @@ export class DashboardComponent implements Component {
 			const contentWidth = Math.max(1, width - visibleWidth(opts.prompt));
 			return [clip(`${opts.prompt}${clip(this.theme.fg("muted", opts.placeholder ?? ""), contentWidth)}`, width)];
 		}
-		// Its first and last lines are its own rules, and the frame already draws those.
-		const rendered = this.editor.render(width).slice(1, -1);
+		// Its first line and the one above any command menu are its own rules, and the frame already draws those.
+		const all = this.editor.render(width);
+		const menu = (this.editor as unknown as { renderedAutocompleteHeight: number }).renderedAutocompleteHeight;
+		const rendered = [...all.slice(1, all.length - menu - 1), ...all.slice(all.length - menu)];
 		return opts.editing ? rendered : rendered.map((line) => stripInactiveEditorCursor(line));
 	}
 
@@ -1806,7 +1833,8 @@ export class DashboardComponent implements Component {
 			["alt+↑ / alt+↓", "Previous or next group"],
 			["alt+1..9", "Attach to that row in this folder"],
 			["space", "Open or close the peek panel"],
-			["/ or ctrl+f", "Filter the list"],
+			["/", "Pi's commands. They run here; a template or skill starts a session"],
+			["ctrl+f", "Filter the list"],
 			["ctrl+s", "Group by state or by directory"],
 			["shift+↑ / ↓", "Move the row up or down its group"],
 			["ctrl+g", "Write the task in $VISUAL or $EDITOR"],
@@ -1820,7 +1848,7 @@ export class DashboardComponent implements Component {
 			["ctrl+e", "Evidence and diagnostics"],
 			["ctrl+k", "Delete every inactive session in this state"],
 			["esc", "Close, clear the input, or leave the board"],
-			["ctrl+c", "Clear the input; press twice to leave"],
+			["ctrl+c", "Clear the input; press twice to quit Pi, here or in a session"],
 			["!", "node-pty diagnostics"],
 			["?", "This help"],
 			["In select", "↑↓ move · space toggle · a all · u clear · d done · ctrl+x delete · esc cancel"],

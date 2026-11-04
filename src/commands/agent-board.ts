@@ -11,6 +11,7 @@ import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { requestDashboardRender } from "../core/dashboard-render.mjs";
 import { nextVisibleIdAfterRemoval } from "../core/rows.mjs";
 import { createService } from "../runtime/service.mjs";
+import { boardCommands } from "../core/slash-commands.mjs";
 import { planAttachPrelude, planAttachResolved } from "./attach-decision.mjs";
 import { screenLogPath } from "../core/paths.mjs";
 import { appendDiagnostic } from "../core/diagnostics.mjs";
@@ -31,7 +32,10 @@ export interface AgentBoardCommandOptions {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+let addedCommands: () => { name: string; description?: string; source: string }[] = () => [];
+
 export function registerAgentBoardCommand(pi: ExtensionAPI, opts: AgentBoardCommandOptions): void {
+	addedCommands = () => pi.getCommands();
 	pi.registerCommand("agent-board", {
 		description: "Open the background agent-board dashboard",
 		handler: async (args, ctx) => {
@@ -73,7 +77,7 @@ export function registerAgentBoardCommand(pi: ExtensionAPI, opts: AgentBoardComm
 }
 
 export async function openDashboard(
-	ctx: Pick<ExtensionCommandContext, "ui" | "cwd" | "modelRegistry" | "model" | "sessionManager">,
+	ctx: Pick<ExtensionCommandContext, "ui" | "cwd" | "modelRegistry" | "model" | "sessionManager" | "shutdown">,
 	service: ReturnType<typeof createService>,
 	options: {
 		initialSelectedId?: string | null;
@@ -85,6 +89,8 @@ export async function openDashboard(
 	ctx.ui.setHeader(() => ({ render: () => [], invalidate() {} }));
 	ctx.ui.setFooter(() => ({ render: () => [], invalidate() {} }));
 	ctx.ui.setTitle("agent-board");
+	let board: unknown = null;
+	let command: string | null = null;
 	let availableModels: any[] = [];
 	try {
 		availableModels = ctx.modelRegistry.getAvailable();
@@ -92,8 +98,9 @@ export async function openDashboard(
 		availableModels = [];
 	}
 	try {
-		return await ctx.ui.custom<DashboardResult>(
+		const result = await ctx.ui.custom<DashboardResult>(
 			(tui, theme, keybindings, done) => {
+				board = tui;
 				let interval: ReturnType<typeof setInterval> | null = null;
 				const wrappedDone = (result: DashboardResult) => {
 					if (interval) clearInterval(interval);
@@ -110,6 +117,7 @@ export async function openDashboard(
 					availableModels,
 					currentModel: ctx.model ?? null,
 					currentThinkingLevel: options.currentThinkingLevel ?? "off",
+					commands: boardCommands(addedCommands()),
 				});
 				interval = setInterval(() => {
 					void service.reconcile().catch(() => {});
@@ -132,8 +140,20 @@ export async function openDashboard(
 				overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 },
 			},
 		);
+		if (result.action === "quit") ctx.shutdown();
+		if (result.action === "command") command = result.text;
+		return result;
 	} finally {
 		restoreChrome(ctx);
+		// A command runs with more than an extension is given, so this goes the way a typed one does.
+		if (command) {
+			ctx.ui.setEditorText(command);
+			setTimeout(() => {
+				const focused = (board as { getFocusedComponent?: () => { handleInput?: (data: string) => void; getExpandedText?: () => string } | null } | null)?.getFocusedComponent?.();
+				// Only if it's the prompt holding the command. Otherwise it's left there to send by hand.
+				if (focused?.getExpandedText?.() === command) focused.handleInput?.("\r");
+			}, 0);
+		}
 	}
 }
 
@@ -203,6 +223,10 @@ async function attach(
 		void service.markVisited?.(viewId)?.catch(() => {});
 		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, plan.socketPath);
 		void service.markVisited?.(viewId)?.catch(() => {});
+		if (result.action === "quit") {
+			ctx.shutdown();
+			return { action: "switched" }; // Nothing to come back to.
+		}
 		if (result.action === "delete") {
 			// Issue #147: the component already tore down and exited — archive
 			// here so the host's death is never rendered inside the attach view.

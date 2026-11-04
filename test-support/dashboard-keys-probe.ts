@@ -73,7 +73,7 @@ const out = {};
 		dash.mode = "list";
 	}
 	const modes = {};
-	for (const [name, key] of [["peek", " "], ["filter", "/"], ["find", "\x06"], ["help", "?"], ["pty", "!"], ["select", "\x01"], ["session", "\x0f"], ["evidence", "\x05"], ["rename", "\x12"]]) {
+	for (const [name, key] of [["peek", " "], ["filter", "\x06"], ["help", "?"], ["pty", "!"], ["select", "\x01"], ["session", "\x0f"], ["evidence", "\x05"], ["rename", "\x12"]]) {
 		press(dash, key);
 		modes[name] = dash.mode;
 		dash.mode = "list";
@@ -105,6 +105,52 @@ const out = {};
 	out.esc = results.map((r) => r.action);
 	dash.dispose();
 	again.dispose();
+}
+{
+	results.length = 0;
+	const dash = make();
+	press(dash, "x", "\x03", "\x03");
+	out.ctrlCFromTyping = results.map((r) => r.action);
+	dash.dispose();
+}
+{
+	const commands = [
+		{ name: "model", description: "Select model", source: "builtin" },
+		{ name: "tldr", source: "prompt" },
+	];
+	const settle = () => new Promise((r) => setTimeout(r, 150));
+	results.length = 0;
+	dispatched.length = 0;
+	const dash = make({ commands });
+	press(dash, "/");
+	await settle();
+	const slashMode = dash.mode;
+	const menu = dash.editor.isShowingAutocomplete();
+	const frame = dash.render(120);
+	const drawn = frame.some((l) => l.includes("Select model"));
+	const ruleInside = frame.some((l) => /^─+ *$/.test(l.trim()) && l.trim().length > 20);
+	press(dash, "m", "o");
+	await settle();
+	press(dash, "\r");
+	await settle();
+	const ran = [...results];
+	const typed = make({ commands });
+	for (const text of ["/tldr", "/not-a-command"]) {
+		press(typed, text);
+		await settle();
+		typed.editor.isShowingAutocomplete() && press(typed, "\x1b");
+		press(typed, "\r");
+		await settle();
+	}
+	const filter = make({ commands });
+	press(filter, "\x06", "/");
+	await settle();
+	out.slash = {
+		mode: slashMode, menu, drawn, ruleInside, ran,
+		started: dispatched.map((d) => d.text),
+		filterMenu: filter.editor.isShowingAutocomplete(), filterMode: filter.mode,
+	};
+	dash.dispose(); typed.dispose(); filter.dispose();
 }
 {
 	const dash = make();

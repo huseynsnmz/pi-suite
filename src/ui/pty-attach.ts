@@ -6,6 +6,7 @@ import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
+import { createDoublePress, QUIT_PRESS_MS } from "../core/double-press.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { canPublishAttachView, createAttachOutputRenderScheduler, decideAttachPresentation, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
@@ -18,7 +19,7 @@ import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeFor
 import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
 import { clampInt, encodeWheelReport, fullscreenMouseEnableSequence, historyFloorAfterHydrate, isFullscreenSelectionEnd, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
-export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null } | { action: "delete" };
+export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null } | { action: "delete" } | { action: "quit" };
 
 type ThemeLike = {
 	fg(color: string, text: string): string;
@@ -400,6 +401,7 @@ export class PtyAttachComponent implements Component {
 	private selectionAutoScrollLines = 0;
 	private selectionAutoScrollMouse: { row: number; col: number } | null = null;
 	private pendingClickTimer: ReturnType<typeof setTimeout> | null = null;
+	private readonly quitPresses = createDoublePress(Date.now, QUIT_PRESS_MS);
 	private lastClickPoint: MousePoint | null = null;
 	private lastClickAt = 0;
 	/** Authoritative editor emptiness pushed by the child Pi extension via the
@@ -577,6 +579,9 @@ export class PtyAttachComponent implements Component {
 			this.send({ type: "input", data });
 			return;
 		}
+		// The first goes to the session as usual. The second never does, so the session lives on.
+		if (!matchesKey(data, Key.ctrl("c"))) this.quitPresses.reset();
+		else if (this.quitPresses.press()) return this.detach({ action: "quit" });
 		if (matchesKey(data, "ctrl+\\")) {
 			// Unconditional, terminal-independent escape (issue #126): 0x1c is a
 			// single raw ASCII byte every terminal forwards unchanged in raw
@@ -761,7 +766,7 @@ export class PtyAttachComponent implements Component {
 		this.scheduleRender();
 	}
 
-	private detach(): void {
+	private detach(result: PtyAttachResult = { action: "detached" }): void {
 		// Restore a held PTY before ending the control socket. The runner closes
 		// the socket immediately after receiving detach, so sending detach first
 		// can drop the G3 restore resize (issue #42).
@@ -772,7 +777,7 @@ export class PtyAttachComponent implements Component {
 			this.send({ type: "detach" });
 		}
 		this.close(true);
-		this.done({ action: "detached" });
+		this.done(result);
 	}
 
 		/** Install the component's public ?2026 observers; false return keeps xterm defaults. */
