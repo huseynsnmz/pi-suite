@@ -145,7 +145,7 @@ export default function piWeb(pi: ExtensionAPI): void {
       const key = `${url.href}\n${offset}\n${question}`;
       const known = answers.get(key);
       const fresh = known && Date.now() - known.at < CACHE_MS;
-      const answer = fresh ? known.text : await withoutBlockedLinks(await askReader(ctx, config, question, part, signal), signal);
+      const answer = fresh ? known.text : await withoutBlockedLinks(await askReader(ctx, config, question, part, signal, routerReader(ctx)), signal);
       if (!fresh) remember(answers, key, answer);
       const left = page.text.length - offset - part.length;
       return reply(`From ${url.hostname}, not checked against anything else:\n${answer}${looksLikeInstructions(part) ? WARNING : ""}${left > 0 ? `\n\n${left} characters unread. Fetch again with offset ${offset + part.length} for more.` : ""}`, [...urlsIn(answer), ...pageLinks(part)]);
@@ -172,7 +172,7 @@ export default function piWeb(pi: ExtensionAPI): void {
         const links = clean.filter((link) => !blocked.has(link));
         if (!links.length) return reply(clean.length ? "Every result was on a site blocked by the site filter." : "No results.");
         const part = results.text.slice(0, SEARCH_CHARS);
-        const answer = await withoutBlockedLinks(await askReader(ctx, config, question, part, signal), signal);
+        const answer = await withoutBlockedLinks(await askReader(ctx, config, question, part, signal, routerReader(ctx)), signal);
         return reply(`${answer}${looksLikeInstructions(part) ? WARNING : ""}\n\nLinks:\n${links.map((link) => `- ${link}`).join("\n")}`, [...links, ...urlsIn(answer), ...pageLinks(part)], [...new Set(links.map((link) => new URL(link).hostname))]);
       },
     });
@@ -180,10 +180,19 @@ export default function piWeb(pi: ExtensionAPI): void {
 
   const SESSION_MODEL = "The session's model";
 
+  /** Whoever answers fills in the object, so it doesn't matter which loads first. */
+  function routerReader(ctx: ExtensionContext): string | undefined {
+    // Only while it's selected: a page must not go to a provider this session didn't choose.
+    if (ctx.model?.api !== "pi-virtual") return undefined;
+    const probe: { model?: string } = {};
+    pi.events.emit("pi-router:reader-model", probe);
+    return probe.model;
+  }
+
   async function pickReader(ctx: ExtensionContext): Promise<void> {
     if (!ctx.hasUI) return;
     const current = config.readerModel ? `${config.readerModel.provider}/${config.readerModel.id}` : null;
-    const models = ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
+    const models = ctx.modelRegistry.getAvailable().filter((model) => model.api !== "pi-virtual").map((model) => `${model.provider}/${model.id}`);
     const label = (name: string, on: boolean) => (on ? `${name} (current)` : name);
     const options = [label(SESSION_MODEL, current === null), ...models.map((model) => label(model, model === current))];
     const picked = await ctx.ui.select("Which model reads web pages?", options);
@@ -199,7 +208,7 @@ export default function piWeb(pi: ExtensionAPI): void {
     getArgumentCompletions: (prefix) => ("reader".startsWith(prefix) && prefix !== "reader" ? [{ value: "reader", label: "reader", description: "Choose the model that reads web pages" }] : null),
     handler: async (args, ctx) => {
       if (args.trim() === "reader") return pickReader(ctx);
-      const reader = config.readerModel ? `${config.readerModel.provider}/${config.readerModel.id}` : "the session's model";
+      const reader = config.readerModel ? `${config.readerModel.provider}/${config.readerModel.id}` : (routerReader(ctx) ?? "the session's model");
       const search = provider ? `on, through ${provider.name}` : `off: ${config.searchOff}`;
       const lines = [`web_search: ${search}`, `Company search: ${config.companySearch ? "allowed" : "off"}`, `Page reader: ${reader}`, `Site filter: ${config.dnsFilter}`];
       ctx.ui.notify(lines.join("\n"), "info");

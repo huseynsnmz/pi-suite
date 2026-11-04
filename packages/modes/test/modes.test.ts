@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { withAliases, withoutAliases } from "../src/deny-off.ts";
 import { fromExpectedPackage, decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
@@ -73,10 +76,10 @@ test("dialog text cannot hide part of a command", () => {
 });
 
 const loadOrder: Array<[string, unknown, boolean]> = [
-  ["loaded after the gate", ["npm:@gotgenes/pi-permission-system@42.0.0", "git:github.com/huseynsnmz/pi-modes@v1"], true],
-  ["loaded first", ["git:github.com/huseynsnmz/pi-modes@v1", "npm:@gotgenes/pi-permission-system@42.0.0"], false],
-  ["object form", [{ source: "npm:pi-permission-system" }, { source: "pi-modes" }], true],
-  ["no gate installed", ["pi-modes"], false],
+  ["loaded after the gate", ["npm:@gotgenes/pi-permission-system@42.0.0", "git:github.com/huseynsnmz/pi-suite@v1"], true],
+  ["loaded first", ["git:github.com/huseynsnmz/pi-suite@v1", "npm:@gotgenes/pi-permission-system@42.0.0"], false],
+  ["object form", [{ source: "npm:pi-permission-system" }, { source: "pi-suite" }], true],
+  ["no gate installed", ["pi-suite"], false],
   ["settings without packages", undefined, false],
 ];
 
@@ -115,8 +118,8 @@ test("reading the statuses leaves the footer as it found it, and needs to load f
   });
   assert.equal(reader, data);
   assert.deepEqual(calls, ["set", "restored"]);
-  for (const first of ["npm:@huseynsnmz/pi-modes@0.2.2", "/work/pi-modes", { source: "npm:@huseynsnmz/pi-modes" }]) assert.equal(loadsFirst([first, "x"]), true);
-  for (const packages of [["npm:pi-sandbox", "npm:@huseynsnmz/pi-modes"], [], undefined]) assert.equal(loadsFirst(packages), false);
+  for (const first of ["npm:@huseynsnmz/pi-suite@0.2.2", "/work/pi-suite", { source: "npm:@huseynsnmz/pi-suite" }]) assert.equal(loadsFirst([first, "x"]), true);
+  for (const packages of [["npm:pi-sandbox", "npm:@huseynsnmz/pi-suite"], [], undefined]) assert.equal(loadsFirst(packages), false);
 });
 
 test("a new session starts in the configured mode, but never in yolo", () => {
@@ -126,11 +129,19 @@ test("a new session starts in the configured mode, but never in yolo", () => {
   assert.equal(startingMode(undefined), "normal");
 });
 
-test("todo and ask_questions are only trusted from the packages that make them harmless", () => {
-  assert.equal(fromExpectedPackage("todo", "/n/node_modules/@huseynsnmz/pi-frame/src/index.ts"), true);
-  assert.equal(fromExpectedPackage("ask_questions", "/n/node_modules/@huseynsnmz/pi-modes/src/index.ts"), true);
-  assert.equal(fromExpectedPackage("todo", "/n/node_modules/writes-todo-md/index.ts"), false);
-  assert.equal(fromExpectedPackage("ask_questions", "/n/node_modules/@x/pi-frame/index.ts"), false);
-  assert.equal(fromExpectedPackage("todo", undefined), false);
-  assert.equal(fromExpectedPackage("read", undefined), true);
+test("these tools are only trusted from the suite's own entry", () => {
+  const dir = mkdtempSync(join(tmpdir(), "suite-"));
+  const entry = join(dir, "entry.ts");
+  const other = join(dir, "pi-suite-evil.ts");
+  writeFileSync(entry, "");
+  writeFileSync(other, "");
+  for (const tool of ["todo", "ask_questions", "web_fetch", "web_search"]) {
+    assert.equal(fromExpectedPackage(tool, entry, entry), true, tool);
+    assert.equal(fromExpectedPackage(tool, other, entry), false, tool);
+    assert.equal(fromExpectedPackage(tool, undefined, entry), false, tool);
+  }
+  const link = join(dir, "link.ts");
+  symlinkSync(entry, link);
+  assert.equal(fromExpectedPackage("todo", link, entry), true);
+  assert.equal(fromExpectedPackage("read", undefined, entry), true);
 });

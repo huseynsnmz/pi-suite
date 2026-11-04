@@ -244,4 +244,6 @@ const out = {};
 	out.folder = { title, dialog, elsewhere, root, cwds: dispatched.map((d) => d.cwd) };
 	dash.dispose();
 }
+// Its state coordinator stops once this folder is gone. Left behind, it runs on after the test.
+rmSync(root, { recursive: true, force: true });
 console.log(JSON.stringify(out));

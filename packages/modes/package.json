@@ -12,7 +12,8 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/huseynsnmz/pi-modes.git"
+    "url": "git+https://github.com/huseynsnmz/pi-suite.git",
+    "directory": "packages/modes"
   },
   "files": [
     "src",
@@ -49,5 +50,6 @@
     "@types/node": "26.6.6",
     "typebox": "1.4.3",
     "typescript": "7.0.2"
-  }
+  },
+  "private": true
 }

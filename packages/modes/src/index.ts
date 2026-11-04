@@ -155,6 +155,11 @@ export default function piModes(pi: ExtensionAPI): void {
     );
   }
 
+  // Whoever asks, such as pi-router, passes an object, so load order doesn't matter.
+  pi.events.on("pi-modes:mode", (probe) => {
+    (probe as { mode?: Mode }).mode = mode;
+  });
+
   function change(next: Mode, ctx: ExtensionContext): void {
     if (next === mode) return;
     apply(next, ctx);
@@ -181,7 +186,7 @@ export default function piModes(pi: ExtensionAPI): void {
       // The tools that ignore deny rules can't reach the sandbox's bash, so they'd run outside it.
       const sandboxed = sandboxInstalled(pi.getCommands());
       if (sandboxed && !sandboxIsOn(statuses)) {
-        ctx.ui.notify("Yolo only runs inside the sandbox. Turn it on with /sandbox-enable. If it is on, move pi-modes first in packages in settings.json.", "error");
+        ctx.ui.notify("Yolo only runs inside the sandbox. Turn it on with /sandbox-enable. If it is on, move pi-suite first in packages in settings.json.", "error");
         return;
       }
       const agreed = await confirmYolo(ctx, hasPermissionSystem(ctx.sessionManager.getSessionId()) && !sandboxed, sandboxed);
@@ -197,7 +202,7 @@ export default function piModes(pi: ExtensionAPI): void {
       if (sandboxInstalled(pi.getCommands()) && packagesLoadThisFirst()) statuses = borrowStatusReader(ctx.ui as never);
       if (loadOrderIsLate()) {
         ctx.ui.notify(
-          "pi-modes loads after pi-permission-system, so you may be asked to approve actions that are then blocked. Move it first in packages in settings.json.",
+          "pi-suite loads after pi-permission-system, so you may be asked to approve actions that are then blocked. Move it first in packages in settings.json.",
           "warning",
         );
       }

@@ -27,6 +27,7 @@ Release tags can't be moved or deleted, and `main` can't be force-pushed. To fix
   - `npm run e2e:solo`
   - `npm run e2e`
   - `PATH="$HOME/.pi/agent/bin:$PATH" python3 test/e2e/run.py sandbox`, which needs ripgrep. Set `PI_MODES_E2E_FRAME` to a `pi-frame` checkout to include it.
+- The `sandbox` run needs a temp folder the sandbox doesn't allow writes to. `pi-sandbox` allows `/tmp`, so on macOS run it with `TMPDIR=$(getconf DARWIN_USER_TEMP_DIR)`, or its write checks fail.
 - Unit tests aren't enough here. Several bugs only showed up against the real extensions.
 - A check that can't fail proves nothing. In the normal modes, the permission system asks first, so `pi-sandbox` only sees what it lets through. On `pi-sandbox`'s prompts, Enter allows and Esc blocks.
 

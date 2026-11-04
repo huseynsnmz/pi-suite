@@ -42,6 +42,12 @@ import { readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { existsSync as linkExists, symlinkSync } from "node:fs";
+import { fileURLToPath as pathOf } from "node:url";
+
+// Several checks read this package's own node_modules, and in pi-suite they sit at the root.
+const ownModules = pathOf(new URL("../node_modules", import.meta.url));
+if (!linkExists(ownModules)) symlinkSync("../../node_modules", ownModules);
 
 /** The only coordinator script this checkout's suite spawns. */
 const COORDINATOR_RELATIVE_SCRIPT = "runner/state-coordinator.mjs";

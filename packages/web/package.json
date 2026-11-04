@@ -13,7 +13,8 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/huseynsnmz/pi-web.git"
+    "url": "git+https://github.com/huseynsnmz/pi-suite.git",
+    "directory": "packages/web"
   },
   "publishConfig": {
     "access": "public"
@@ -55,5 +56,6 @@
     "@types/turndown": "5.0.6",
     "typebox": "1.4.3",
     "typescript": "7.0.2"
-  }
+  },
+  "private": true
 }

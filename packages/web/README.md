@@ -1,5 +1,7 @@
 # pi-web
 
+Part of [pi-suite](../../README.md). Turn it off with `/suite off web`.
+
 Web search and fetch for [Pi](https://pi.dev), built so that the agent never reads the web.
 
 A web page can hold instructions aimed at the AI reading it. So a separate model with no tools reads every page and search result, and the agent only gets its answer. If that model isn't available, the page isn't read.
@@ -7,10 +9,10 @@ A web page can hold instructions aimed at the AI reading it. So a separate model
 ## Install
 
 ```bash
-pi install npm:@huseynsnmz/pi-web@0.1.2
+pi install npm:@huseynsnmz/pi-suite@0.1.0
 ```
 
-`web_fetch` works straight away. It reads pages with the session's model, unless you set `readerModel`. `web_search` stays off until you choose where searches go.
+`web_fetch` works straight away. It reads pages with the session's model, unless you set `readerModel` or use [pi-router](https://github.com/huseynsnmz/pi-suite/tree/main/packages/router), which can choose the reader. `web_search` stays off until you choose where searches go.
 
 ## Search
 

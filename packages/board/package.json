@@ -28,12 +28,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/huseynsnmz/pi-board.git"
+    "url": "git+https://github.com/huseynsnmz/pi-suite.git",
+    "directory": "packages/board"
   },
-  "bugs": {
-    "url": "https://github.com/huseynsnmz/pi-board/issues"
-  },
-  "homepage": "https://github.com/huseynsnmz/pi-board#readme",
   "publishConfig": {
     "access": "public"
   },
@@ -81,5 +78,6 @@
       "glob": "14.0.3",
       "minimatch": "11.0.4"
     }
-  }
+  },
+  "private": true
 }

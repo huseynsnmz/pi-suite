@@ -1,5 +1,7 @@
 # pi-modes
 
+Part of [pi-suite](../../README.md). Turn it off with `/suite off modes`.
+
 Switch [Pi](https://pi.dev) between permission modes with `Shift+Tab`.
 
 | Mode | What the agent can do | Who approves |
@@ -21,14 +23,14 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-modes@0.6.0
+   pi install npm:@huseynsnmz/pi-suite@0.1.0
    ```
 
-2. Move it above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
+2. Move pi-suite above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
 
    ```bash
    f=~/.pi/agent/settings.json
-   jq '.packages |= (map(select(tostring | contains("pi-modes"))) + map(select(tostring | contains("pi-modes") | not)))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+   jq '.packages |= (map(select(tostring | contains("pi-suite"))) + map(select(tostring | contains("pi-suite") | not)))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
    ```
 
 3. If you use `pi-permission-system`, allow plans so you aren't asked twice:
@@ -40,7 +42,7 @@ Requires Pi 1.5 or newer.
 
 4. Restart Pi. The footer shows `mode: normal`, and `Shift+Tab` changes the mode.
 
-To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.5.0`.
+To install from git instead, use `pi install git:github.com/huseynsnmz/pi-suite@v0.1.0`.
 
 ## Commands
 
@@ -118,10 +120,12 @@ In `pi -p` the agent is told nobody can answer. A client without the terminal's 
 
 Without a classifier, `auto` behaves like `normal`, and the extension warns you when you switch to it.
 
-**`pi-web`:** `web_fetch` and `web_search` are allowed in `plan` and `read-only`, as they only read.
+**`web`:** `web_fetch` and `web_search` are allowed in `plan` and `read-only`, as they only read. The same names from another package are blocked there.
 
 
 **`pi-subagents`:** blocked in `plan` and `read-only`, because a child agent could write files. In `normal` and `auto` it is unchanged.
+
+**`pi-router`:** `plan` mode uses its plan model, and approving a plan moves to its build model.
 
 **`pi-frame`:** the editor frame follows the mode, and turns red in `yolo`. Its `todo` checklist is allowed in `plan` and `read-only`, as it changes nothing outside the session. A tool named `todo` or `ask_questions` from any other package is still blocked there.
 

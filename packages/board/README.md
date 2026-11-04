@@ -1,5 +1,7 @@
 # pi-board
 
+Part of [pi-suite](../../README.md). Turn it off with `/suite off board`.
+
 A board for [Pi](https://pi.dev)'s background sessions: start a task and keep working, see which sessions need you, peek at them, reply, and attach when you want the whole conversation. The keys follow Claude Code's agent view.
 
 It started as a fork of [`@zhuxixi/pi-agent-board`](https://github.com/zhuxixi/pi-agent-board) 0.13.1, so the design and most of the code are theirs, under the MIT license.
@@ -24,7 +26,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-board@0.18.2
+   pi install npm:@huseynsnmz/pi-suite@0.1.0
    ```
 
 2. Restart Pi, and press `Left` twice on an empty prompt, or run `/agent-board`.
@@ -72,7 +74,7 @@ More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/
 
 ## `pi-frame`
 
-[`pi-frame`](https://github.com/huseynsnmz/pi-frame) 0.3.8 or newer draws its header and footer again when the board closes.
+[`pi-frame`](https://github.com/huseynsnmz/pi-suite/tree/main/packages/frame) 0.3.8 or newer draws its header and footer again when the board closes.
 
 ## Contributing
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.3]
+
+### Changes
+
+- **Virtual models**: pages can be read when the session's model is a virtual one, and the `/web reader` list leaves them out. With [pi-router](https://github.com/huseynsnmz/pi-router), the reader is the model it chooses, unless you set `readerModel`.
+
 ## [0.1.2] - 2026-11-04
 
 ### Changes

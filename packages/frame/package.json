@@ -11,8 +11,6 @@
 		"theme",
 		"tui"
 	],
-	"homepage": "https://github.com/huseynsnmz/pi-frame#readme",
-	"bugs": "https://github.com/huseynsnmz/pi-frame/issues",
 	"license": "MIT",
 	"author": {
 		"name": "Hüseyin Sönmez",
@@ -27,7 +25,8 @@
 	],
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/huseynsnmz/pi-frame.git"
+		"url": "git+https://github.com/huseynsnmz/pi-suite.git",
+		"directory": "packages/frame"
 	},
 	"files": [
 		"src",
@@ -71,5 +70,6 @@
 		"extensions": [
 			"./src/index.ts"
 		]
-	}
+	},
+	"private": true
 }

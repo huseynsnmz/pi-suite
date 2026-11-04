@@ -22,7 +22,7 @@ const model = createServer((req, res) => {
   req.on("end", () => {
     const parsed = JSON.parse(body);
     const isAgent = (parsed.tools ?? []).length > 0;
-    requests.push({ isAgent, body, tools: (parsed.tools ?? []).map((t) => t.function?.name) });
+    requests.push({ isAgent, body, model: parsed.model, tools: (parsed.tools ?? []).map((t) => t.function?.name) });
     res.writeHead(200, { "content-type": "text/event-stream" });
     const send = (delta, finish = null) => res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", created: 0, model: "m", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
     const call = isAgent ? script.shift() : undefined;
@@ -70,16 +70,16 @@ const filtered = async (input, init) => {
 };
 Object.defineProperty(globalThis, "fetch", { configurable: true, get: () => filtered, set: (next) => { inner = next; } });`);
 
-function run(prompt, { settings = {}, env = {} } = {}) {
+function run(prompt, { settings = {}, env = {}, session = { defaultProvider: "mock", defaultModel: "m" }, packages = [] } = {}) {
   const agent = join(root, `a${Math.random()}`);
   mkdirSync(agent, { recursive: true });
-  writeFileSync(join(agent, "models.json"), JSON.stringify({ providers: { mock: { baseUrl: `http://127.0.0.1:${model.address().port}/v1`, apiKey: "unused", api: "openai-completions", models: [{ id: "m", name: "Mock", contextWindow: 200000, maxTokens: 4000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
-  writeFileSync(join(agent, "settings.json"), JSON.stringify({ defaultProvider: "mock", defaultModel: "m", defaultThinkingLevel: "off", packages: [REPO] }));
+  writeFileSync(join(agent, "models.json"), JSON.stringify({ providers: { mock: { baseUrl: `http://127.0.0.1:${model.address().port}/v1`, apiKey: "unused", api: "openai-completions", models: ["m", "reader"].map((id) => ({ id, name: id, contextWindow: 200000, maxTokens: 4000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })) } } }));
+  writeFileSync(join(agent, "settings.json"), JSON.stringify({ ...session, defaultThinkingLevel: "off", packages: [...packages, REPO] }));
   writeFileSync(join(agent, "web.json"), JSON.stringify({ dnsFilter: "off", ...settings }));
   requests.length = 0;
   return new Promise((resolve) => {
     {
-      const child = spawn(join(REPO, "node_modules/.bin/pi"), ["-p", prompt], {
+      const child = spawn(join(REPO, "../../node_modules/.bin/pi"), ["-p", prompt], {
         cwd: root,
         stdio: ["ignore", "pipe", "pipe"],
         env: { PATH: process.env.PATH, HOME: root, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", TERM: "dumb", NODE_OPTIONS: `--import ${preload}`, ...env },
@@ -219,6 +219,23 @@ try {
   script = [{ name: "web_fetch", args: { url: "https://docs.example.org/moved", question: "x" } }];
   await run("Read https://docs.example.org/moved");
   check("another host is reported, not followed", toolResult().includes("elsewhere.example.org") && readerRequests().length === 0);
+
+  // With a virtual model selected, the session's model can't be called directly.
+  const virtual = { session: { defaultProvider: "router", defaultModel: "auto" }, packages: [join(REPO, "test/e2e/fake-router.ts")] };
+  script = [{ name: "web_fetch", args: { url: "https://docs.example.org/page", question: "What does WAL do?" } }];
+  await run("Read https://docs.example.org/page", virtual);
+  check("a virtual session model can read pages", readerRequests().length === 1 && readerRequests()[0].model === "m" && toolResult().includes("WAL"), toolResult());
+  script = [{ name: "web_fetch", args: { url: "https://docs.example.org/page", question: "What does WAL do?" } }];
+  await run("Read https://docs.example.org/page", { ...virtual, env: { FAKE_ROUTER_READER: "mock/reader" } });
+  check("the router's reader model reads the page", readerRequests()[0]?.model === "reader", readerRequests()[0]?.model);
+  check("the agent stays on its own model", agentRequests().every((r) => r.model === "m"));
+  script = [{ name: "web_fetch", args: { url: "https://docs.example.org/page", question: "What does WAL do?" } }];
+  await run("Read https://docs.example.org/page", { ...virtual, env: { FAKE_ROUTER_READER: "mock/reader" }, settings: { readerModel: "mock/m" } });
+  check("your readerModel beats the router's", readerRequests()[0]?.model === "m", readerRequests()[0]?.model);
+
+  script = [{ name: "web_fetch", args: { url: "https://docs.example.org/page", question: "What does WAL do?" } }];
+  await run("Read https://docs.example.org/page", { packages: virtual.packages, env: { FAKE_ROUTER_READER: "mock/reader" } });
+  check("with the router installed but not selected, pages stay on the session's model", readerRequests()[0]?.model === "m", readerRequests()[0]?.model);
 
   // No reader means no page.
   script = [{ name: "web_fetch", args: { url: "https://docs.example.org/page", question: "x" } }];

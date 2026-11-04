@@ -1,0 +1,51 @@
+{
+  "name": "@huseynsnmz/pi-router",
+  "version": "0.1.0",
+  "description": "A virtual model for Pi: a strong model to plan, a cheap one to build, and one model each for the page reader, the judge and subagents.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "virtual-model",
+    "model-routing"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huseynsnmz/pi-suite.git",
+    "directory": "packages/router"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "test:e2e": "python3 test/e2e/run.py"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
+  },
+  "private": true
+}

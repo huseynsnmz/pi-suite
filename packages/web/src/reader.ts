@@ -1,6 +1,5 @@
 /** The separate model that reads web text. It has no tools, so the most a page can do to it is spoil its answer. */
 import { randomBytes } from "node:crypto";
-import { complete } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WebConfig } from "./config.ts";
 import { clean, dropInventedLinks, givesCommands } from "./sanitize.ts";
@@ -43,19 +42,28 @@ export function readerPrompt(question: string, text: string, nonce = randomBytes
   return `Question: ${question}\n\n<page-${nonce}>\n${text}\n</page-${nonce}>`;
 }
 
-export async function askReader(ctx: ExtensionContext, config: WebConfig, question: string, text: string, signal?: AbortSignal): Promise<string> {
-  const model = config.readerModel ? ctx.modelRegistry.find(config.readerModel.provider, config.readerModel.id) : ctx.model;
+/** Your readerModel first, then what pi-router chose for this, then the session's model. */
+function readerModel(ctx: ExtensionContext, config: WebConfig, routed: string | undefined) {
+  if (config.readerModel) return ctx.modelRegistry.find(config.readerModel.provider, config.readerModel.id);
+  if (routed === undefined) return ctx.model;
+  const at = routed.indexOf("/");
+  return ctx.modelRegistry.find(routed.slice(0, at), routed.slice(at + 1));
+}
+
+export async function askReader(ctx: ExtensionContext, config: WebConfig, question: string, text: string, signal?: AbortSignal, routed?: string): Promise<string> {
+  const model = readerModel(ctx, config, routed);
   if (!model) throw new Error("No model to read the page with, so it wasn't read. Set readerModel in web.json");
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok) throw new Error(`No key for the page reader ${model.provider}/${model.id}`);
-  const response = await complete(
+  // Through the registry, because the session's model can be a virtual one.
+  const response = await ctx.modelRegistry.streamSimple(
     model,
     {
       systemPrompt: SYSTEM,
       messages: [{ role: "user", content: [{ type: "text", text: readerPrompt(question, text) }], timestamp: Date.now() }],
     },
-    { apiKey: auth.apiKey, headers: auth.headers, signal, maxTokens: 2000, cacheRetention: "none" },
-  );
+    { signal, maxTokens: 2000, cacheRetention: "none" },
+  ).result();
   if (response.stopReason === "error" || response.stopReason === "aborted") {
     // Not the provider's message, as some repeat part of the request, and that's page text.
     throw new Error(`The page reader failed (${response.stopReason}), so the page wasn't read`);

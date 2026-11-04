@@ -2010,7 +2010,7 @@ function readAgentBoardVersion(): string {
 		return "dev";
 	}
 }
-// ANSI rendering of /Users/rutvik/Downloads/pi-logo-on-dark.svg.
+// ANSI rendering of the Pi logo.
 type HeaderCounts = { needs: number; working: number; completed: number; unread: number };
 
 /** Corners and edges as pi-frame draws them, with text set into the top and bottom edges. */

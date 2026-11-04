@@ -1,5 +1,7 @@
 # pi-frame
 
+Part of [pi-suite](../../README.md). Turn it off with `/suite off frame`.
+
 A redrawn screen for [Pi](https://pi.dev): a start card, an editor framed with the branch and the model, a box around every tool call, and a footer with what the session costs.
 
 It started as a fork of [`@adeildo/pi-look`](https://github.com/felipeadeildo/pi-harness/tree/main/packages/look) 6.0.0 by [adeildo](https://adeildo.dev), so the design and most of the code are theirs, under the MIT license. I keep this fork so I can shape it around how I work. If you want the original with the rest of pi-harness, use that instead.
@@ -17,7 +19,7 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.5.0
+   pi install npm:@huseynsnmz/pi-suite@0.1.0
    ```
 
 3. Restart Pi. The start card says `π-frame`.
@@ -33,8 +35,8 @@ On a Mac, `Alt` means the Option key, which needs Left Option set to `Esc+` in i
 - **Timings:** a line under each response shows when the call started, the wait for the first token, server latency, thinking time, total time, any stall and the speed. It updates as the response is written. Turn it off under **Timings** in the Frame tab. An edit shows the diff, with only the changed words highlighted.
 - **Todo list:** for work with several steps, the agent keeps a checklist in a frame above the editor, with what it's doing now highlighted. Finished items make way first when the list is long, and `Ctrl+O` shows all of it. A finished list leaves at your next prompt. The list stays with its branch of the session, and the agent gets it back after compaction.
 - **Above the editor:** a stopwatch, the number of model calls, and how the last call went. Messages you send while the agent works wait here in a dashed frame.
-- **Editor frame:** the branch, folder, model, effort and how full the context is. With [pi-modes](https://github.com/huseynsnmz/pi-modes), its color follows the mode: yellow for `auto`, the accent color for `plan`, green for `read-only`, red for `yolo`, using your theme's versions of those colors. In `normal` it stays Pi's own color.
-- **Footer:** first the `mode:` from [pi-modes](https://github.com/huseynsnmz/pi-modes), then a divider and what other extensions report, then cost, tokens, cache and speeds.
+- **Editor frame:** the branch, folder, model, effort and how full the context is. With [pi-modes](https://github.com/huseynsnmz/pi-suite/tree/main/packages/modes), its color follows the mode: yellow for `auto`, the accent color for `plan`, green for `read-only`, red for `yolo`, using your theme's versions of those colors. In `normal` it stays Pi's own color.
+- **Footer:** first the `mode:` from [pi-modes](https://github.com/huseynsnmz/pi-suite/tree/main/packages/modes), then a divider and what other extensions report, then cost, tokens, cache and speeds.
 
 Some pieces, such as rooms, boards, peers and the remote page, appear only with other pi-harness packages installed.
 
@@ -59,13 +61,15 @@ More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/
 
 **`pi-sandbox`:** the bottom line shows `sandbox: on` or `sandbox: off` after the mode. Its longer status moves to `/sandbox`.
 
+**`pi-router`:** the frame shows which model answered, such as `Auto → Haiku`.
+
 **`pi-board`:** use `@huseynsnmz/pi-board`. The frame comes back when its board closes.
 
 **`pi-cloak`:** no changes are needed. Tool boxes, `Alt+O` and the session file all show the masked text, and the automated run covers it.
 
 **`pi-permission-system`, `pi-permission-classifier`:** no conflicts were found, and the automated run covers them together with `pi-modes`.
 
-**`pi-claude-code-ui`:** it also draws tool calls, so list it above pi-frame in `packages`. `pi install` adds packages last, so this is the order you get if you install pi-frame second. Even then, it draws a call to a tool that doesn't exist outside pi-frame's box, so escape sequences in that call's arguments still reach the terminal. In the other order, or with `pi-claude-code-ui` alone, arguments of real tools leak too. To close this, remove `pi-claude-code-ui`.
+**`pi-claude-code-ui`:** it also draws tool calls, so list it above pi-suite in `packages`. `pi install` adds packages last, so this is the order you get if you install pi-frame second. Even then, it draws a call to a tool that doesn't exist outside pi-frame's box, so escape sequences in that call's arguments still reach the terminal. In the other order, or with `pi-claude-code-ui` alone, arguments of real tools leak too. To close this, remove `pi-claude-code-ui`.
 
 ## Security limits
 

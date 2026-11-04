@@ -21,7 +21,7 @@ export function loadsFirst(packages: unknown): boolean {
   if (!Array.isArray(packages)) return false;
   const first: unknown = packages[0];
   const source = typeof first === "object" && first !== null ? (first as { source?: unknown }).source : first;
-  return typeof source === "string" && /pi-modes(?:@[^/]*)?\/?$/.test(source);
+  return typeof source === "string" && /pi-suite(?:@[^/]*)?\/?$/.test(source);
 }
 
 type FooterSetter = { setFooter(factory: ((tui: never, theme: never, data: StatusReader) => { render(): string[]; invalidate(): void }) | undefined): void };

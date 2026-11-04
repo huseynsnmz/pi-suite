@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- With a virtual model such as `router/auto`, the frame names the model that answered, such as `Auto → Haiku`.
+
 ## 0.5.0
 
 ### Added

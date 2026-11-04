@@ -3,6 +3,8 @@ import { hostname } from "node:os";
 import type { AccountState, Board, PeerMark, RoomMark, WritingMark } from "@adeildo/pi-kit";
 import { VERSION, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
+import { plainText } from "../render/safe.ts";
+
 import type { GitState } from "./git.ts";
 import type { RequestView, RunView } from "./telemetry.ts";
 import {
@@ -122,7 +124,10 @@ interface Derived {
 	cacheWarming: boolean;
 	averages: Averages;
 	context: ContextInfo | undefined;
+	answeredBy: string | undefined;
 }
+
+const VIRTUAL_API = "pi-virtual";
 
 export class SnapshotReader {
 	#key: string | undefined;
@@ -147,7 +152,10 @@ export class SnapshotReader {
 				model === undefined
 					? undefined
 					: {
-							name: model.name ?? model.id,
+							name:
+								model.api === VIRTUAL_API && derived.answeredBy !== undefined
+									? `${model.name} \u2192 ${derived.answeredBy}`
+									: (model.name ?? model.id),
 							provider: ctx.modelRegistry.getProviderDisplayName(model.provider),
 							reasoning: model.reasoning,
 						},
@@ -186,9 +194,22 @@ export class SnapshotReader {
 			cacheWarming: cacheWarming(entries),
 			averages: averagesOf(entries),
 			context: contextOf(ctx),
+			answeredBy: answeredBy(ctx, entries),
 		};
 		return this.#derived;
 	}
+}
+
+/** A virtual model only says what was selected. The latest answer says which model it chose. */
+function answeredBy(ctx: ExtensionContext, entries: readonly SessionEntry[]): string | undefined {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry?.type !== "message" || entry.message.role !== "assistant") continue;
+		if (entry.message.stopReason === "error" || entry.message.stopReason === "aborted") continue;
+		const { provider, model } = entry.message;
+		return plainText(ctx.modelRegistry.find(provider, model)?.name ?? model).replace(/\s+/g, " ");
+	}
+	return undefined;
 }
 
 function contextOf(ctx: ExtensionContext): ContextInfo | undefined {

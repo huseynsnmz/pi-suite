@@ -10,10 +10,12 @@ Everything lives in a throwaway home directory, so no real credentials are used.
 import fcntl, json, os, pty, re, select, shutil, signal, stat, struct, subprocess, sys, tempfile, termios, time
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[4]
 PI = REPO / "node_modules/.bin/pi"
 PACKAGE = sys.argv[1] if len(sys.argv) > 1 else str(REPO)
 EXTRA = [p for p in os.environ.get("PI_FRAME_E2E_WITH", "").split(",") if p]
+# Which parts of the suite are on. Everything loads from its one entry.
+PARTS = ["frame", *[p for p in os.environ.get("PI_FRAME_E2E_PARTS", "").split(",") if p]]
 AFTER = [p for p in os.environ.get("PI_FRAME_E2E_AFTER", "").split(",") if p]
 PORT = 20000 + os.getpid() % 2000
 ESC = "\x1b"
@@ -82,6 +84,7 @@ git("config", "core.fsmonitor", str(monitor))
 }}}))
 settings = {"defaultProvider": "mock", "defaultModel": "m", "defaultThinkingLevel": "off", "npmCommand": ["npm", "--ignore-scripts"], "packages": [], "compaction": {"keepRecentTokens": 1}}
 (agent / "settings.json").write_text(json.dumps(settings))
+(agent / "suite.json").write_text(json.dumps({"off": [part for part in ("modes", "router", "web", "memory", "frame", "board") if part not in PARTS]}))
 for source in [*EXTRA, PACKAGE, *AFTER]:
     if source.startswith("npm:"):
         subprocess.run([str(PI), "install", source], env=env, check=True, capture_output=True, cwd=project, timeout=240)
@@ -170,7 +173,7 @@ def slash(text):
 
 checks = []
 SHIFT_TAB = b"\x1b[Z"
-MODES_LOADED = any("pi-modes" in source for source in EXTRA)
+MODES_LOADED = "modes" in PARTS
 
 
 def frame_color():

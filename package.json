@@ -1,0 +1,115 @@
+{
+  "name": "@huseynsnmz/pi-suite",
+  "version": "0.1.0",
+  "description": "One Pi package for all of it: modes and permissions, a framed screen, an agent board, memory, web tools with a separate page reader, and a model router. Turn off what you don't want with /suite.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Hüseyin Sönmez",
+    "email": "huseyin@snmz.org",
+    "url": "https://github.com/huseynsnmz"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huseynsnmz/pi-suite.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "packages/board/src",
+    "packages/board/runner",
+    "packages/board/docs",
+    "packages/board/package.json",
+    "packages/board/README.md",
+    "packages/board/LICENSE",
+    "packages/frame/src",
+    "packages/frame/docs",
+    "packages/frame/package.json",
+    "packages/frame/README.md",
+    "packages/frame/LICENSE",
+    "packages/memory/src",
+    "packages/memory/skills",
+    "packages/memory/package.json",
+    "packages/memory/README.md",
+    "packages/memory/LICENSE",
+    "packages/modes/src",
+    "packages/modes/skills",
+    "packages/modes/package.json",
+    "packages/modes/README.md",
+    "packages/modes/LICENSE",
+    "packages/router/src",
+    "packages/router/package.json",
+    "packages/router/README.md",
+    "packages/router/LICENSE",
+    "packages/web/src",
+    "packages/web/package.json",
+    "packages/web/README.md",
+    "packages/web/LICENSE",
+    "SECURITY.md",
+    "packages/board/SECURITY.md",
+    "packages/board/CONTRIBUTING.md",
+    "packages/board/CHANGELOG.md",
+    "packages/frame/SECURITY.md",
+    "packages/frame/CONTRIBUTING.md",
+    "packages/frame/CHANGELOG.md",
+    "packages/memory/SECURITY.md",
+    "packages/memory/CONTRIBUTING.md",
+    "packages/modes/SECURITY.md",
+    "packages/modes/CONTRIBUTING.md",
+    "packages/modes/CHANGELOG.md",
+    "packages/router/CHANGELOG.md",
+    "packages/web/SECURITY.md",
+    "packages/web/CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "tsc --noEmit && npm run --workspaces --if-present check && npm run -w packages/board typecheck",
+    "test": "node --test test/*.test.ts && npm run --workspaces --if-present test",
+    "test:e2e": "python3 test/e2e/run.py"
+  },
+  "dependencies": {
+    "@xterm/headless": "6.0.0",
+    "node-pty": "1.1.0",
+    "@adeildo/pi-kit": "6.0.0",
+    "diff": "9.0.0",
+    "@mozilla/readability": "0.6.0",
+    "linkedom": "0.18.12",
+    "turndown": "7.2.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=1.5.0",
+    "@earendil-works/pi-coding-agent": ">=1.5.0",
+    "@earendil-works/pi-tui": ">=1.5.0",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "@types/bun": "1.4.4",
+    "@types/node": "26.6.6",
+    "@types/turndown": "5.0.6",
+    "c8": "12.0.0",
+    "typebox": "1.4.3",
+    "typescript": "7.0.2"
+  }
+}

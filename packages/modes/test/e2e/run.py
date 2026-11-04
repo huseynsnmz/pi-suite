@@ -19,7 +19,7 @@ from pathlib import Path
 
 ORDER = sys.argv[1]
 SOLO = ORDER == "solo"
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[4]
 PI = REPO / "node_modules/.bin/pi"
 THIRD_PARTY = [] if SOLO else [
     "npm:pi-permission-classifier@0.6.0",
@@ -63,9 +63,10 @@ for source in THIRD_PARTY:
 current = json.loads((agent / "settings.json").read_text())
 installed = current.get("packages", [])
 current["packages"] = installed + [str(REPO)] if ORDER in ("solo", "modes-last") else [str(REPO)] + installed
-WITH_FRAME = os.environ.get("PI_MODES_E2E_FRAME", "")
-if WITH_FRAME:
-    current["packages"].append(WITH_FRAME)
+# Only the parts under test, and they all load from the suite's one entry.
+WITH_FRAME = bool(os.environ.get("PI_MODES_E2E_FRAME"))
+parts = ["modes", "frame"] if WITH_FRAME else ["modes"]
+(agent / "suite.json").write_text(json.dumps({"off": [part for part in ("router", "web", "memory", "frame", "board") if part not in parts]}))
 (agent / "settings.json").write_text(json.dumps(current))
 print("load order:", [str(p).split("/")[-1] for p in current["packages"]], flush=True)
 env["PI_OFFLINE"] = "1"
@@ -313,17 +314,17 @@ try:
             term.send("\x1b")
             term.until(lambda: "FINISHED" in term.text[mark:], "result", 25)
         check("sandbox: a refused write stays out", not outside.exists())
-        collected = subprocess.run(["node", str(REPO / "test/e2e/review-cli.mjs"), "collect"], env=env, capture_output=True, text=True, timeout=30)
+        collected = subprocess.run(["node", str(Path(__file__).parent / "review-cli.mjs"), "collect"], env=env, capture_output=True, text=True, timeout=30)
         sandbox = json.loads(collected.stdout)["sandbox"]
         found = {(c["kind"], c["value"]) for c in sandbox["candidates"]}
         for kind, value in (("read", str(elsewhere)), ("write", str(outside)), ("domain", "blocked.example.test")):
             check(f"skill: sees the blocked {kind}", any(k == kind and (value in v or v in value) for k, v in found), str(sandbox))
         check("skill: counts what the OS stopped", sandbox["osBlocks"] >= 1 and "Operation not permitted" in sandbox["osExamples"][0], str(sandbox))
         folder = str(project / "sibling")
-        applied = subprocess.run(["node", str(REPO / "test/e2e/review-cli.mjs"), "apply", "--sandbox-read", folder, "--sandbox-domain", "pkg.example.test"], env=env, capture_output=True, text=True, timeout=30)
+        applied = subprocess.run(["node", str(Path(__file__).parent / "review-cli.mjs"), "apply", "--sandbox-read", folder, "--sandbox-domain", "pkg.example.test"], env=env, capture_output=True, text=True, timeout=30)
         written = json.loads((agent / "sandbox.json").read_text())
         check("skill: allows choices in sandbox.json and keeps the defaults", applied.returncode == 0 and folder in written["filesystem"]["allowRead"] and "." in written["filesystem"]["allowRead"] and "github.com" in written["network"]["allowedDomains"], applied.stderr)
-        refused = subprocess.run(["node", str(REPO / "test/e2e/review-cli.mjs"), "apply", "--sandbox-read", "~/.ssh"], env=env, capture_output=True, text=True, timeout=30)
+        refused = subprocess.run(["node", str(Path(__file__).parent / "review-cli.mjs"), "apply", "--sandbox-read", "~/.ssh"], env=env, capture_output=True, text=True, timeout=30)
         check("skill: refuses credentials", refused.returncode == 1 and "credentials" in refused.stderr)
         full_text = term.text
         raise SandboxRunDone
@@ -511,7 +512,7 @@ try:
 
     if not SOLO:
         collected = json.loads(subprocess.run(
-            ["node", str(REPO / "test/e2e/review-cli.mjs"), "collect"],
+            ["node", str(Path(__file__).parent / "review-cli.mjs"), "collect"],
             env=env, capture_output=True, text=True, check=True, timeout=20,
         ).stdout)
         examples = [e for c in collected["candidates"] for e in c.get("examples", [])]
@@ -521,7 +522,7 @@ try:
         check("skill: ignores what the judge's yolo link allowed", not any("denied.txt" in e for e in examples))
         config = agent / "extensions/pi-permission-system/config.json"
         applied = subprocess.run(
-            ["node", str(REPO / "test/e2e/review-cli.mjs"), "apply", "--bash", "touch normal.txt*"],
+            ["node", str(Path(__file__).parent / "review-cli.mjs"), "apply", "--bash", "touch normal.txt*"],
             env=env, capture_output=True, text=True, timeout=20,
         )
         rules = json.loads(config.read_text())["permission"]["bash"]

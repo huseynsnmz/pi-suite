@@ -1,5 +1,7 @@
 # pi-memory
 
+Part of [pi-suite](../../README.md). Turn it off with `/suite off memory`.
+
 Long-term memory for [Pi](https://pi.dev). It reviews your past conversations, keeps what will still matter in a SQLite file, and gives it to later sessions.
 
 ## Install
@@ -7,7 +9,7 @@ Long-term memory for [Pi](https://pi.dev). It reviews your past conversations, k
 Requires Pi 1.5 or newer, on Node 22.18 or newer.
 
 ```bash
-pi install /path/to/pi-memory
+pi install npm:@huseynsnmz/pi-suite@0.1.0
 ```
 
 ## Use

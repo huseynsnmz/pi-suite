@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.0]
+
+### Features
+
+- Tells [pi-router](https://github.com/huseynsnmz/pi-router) the current mode, so `plan` mode uses its plan model.
+
 ## [0.6.0]
 
 ### Features

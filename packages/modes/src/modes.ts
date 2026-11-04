@@ -1,3 +1,5 @@
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { classifyBash } from "./bash.ts";
 
 export const MODES = ["normal", "auto", "plan", "read-only", "yolo"] as const;
@@ -12,15 +14,23 @@ export const ASK_TOOL = "ask_questions";
 // pi-web's tools only read, and a separate model reads the page for them.
 const READ_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search", "todo", ASK_TOOL]);
 
-/** Allowed for what these packages do. Another package's tool with the name could write anything. */
-const EXPECTED_PACKAGE: Readonly<Record<string, RegExp>> = {
-  todo: /[\\/]pi-frame[^\\/]*[\\/]/,
-  [ASK_TOOL]: /[\\/]pi-modes[^\\/]*[\\/]/,
-};
+/** Allowed for what pi-suite's own do. Another package's tool with the name could do anything. */
+const SUITE_TOOLS: ReadonlySet<string> = new Set(["todo", "web_fetch", "web_search", ASK_TOOL]);
+const SUITE_ENTRY = fileURLToPath(new URL("../../../src/index.ts", import.meta.url));
 
-export function fromExpectedPackage(toolName: string, path: string | undefined): boolean {
-  const expected = EXPECTED_PACKAGE[toolName];
-  return expected === undefined || (path !== undefined && expected.test(path));
+function realPath(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The whole suite loads from one file, so that file is what these tools must come from. */
+export function fromExpectedPackage(toolName: string, path: string | undefined, entry = SUITE_ENTRY): boolean {
+  if (!SUITE_TOOLS.has(toolName)) return true;
+  const expected = realPath(entry);
+  return path !== undefined && expected !== undefined && realPath(path) === expected;
 }
 
 export function isMode(value: unknown): value is Mode {
@@ -89,7 +99,7 @@ export function displayCommand(command: string): string {
 export function loadsAfterPermissionSystem(packages: unknown): boolean {
   if (!Array.isArray(packages)) return false;
   const names = packages.map((entry) => String((entry as { source?: unknown } | null)?.source ?? entry));
-  const self = names.findIndex((name) => name.includes("pi-modes"));
+  const self = names.findIndex((name) => name.includes("pi-suite"));
   const gate = names.findIndex((name) => name.includes("pi-permission-system"));
   return self !== -1 && gate !== -1 && self > gate;
 }
