@@ -5,6 +5,12 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.15.3] - 2026-11-04
+
+### Fixes
+
+- **state**: Pi no longer crashes on `/new`, `/resume`, `/fork` or `/reload` (from 0.15.0)
+
 ## [0.15.2] - 2026-11-04
 
 ### Changes

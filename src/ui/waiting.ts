@@ -11,11 +11,16 @@ export function watchWaiting(ctx: ExtensionContext, changed: (waiting: boolean) 
 	const focus = watchFocus(ctx, "agent-board-waiting");
 	let waiting = false;
 	const timer = setInterval(() => {
-		const now = focus.known() && !ctx.isIdle() && focus.promptText() === undefined;
-		if (now === waiting) return;
-		waiting = now;
-		// If the run has ended too, its own end has already said so, and this would undo that.
-		if (now || !ctx.isIdle()) changed(now);
+		try {
+			const now = focus.known() && !ctx.isIdle() && focus.promptText() === undefined;
+			if (now === waiting) return;
+			waiting = now;
+			// If the run has ended too, its own end has already said so, and this would undo that.
+			if (now || !ctx.isIdle()) changed(now);
+		} catch {
+			// The session was replaced before this could be stopped. An error here would end Pi.
+			clearInterval(timer);
+		}
 	}, CHECK_MS);
 	timer.unref?.();
 	return () => {

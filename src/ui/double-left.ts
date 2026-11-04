@@ -20,7 +20,11 @@ export function watchDoubleLeft(ctx: ExtensionContext): () => void {
 		return { data: "\r" };
 	});
 	return () => {
-		stop();
+		try {
+			stop();
+		} catch {
+			/* see focus.stop */
+		}
 		focus.stop();
 	};
 }

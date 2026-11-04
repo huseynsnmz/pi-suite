@@ -21,6 +21,12 @@ export function watchFocus(ctx: ExtensionContext, widget: string): Focus {
 	return {
 		promptText: () => (focused?.() as Editorish | null | undefined)?.getExpandedText?.(),
 		known: () => focused !== null,
-		stop: () => ctx.ui.setWidget(widget, undefined),
+		stop: () => {
+			try {
+				ctx.ui.setWidget(widget, undefined);
+			} catch {
+				/* the session it belonged to has already gone, and its widget with it */
+			}
+		},
 	};
 }

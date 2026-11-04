@@ -198,6 +198,14 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 		hostedFrameWitness = { stop: () => cleanup("session-shutdown") };
 	}
 
+	// After this the context they hold is stale, and using one takes Pi down.
+	pi.on("session_shutdown", () => {
+		stopDoubleLeft?.();
+		stopDoubleLeft = null;
+		stopWaiting?.();
+		stopWaiting = null;
+	});
+
 	pi.on("session_start", async (event, ctx) => {
 		if (!isHostedChild && ctx.mode === "tui") {
 			stopDoubleLeft?.();
