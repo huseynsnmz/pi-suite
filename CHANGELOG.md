@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Changes
+
+- **web_fetch**: the agent can follow any link on a page it has read, and write its own page addresses on sites you named or a search returned. It used to be refused anything you hadn't written or the tools hadn't returned, which stopped research. A new site asks you once, as does an address with a query string or encoded-looking text. `trustedDomains` skips the question for sites you choose, and `strictUrls` asks about every URL it wasn't given
+- **site filter**: links in search results and answers are checked as well, so the agent isn't pointed at a blocked site
+
 ## [0.1.1] - 2026-11-04
 
 ### Features

@@ -14,11 +14,15 @@ export type WebConfig = {
   readerModel: { provider: string; id: string } | null;
   allowDomains: string[];
   denyDomains: string[];
+  /** Sites the agent can write its own addresses on without asking. */
+  trustedDomains: string[];
   dnsFilter: DnsFilter;
   /** Words a search must never hold, such as client or project names. */
   privateWords: string[];
   /** Ask before the first fetch from each site. */
   askNewDomains: boolean;
+  /** Ask about every URL nobody gave the agent, not only the suspicious ones. */
+  strictUrls: boolean;
   /** Answers the reader scores lower than this, out of 10, are withheld. */
   minConfidence: number;
 };
@@ -72,9 +76,11 @@ export function parseConfig(raw: Record<string, unknown>): WebConfig {
     readerModel: provider && id.length ? { provider, id: id.join("/") } : null,
     allowDomains: strings(raw, "allowDomains"),
     denyDomains: strings(raw, "denyDomains"),
+    trustedDomains: strings(raw, "trustedDomains"),
     dnsFilter: (raw.dnsFilter as DnsFilter | undefined) ?? "cloudflare-family",
     privateWords: strings(raw, "privateWords"),
     askNewDomains: flag(raw, "askNewDomains"),
+    strictUrls: flag(raw, "strictUrls"),
     minConfidence,
   };
 }

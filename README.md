@@ -43,6 +43,8 @@ SearXNG only answers in JSON if you list it under `search.formats` in its `setti
 | `dnsFilter` | `cloudflare-family` blocks malware and adult sites, and is the default. `cloudflare-security` blocks malware only. `off` turns it off |
 | `privateWords` | Words a search can never hold, such as client or project names |
 | `minConfidence` | Answers the reader scores below this, out of 10, are withheld. Defaults to 4 |
+| `trustedDomains` | Sites the agent can write its own addresses on without asking, such as docs you use a lot, and their subdomains. Other sites still work, with a prompt |
+| `strictUrls` | Set to `true` to be asked about every URL the agent wasn't given |
 | `askNewDomains` | Set to `true` to be asked before the first fetch from each site |
 
 `/web` shows what's in use, and `/web reader` lets you pick the page reader from your models. It saves to `web.json` and applies straight away. If `web.json` can't be read or has a wrong value, the web tools stay off and Pi says why.
@@ -52,10 +54,11 @@ SearXNG only answers in JSON if you list it under `search.formats` in its `setti
 **Before anything leaves:**
 
 - A query or URL that looks like it holds a secret is refused, as is a query holding a long encoded string.
-- The agent can only fetch URLs that you wrote, or that `web_search` and `web_fetch` returned, matched exactly. So it can't write one with data in it. A link it found by reading a file has to come from you.
+- The agent can fetch URLs you wrote, and links from `web_search` and `web_fetch` pages. It can also write its own page addresses on sites you named, sites a search returned, and sites in `trustedDomains`.
+- Any URL can carry data to whoever runs that site, so you get asked once before it writes an address on a new site, and about any address with a query string or encoded-looking text, or after 25 addresses of its own on one site. With nobody to ask, it's refused. `strictUrls` asks about every URL it wasn't given.
 - Local and private addresses are refused, checked again at connection time, so a public name can't point at your network.
 - A redirect to another host is reported, not followed. Fetching it goes through the same checks.
-- Each site's name is checked with Cloudflare's filtering DNS before it's fetched. If the filter can't answer, the page isn't fetched. With the filter on, bare IP addresses are refused, as they have no name to check.
+- Each site's name is checked with Cloudflare's filtering DNS before it's fetched, and links in search results and answers are checked before the agent sees them. If the filter can't answer, the page isn't fetched. With the filter on, bare IP addresses are refused, as they have no name to check.
 
 **Before the reader sees a page:** scripts, images, forms, invisible characters, and elements hidden in the page or its own stylesheets are removed.
 
@@ -71,7 +74,7 @@ SearXNG only answers in JSON if you list it under `search.formats` in its `setti
 - It can't stop a page lying. A page can still fool the reader into a false answer, so treat answers as claims from a stranger.
 - It can't catch every attack. The wording checks are patterns, and text hidden by a stylesheet in another file isn't noticed. A page about prompt injection may also get its answer withheld.
 - The site filter only knows the sites on Cloudflare's lists. It says nothing about a new or unlisted site, and every site name you fetch goes to Cloudflare.
-- It can't stop every way of carrying data out in a search. The query checks catch secrets, paths and encoded text, but a few plain words can still say something.
+- It can't stop every way of carrying data out. The checks catch secrets, paths and encoded text, but a few plain words in a search or a page address can still say something, on a site you've named or approved. A site you approve is trusted for the rest of the session.
 - It can't tell a private word in a query from an ordinary one unless it's in `privateWords`, so the agent could still search for a project's name.
 - The sandbox's domain list doesn't cover it, as it runs inside Pi. Use `allowDomains` and `denyDomains`.
 - It doesn't run JavaScript or read PDFs, and sites that block bots return an error.

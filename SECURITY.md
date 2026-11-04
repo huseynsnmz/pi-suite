@@ -5,7 +5,7 @@ Please report a vulnerability through [GitHub's private reporting](https://githu
 These count as vulnerabilities:
 
 - Web text reaching the agent without passing through the page reader
-- The agent getting a URL it wrote past the fetch check
+- The agent getting a URL it wrote past the fetch check with a query string or encoded data in it
 - Reaching a local or private address
 - Getting a blocked site past the site filter, or the site filter failing open
 - A company receiving searches while `companySearch` is off

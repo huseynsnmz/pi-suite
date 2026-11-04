@@ -40,7 +40,6 @@ export function checkQuestion(question: string): string {
   return out;
 }
 
-const matches = (host: string, domain: string) => host === domain || host.endsWith(`.${domain}`);
 
 export function checkUrl(raw: string, rules: { allowDomains: string[]; denyDomains: string[] }): URL {
   const text = raw.trim();
@@ -68,8 +67,8 @@ export function checkUrl(raw: string, rules: { allowDomains: string[]; denyDomai
   } else if (!host.includes(".") || INTERNAL_SUFFIXES.some((suffix) => host.endsWith(suffix))) {
     throw new Error("Local and internal hostnames can't be fetched");
   }
-  if (rules.denyDomains.some((domain) => matches(host, domain))) throw new Error(`${host} is on the deny list`);
-  if (rules.allowDomains.length && !rules.allowDomains.some((domain) => matches(host, domain))) {
+  if (rules.denyDomains.some((domain) => onSite(host, domain))) throw new Error(`${host} is on the deny list`);
+  if (rules.allowDomains.length && !rules.allowDomains.some((domain) => onSite(host, domain))) {
     throw new Error(`${host} isn't on the allow list`);
   }
   return url;
@@ -124,3 +123,64 @@ export function wasOffered(url: URL, entries: readonly Entry[]): boolean {
   const wanted = normal(url.href);
   return wanted !== null && offeredUrls(entries).has(wanted);
 }
+
+const MAX_UNGIVEN_PATH = 200;
+const MAX_UNGIVEN_HOST = 80;
+const MAX_UNGIVEN_SEGMENTS = 12;
+const MAX_HOST_LABEL = 30;
+const LONG_TOKEN = 24;
+const LONG_NUMBER = 16;
+const MAX_ENCODED_LOOKING_CHARS = 24;
+const NON_ASCII = /[^\u0000-\u007f]/;
+
+/**
+ * Why a URL nobody gave the agent looks like it holds data, or null if it reads like an ordinary page.
+ * This can't be airtight, as data can be made to look like anything. What really limits a leak is that a new site needs a person: see approveUrl.
+ */
+export function urlConcern(url: URL, privateWords: string[] = []): string | null {
+  if (url.search) return "has a query string, which could carry data";
+  let path: string;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    return "has broken encoding";
+  }
+  if (NON_ASCII.test(path) || url.hostname.includes("xn--")) return "holds characters that can pack in a lot of data";
+  // The name counts too: just looking up <data>.evil.com sends the data to whoever runs evil.com.
+  if (path.length > MAX_UNGIVEN_PATH || url.hostname.length > MAX_UNGIVEN_HOST) return "is unusually long";
+  if (path.split("/").length > MAX_UNGIVEN_SEGMENTS) return "has an unusual number of parts";
+  if (url.hostname.split(".").some((label) => label.length > MAX_HOST_LABEL)) return "has an unusually long hostname";
+  const tokens = `${url.hostname}/${path}`.split(/[/\-_.~+=,:;@\s]+/).filter(Boolean);
+  if (tokens.some((token) => token.length >= LONG_TOKEN || (/^\d+$/.test(token) && token.length >= LONG_NUMBER))) return "holds a long encoded-looking string";
+  const encodedLooking = tokens.filter((token) => /\d/.test(token) && /[a-zA-Z]/.test(token) && token.length >= 6).join("").length;
+  if (encodedLooking > MAX_ENCODED_LOOKING_CHARS) return "holds encoded-looking text";
+  const lowerPath = path.toLowerCase();
+  if (new RegExp(LOCAL_PATH.source, "i").test(path) || EMAIL.test(path)) return "holds a local path or email address";
+  const lower = `${url.hostname}${lowerPath}`;
+  if (privateWords.some((word) => word && lower.includes(word))) return "holds a word set as private in web.json";
+  return null;
+}
+
+/**
+ * The sites the agent can write its own addresses on: those you named, and those a search returned.
+ * Not sites linked from a page, or a poisoned page could vouch for wherever it wants data sent.
+ */
+export function givenSites(entries: readonly Entry[]): Set<string> {
+  const sites = new Set<string>();
+  for (const entry of entries) {
+    const message = entry.message;
+    if (entry.type !== "message" || !message) continue;
+    if (message.role === "user") {
+      for (const match of userText(message.content).matchAll(MENTIONED)) {
+        const url = normal(match[0].replace(/[.,;:!?]+$/, ""));
+        if (url) sites.add(new URL(url).hostname);
+      }
+    } else if (message.role === "toolResult" && !message.isError && message.toolName === "web_search") {
+      const given = (message.details as { sites?: unknown } | undefined)?.sites;
+      if (Array.isArray(given)) for (const site of given) if (typeof site === "string") sites.add(site);
+    }
+  }
+  return sites;
+}
+
+export const onSite = (host: string, site: string): boolean => host === site || host.endsWith(`.${site}`);

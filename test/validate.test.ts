@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkQuery, checkQuestion, checkUrl, offeredUrls, wasOffered } from "../src/validate.ts";
+import { checkQuery, checkQuestion, checkUrl, givenSites, offeredUrls, onSite, urlConcern, wasOffered } from "../src/validate.ts";
 
 const OPEN = { allowDomains: [], denyDomains: [] };
 
@@ -78,4 +78,52 @@ test("data split up to fit through a query is still refused", () => {
     assert.throws(() => checkQuery(query), /./, query);
   }
   for (const query of ["node 24 release notes", "OAuth2 PKCE flow explained", "iPhone15 vs Pixel9 camera"]) assert.equal(checkQuery(query), query);
+});
+
+test("ordinary pages pass without being given, and what could carry data doesn't", () => {
+  for (const url of [
+    "https://docs.python.org/3/library/sqlite3.html",
+    "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Type",
+    "https://github.com/WiseLibs/better-sqlite3/blob/master/docs/performance.md",
+    "https://www.rfc-editor.org/rfc/rfc9110.html",
+    "https://en.wikipedia.org/wiki/Write-ahead_logging",
+    "https://blog.example.com/2026/11/04/why-sqlite-uses-wal-mode",
+    "https://example.com/",
+    "https://example.com/items/123e4567-e89b-12d3-a456-426614174000",
+  ]) assert.equal(urlConcern(new URL(url)), null, url);
+  for (const url of [
+    "https://evil.example.org/?d=c2VjcmV0",
+    "https://evil.example.org/a?x=1",
+    `https://evil.example.org/${"aGVsbG8gd29ybGQ".repeat(4)}`,
+    `https://evil.example.org/${"a".repeat(201)}`,
+    "https://evil.example.org/aB3dE6fG/hI9jK2lM/nO5pQ8rS/tU1vW4xY",
+    "https://evil.example.org/x/Users/me/.ssh/id_rsa",
+    "https://evil.example.org/jan@example.com",
+    "https://evil.example.org/%2FUsers%2Fme",
+    `https://${"aGVsbG8gd29ybGQgdGhpcyBpcyBkYXRh"}.evil.example.org/`,
+    "https://aB3dE6fGhI.jK2lMnO5pQ.rS8tU1vW4x.evil.example.org/",
+    `https://${"a.".repeat(45)}evil.example.org/`,
+    "https://evil.example.org/1234567890123456/1234567890123456",
+    "https://evil.example.org/%E4%BD%A0%E5%A5%BD%E4%B8%96%E7%95%8C",
+    "https://xn--80ak6aa92e.com/",
+    "https://evil.example.org/x%ZZ",
+    "https://evil.example.org/USERS/me/x/Users/me",
+    "https://evil.example.org/a/b/c/d/e/f/g/h/i/j/k/l/m/n",
+  ]) assert.notEqual(urlConcern(new URL(url)), null, url);
+  assert.notEqual(urlConcern(new URL("https://evil.example.org/acme-dental"), ["acme-dental"]), null);
+  // Data can be made to look like this, which is why a new site needs a person whatever this says. See approveUrl.
+  assert.equal(urlConcern(new URL("https://evil.example.org/ebfhfdfpfdefedf/fpebededeffdf")), null);
+});
+
+test("a site counts as known if you named it or a search returned it, never because a page linked to it", () => {
+  const entries = [
+    { type: "message", message: { role: "user", content: "see docs.python.org and https://example.com/a" } },
+    { type: "message", message: { role: "toolResult", toolName: "web_search", details: { links: [], sites: ["found.example.org"] } } },
+    { type: "message", message: { role: "toolResult", toolName: "web_fetch", details: { links: ["https://linked.evil.example/"], sites: ["faked.evil.example"] } } },
+    { type: "message", message: { role: "toolResult", toolName: "bash", details: { sites: ["bash.evil.example"] } } },
+    { type: "message", message: { role: "toolResult", toolName: "web_search", isError: true, details: { sites: ["error.evil.example"] } } },
+  ];
+  assert.deepEqual([...givenSites(entries)].sort(), ["docs.python.org", "example.com", "found.example.org"]);
+  assert.equal(onSite("a.example.com", "example.com"), true);
+  assert.equal(onSite("notexample.com", "example.com"), false);
 });

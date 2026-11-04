@@ -27,6 +27,8 @@ test("the reader's confidence goes to the agent, and a low score holds the answe
   assert.throws(() => checkAnswer("Confidence: 9", "x"), /no answer/);
   assert.throws(() => parseConfig({ minConfidence: 11 }), /minConfidence/);
   assert.equal(parseConfig({}).minConfidence, 4);
+  assert.equal(parseConfig({}).strictUrls, false);
+  assert.throws(() => parseConfig({ strictUrls: "yes" }), /strictUrls/);
 });
 
 test("an honest answer about AI isn't withheld for naming a system prompt", () => {
