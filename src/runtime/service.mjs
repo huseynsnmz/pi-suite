@@ -1377,7 +1377,8 @@ export function createService(opts) {
 		const pty = ptySupport();
 		if (!pty.ok) return { ok: false, error: "PTY unavailable", fallbackReason: nodePtyFallbackMessage(pty) };
 		if (isAgentBusy(row)) return { ok: false, error: "A non-live background run is active for this session" };
-		if (!existsSync(row.meta.sessionFile)) return { ok: false, error: "Session file isn't ready yet" };
+		// A missing file is a session that was put on the board before its first message. Pi starts
+		// it at that path, as it would have.
 
 		const lock = tryAcquireLockImpl(root, viewId, "host-start", { identity: serviceIdentity() });
 		if (!lock.acquired) {

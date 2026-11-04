@@ -1,4 +1,4 @@
-/** Left arrow twice on an empty prompt opens the board. */
+/** Left arrow twice on an empty prompt puts this session on the board and opens it. */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, Key, matchesKey } from "@earendil-works/pi-tui";
 import { createDoublePress } from "../core/double-press.mjs";
@@ -26,7 +26,7 @@ export function watchDoubleLeft(ctx: ExtensionContext): () => void {
 		}
 		if (!presses.press()) return undefined;
 		// A command runs with more than a key handler is given, so this goes the way a typed one does.
-		ctx.ui.setEditorText("/agent-board");
+		ctx.ui.setEditorText("/bg");
 		return { data: "\r" };
 	});
 	return () => {

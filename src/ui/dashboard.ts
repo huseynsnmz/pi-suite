@@ -117,6 +117,7 @@ export interface DashboardDeps {
 	service: Service;
 	root: string;
 	defaultCwd: string;
+	currentSessionFile?: string | null;
 	availableModels: LaunchModel[];
 	currentModel: LaunchModel | null;
 	currentThinkingLevel: ThinkingLevel;
@@ -134,6 +135,7 @@ export class DashboardComponent implements Component {
 	private filterQuery = "";
 	private pending: PendingConfirm | null = null;
 	private deleteArm: { id: string; at: number } | null = null;
+	private exitArmedAt: number | null = null;
 	private helpReturnMode: ReturnableMode = "list";
 	private ptyHelpReturnMode: ReturnableMode = "list";
 	private peekId: string | null = null;
@@ -164,6 +166,7 @@ export class DashboardComponent implements Component {
 		private readonly done: (result: DashboardResult) => void,
 		private readonly deps: DashboardDeps,
 	) {
+		stageTheme = theme;
 		this.editor = new CustomEditor(tui, editorTheme(theme), keybindings as never, { paddingX: 0 });
 		this.editor.onChange = (text) => {
 			this.input = this.editor.getExpandedText();
@@ -246,7 +249,7 @@ export class DashboardComponent implements Component {
 	private exitSelectionMode(clear = true): void {
 		if (clear) this.selectedIds.clear();
 		this.mode = "list";
-		this.notifyInputState("NORMAL mode", "muted");
+		
 	}
 
 	private toggleSelectedCurrent(): void {
@@ -283,6 +286,8 @@ export class DashboardComponent implements Component {
 		if (!id || id === this.prewarmedId) return;
 		const row = this.selectedRow();
 		if (!row) return;
+		// This session is open behind the board, and a second Pi must not write to its file.
+		if (this.deps.currentSessionFile && row.meta.sessionFile === this.deps.currentSessionFile) return;
 		// hostActive claims (starting/alive/stopping) already have a launch — mark
 		// them prewarmed without another service call; a pending claim is not a
 		// failure to retry on every debounce tick (issue #70 A14).
@@ -320,8 +325,7 @@ export class DashboardComponent implements Component {
 				this.handleSelectKey(data);
 				break;
 			case "dispatch":
-				if (matchesKey(data, Key.ctrl("n"))) return this.openLaunchDialog();
-				this.handleTextMode(data, () => this.startNow(), () => this.leaveDispatchMode());
+				this.handleDispatchKey(data);
 				break;
 			case "filter":
 				this.handleTextMode(data, () => this.toListMode(), () => this.clearFilter(), { live: true });
@@ -359,41 +363,98 @@ export class DashboardComponent implements Component {
 
 	private handleListKey(data: string): void {
 		if (!matchesKey(data, Key.ctrl("x"))) this.deleteArm = null;
-		if (matchesKey(data, Key.up) || data === "k") return void this.moveSelection(-1);
-		if (matchesKey(data, Key.down) || data === "j") return void this.moveSelection(1);
-		if (matchesKey(data, Key.right) || data === ">" || data === "l") return this.attachSelected();
-		if (data === "v") return this.openSessionView();
-		if (data === "e") return this.openEvidenceView();
-		if (matchesKey(data, Key.enter)) {
-			if (this.input.trim()) return this.startNow();
-			return this.attachSelected();
-		}
+		if (!matchesKey(data, Key.ctrl("c"))) this.exitArmedAt = null;
+		if (this.handleRowKey(data)) return;
+		if (matchesKey(data, Key.right) || matchesKey(data, Key.left) || matchesKey(data, Key.enter)) return this.attachSelected();
 		if (matchesKey(data, Key.space)) return this.openPeek();
-		if (data === "m") return this.startSelectionMode();
-		if (data === "/") return this.startFilter();
+		if (data === "/" || matchesKey(data, Key.ctrl("f"))) return this.startFilter();
 		if (data === "?") return this.openHelp("list");
 		if (data === "!") return this.openPtyHelp("list");
-		if (data === "i") return this.startDispatch();
-		if (matchesKey(data, Key.ctrl("n"))) return this.startDispatch("hello");
 		if (matchesKey(data, Key.ctrl("r"))) return this.startRename();
 		if (matchesKey(data, Key.ctrl("t"))) return this.togglePin();
-		if (matchesKey(data, Key.ctrl("s"))) return this.stopSelected();
-		if (data === "d") return this.confirmDone();
-		if (data === "x") return this.confirmDelete();
-		if (data === "h") return this.toggleHold();
 		if (matchesKey(data, Key.ctrl("x"))) return this.handleDeleteKey();
-		if (data === "X") return this.confirmDeleteState();
-		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
-			if (this.input.length > 0) {
-				this.setInput("");
-				return;
-			}
-			return this.done({ action: "exit" });
+		if (matchesKey(data, Key.ctrl("a"))) return this.startSelectionMode();
+		if (matchesKey(data, Key.ctrl("o"))) return this.openSessionView();
+		if (matchesKey(data, Key.ctrl("e"))) return this.openEvidenceView();
+		if (matchesKey(data, Key.ctrl("d"))) return this.confirmDone();
+		if (matchesKey(data, Key.ctrl("b"))) return this.toggleHold();
+		if (matchesKey(data, Key.ctrl("k"))) return this.confirmDeleteState();
+		for (let n = 1; n <= 9; n++) {
+			if (matchesKey(data, Key.alt(String(n) as never))) return this.attachRow(n - 1);
 		}
-		if (isPrintable(data) || isBracketedPaste(data)) {
-			this.notifyInputState("Press i to enter INSERT mode, then type or paste", "accent");
+		if (matchesKey(data, Key.escape)) return this.done({ action: "exit" });
+		if (matchesKey(data, Key.ctrl("c"))) {
+			const now = Date.now();
+			if (this.exitArmedAt !== null && now - this.exitArmedAt <= DELETE_DOUBLE_PRESS_MS) return this.done({ action: "exit" });
+			this.exitArmedAt = now;
+			this.notifyInputState("Press ctrl+c again to exit", "accent");
 			return;
 		}
+		if (isPrintable(data) || isBracketedPaste(data)) {
+			this.mode = "dispatch";
+			this.handleEditorInput(data);
+		}
+	}
+
+	/** The keys that move between rows, in the list and while typing a task. Says if it was one. */
+	private handleRowKey(data: string): boolean {
+		const rows = this.orderedIds.length;
+		const page = Math.max(1, (this.tui.terminal?.rows ?? 24) - 8);
+		const at = this.selectedId ? Math.max(0, this.orderedIds.indexOf(this.selectedId)) : 0;
+		if (matchesKey(data, Key.up)) this.moveSelection(-1);
+		else if (matchesKey(data, Key.down)) this.moveSelection(1);
+		else if (matchesKey(data, Key.pageUp)) this.selectIndex(Math.max(0, at - page));
+		else if (matchesKey(data, Key.pageDown)) this.selectIndex(Math.min(rows - 1, at + page));
+		else if (matchesKey(data, Key.home)) this.selectIndex(0);
+		else if (matchesKey(data, Key.end)) this.selectIndex(rows - 1);
+		else if (matchesKey(data, Key.alt("up"))) this.jumpGroup(-1);
+		else if (matchesKey(data, Key.alt("down"))) this.jumpGroup(1);
+		else return false;
+		return true;
+	}
+
+	private selectIndex(index: number): void {
+		const id = this.orderedIds[index];
+		if (!id || id === this.selectedId) return;
+		this.selectedId = id;
+		this.prewarmScheduler.schedule();
+	}
+
+	/** To the first row of the next state's group, or of this one's when going back. */
+	private jumpGroup(direction: 1 | -1): void {
+		const stateAt = (index: number) => this.deps.service.row(this.orderedIds[index])?.state?.semanticState;
+		let index = this.selectedId ? this.orderedIds.indexOf(this.selectedId) : 0;
+		const start = stateAt(index);
+		if (direction === 1) {
+			while (index < this.orderedIds.length && stateAt(index) === start) index++;
+			if (index < this.orderedIds.length) this.selectIndex(index);
+			return;
+		}
+		if (index > 0 && stateAt(index - 1) !== start) index--;
+		const group = stateAt(index);
+		while (index > 0 && stateAt(index - 1) === group) index--;
+		this.selectIndex(index);
+	}
+
+	private attachRow(index: number): void {
+		if (!this.orderedIds[index]) return;
+		this.selectIndex(index);
+		this.attachSelected();
+	}
+
+	private handleDispatchKey(data: string): void {
+		if (matchesKey(data, Key.ctrl("n"))) return this.openLaunchDialog();
+		if (matchesKey(data, Key.ctrl("enter"))) return this.startNow(true);
+		if (matchesKey(data, Key.enter)) return this.startNow();
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+			this.setInput("");
+			this.mode = "list";
+			return;
+		}
+		// With several lines these move the cursor.
+		if (!this.input.includes("\n") && this.handleRowKey(data)) return;
+		this.handleEditorInput(data);
+		if (!this.input) this.mode = "list";
 	}
 
 	private handleSelectKey(data: string): void {
@@ -424,23 +485,20 @@ export class DashboardComponent implements Component {
 	}
 
 	private handlePeekKey(data: string): void {
-		if (matchesKey(data, Key.escape)) return void (this.mode = "list");
-		if (matchesKey(data, Key.right) || data === ">" || data === "l") return this.attachPeek();
-		if (data === "v") return this.openSessionView();
-		if (matchesKey(data, Key.up) || data === "k") {
-			this.peekStep(-1);
-			return;
-		}
-		if (matchesKey(data, Key.down) || data === "j") {
-			this.peekStep(1);
-			return;
-		}
-		if (matchesKey(data, Key.enter) || data === "r") return this.startReply();
-		if (data === "e") return this.openEvidenceView();
-		if (data === "d") return this.confirmDone();
-		if (data === "h") return this.toggleHold();
-		if (data === "a") return this.attachPeek();
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.space)) return void (this.mode = "list");
+		if (matchesKey(data, Key.right) || matchesKey(data, Key.left)) return this.attachPeek();
+		if (matchesKey(data, Key.up)) return void this.peekStep(-1);
+		if (matchesKey(data, Key.down)) return void this.peekStep(1);
+		if (matchesKey(data, Key.enter)) return this.startReply();
+		if (matchesKey(data, Key.ctrl("o"))) return this.openSessionView();
+		if (matchesKey(data, Key.ctrl("e"))) return this.openEvidenceView();
+		if (matchesKey(data, Key.ctrl("d"))) return this.confirmDone();
+		if (matchesKey(data, Key.ctrl("b"))) return this.toggleHold();
 		if (data === "!") return this.openPtyHelp("peek");
+		if (isPrintable(data) || isBracketedPaste(data)) {
+			this.startReply();
+			this.handleEditorInput(data);
+		}
 	}
 
 	private handleSessionKey(data: string): void {
@@ -675,10 +733,10 @@ export class DashboardComponent implements Component {
 	}
 
 	/** In this folder, with this session's model. Ctrl+N is there for anything else. */
-	private startNow(): void {
+	private startNow(attach = false): void {
 		const cwd = this.deps.defaultCwd;
 		const { model, thinking } = this.buildLaunchState(cwd, this.deps.currentModel, this.deps.currentThinkingLevel);
-		this.submitDispatch({ cwd, model: model ? canonicalModelRef(model) : null, thinkingLevel: thinking });
+		this.submitDispatch({ cwd, model: model ? canonicalModelRef(model) : null, thinkingLevel: thinking, attach });
 	}
 
 	private openLaunchDialog(): void {
@@ -816,17 +874,6 @@ export class DashboardComponent implements Component {
 		this.input = this.editor.getExpandedText();
 	}
 
-	private startDispatch(initialText = ""): void {
-		this.mode = "dispatch";
-		this.notifyInputState("INSERT mode — dashboard shortcuts paused; / is literal", "success");
-		if (initialText) this.handleEditorInput(initialText);
-	}
-
-	private leaveDispatchMode(): void {
-		this.mode = "list";
-		this.notifyInputState(this.input.trim() ? "NORMAL mode — draft kept; Enter dispatches" : "NORMAL mode — dashboard shortcuts active", "muted");
-	}
-
 	private setInput(text: string): void {
 		this.input = text;
 		this.editor.setText(text);
@@ -866,7 +913,7 @@ export class DashboardComponent implements Component {
 		this.filterQuery = "";
 		this.refresh();
 		this.mode = "list";
-		this.notifyInputState("Filter cleared — NORMAL mode", "muted");
+		this.notifyInputState("Filter cleared", "muted");
 	}
 
 	private submitDispatch(launchOpts?: { cwd?: string; model?: string | null; thinkingLevel?: ThinkingLevel | null; attach?: boolean }): void {
@@ -1060,28 +1107,12 @@ export class DashboardComponent implements Component {
 			return;
 		}
 		this.deleteArm = { id: row.meta.id, at: now };
+		if (row.alive || row.hostAlive) {
+			const res = this.deps.service.stop(row.meta.id);
+			this.notifyInputState(res.ok ? `Stopping "${row.meta.name}". Press ctrl+x again to delete it` : (res.error ?? "Stop failed"), "warning");
+			return;
+		}
 		this.notifyInputState(`Press ctrl+x again quickly to delete "${row.meta.name}"${isAgentBusy(row) ? " (stops the active run)" : ""}`, "warning");
-	}
-
-	private confirmDelete(): void {
-		const row = this.selectedRow();
-		if (!row) return;
-		// Confirmation-style delete (issue #150): `x` then `y`, mirroring the
-		// `d`-then-`y` flow. The legacy ctrl+x double-press stays as the
-		// no-confirm shortcut.
-		this.pending = {
-			prompt: `Delete "${row.meta.name}"?${isAgentBusy(row) ? " Stops the active run." : ""} Session file is preserved. (y/N)`,
-			onYes: () => {
-				// archive is async (routes through the view-state coordinator, issue #91);
-				// the notice + refresh land when the command settles.
-				void Promise.resolve(this.deps.service.archive(row.meta.id)).then((res) => {
-					if (!res.ok) this.notice(res.error ?? "Delete failed", "error");
-					else this.notice(`Deleted "${row.meta.name}"`, "info");
-					this.refresh();
-				});
-			},
-		};
-		this.mode = "confirm";
 	}
 
 	private confirmDeleteState(): void {
@@ -1134,8 +1165,7 @@ export class DashboardComponent implements Component {
 		this.peekId = this.peekId ?? this.selectedId;
 		this.setInput("");
 		this.mode = "reply";
-		this.notifyInputState("REPLY INSERT mode — arrows edit; Esc returns to peek", "success");
-	}
+			}
 
 	private openSessionView(): void {
 		if (!this.selectedId) return;
@@ -1308,84 +1338,54 @@ export class DashboardComponent implements Component {
 		return renderAgentboardHeader(width, this.theme, counts, ptyHealth, this.filterQuery);
 	}
 
+	/** Framed as pi-frame frames its editor: what it is on the top edge, the keys on the bottom. */
 	private renderFooter(width: number): string[] {
 		const t = this.theme;
-		const modeColor = this.modeColor();
-		const lines = [t.fg(modeColor, "─".repeat(width))];
-		if (this.mode === "list" || this.mode === "dispatch" || this.mode === "select") {
-			lines.push(...this.taskInputLines(width));
-			lines.push("");
-			lines.push(clip(this.listHints(), width));
-		} else if (this.mode === "filter") {
-			lines.push(...this.renderEditorInputLines(width, {
-				prompt: `${this.modeBadge("FILTER", "warning")} ${t.fg("warning", "› ")}`,
-				continuation: t.fg("warning", "│ "),
-				editing: true,
-				placeholder: "",
-			}));
-			lines.push("");
-			lines.push(clip(this.hintLine("FILTER", "warning", ["enter apply", "esc clear"]), width));
-		} else if (this.mode === "rename") {
-			lines.push(...this.renderEditorInputLines(width, {
-				prompt: `${this.modeBadge("RENAME", "accent")} ${t.fg("accent", "› ")}`,
-				continuation: t.fg("accent", "│ "),
-				editing: true,
-				placeholder: "",
-			}));
-			lines.push("");
-			lines.push(clip(this.hintLine("RENAME", "accent", ["enter save", "esc cancel"]), width));
-		} else if (this.mode === "confirm" && this.pending) {
-			lines.push(...renderFlashBanner({ text: this.pending.prompt, level: "warn" }, width));
-		} else {
-			lines.push(clip(this.listHints(), width));
+		const color = this.modeColor();
+		const inner = Math.max(1, width - 4);
+		if (this.mode === "confirm" && this.pending) {
+			return renderFrame(t, "warning", width, { title: t.fg("warning", "confirm"), hints: "" }, [t.fg("warning", this.pending.prompt)]);
 		}
+		let title = t.fg("muted", "new session");
+		let hints = this.listHints();
+		let body: string[];
+		if (this.mode === "filter" || this.mode === "rename") {
+			title = t.fg(color as never, t.bold(this.mode));
+			hints = this.mode === "filter" ? ["enter apply", "esc clear"] : ["enter save", "esc cancel"];
+			body = this.renderEditorInputLines(inner, { prompt: t.fg(color as never, "› "), continuation: "", editing: true, placeholder: "" });
+		} else if (this.mode === "list" || this.mode === "dispatch" || this.mode === "select") {
+			if (this.mode === "select") title = t.fg(color as never, t.bold("select"));
+			body = this.taskInputLines(inner);
+		} else {
+			body = [];
+		}
+		const lines = renderFrame(t, color, width, { title, hints: t.fg("dim", hints.join("   ")) }, body);
 		const notice = this.currentInputNotice();
-		if (notice) lines.push(clip(t.fg(notice.color, `ⓘ ${notice.text}`), width));
-		lines.push(t.fg(modeColor, "─".repeat(width)));
+		if (notice) lines.push(clip(` ${t.fg(notice.color, notice.text)}`, width));
 		return lines;
 	}
 
-	private listHints(): string {
+	private listHints(): string[] {
 		const selected = this.selectedRow();
 		const live = selected ? selected.hostAlive && isAgentBusy(selected) : false;
 		const unread = this.unreadCount();
-		if (this.mode === "dispatch") {
-			return this.hintLine("INSERT", "success", ["esc normal", "enter launch", "shift+enter newline", "←/→ edit", "ctrl/alt+←/→ word"]);
-		}
+		const dots = unread > 0 ? [`•${unread} unread`] : [];
+		if (this.mode === "dispatch") return ["enter start", "ctrl+enter start & attach", "ctrl+n options", "esc clear"];
 		if (this.mode === "select") {
-			return this.hintLine("SELECT", "accent", [
-				`${this.selectionCount()} selected`,
-				...(unread > 0 ? [`•${unread} unread`] : []),
-				"↑↓/j/k move",
-				"space toggle",
-				"a all visible",
-				"u clear",
-				"d done",
-				"ctrl+x delete",
-				"m/esc cancel",
-				"? help",
-				"! pty",
-			]);
+			return [`${this.selectionCount()} selected`, ...dots, "space toggle", "a all", "u clear", "d done", "ctrl+x delete", "esc cancel"];
 		}
-		const primary = this.input.trim() ? "enter launch" : live ? "enter attach live" : "enter resume";
-		const hints = ["i insert", primary, "→/l attach", "m multi-select", ...(unread > 0 ? [`•${unread} unread`] : []), "d done", "h hold", "space peek", "v transcript", "e evidence", "ctrl+n new session", "ctrl+r rename", "x delete (y/N)", "ctrl+x x2 quick", "X delete state", "/ filter", "! pty", "? help"];
-		if (this.input.trim()) hints.splice(1, 0, "esc clear");
-		return this.hintLine("NORMAL", "muted", hints);
+		return [selected ? (live ? "enter attach live" : "enter resume") : "type to start", "space peek", "/ filter", "ctrl+x stop", "? keys", ...dots];
 	}
 
 	private hintLine(label: string, color: InputNoticeColor, hints: string[]): string {
-		return `${this.modeBadge(label, color)} ${this.theme.fg("dim", hints.join(" · "))}`;
+		return `${this.theme.fg(color, this.theme.bold(label))} ${this.theme.fg("dim", hints.join("   "))}`;
 	}
 
-	private modeBadge(label: string, color: InputNoticeColor): string {
-		return this.theme.fg(color, this.theme.bold(`[${label}]`));
-	}
-
-	private modeColor(): InputNoticeColor {
+	private modeColor(): string {
 		switch (this.mode) {
 			case "dispatch":
 			case "reply":
-				return "success";
+				return "accent";
 			case "filter":
 			case "confirm":
 				return "warning";
@@ -1393,17 +1393,17 @@ export class DashboardComponent implements Component {
 			case "select":
 				return "accent";
 			default:
-				return "dim";
+				return "borderMuted";
 		}
 	}
 
 	private taskInputLines(width: number): string[] {
 		const editing = this.mode === "dispatch";
 		return this.renderEditorInputLines(width, {
-			prompt: editing ? this.theme.fg("success", "┃ ") : this.theme.fg("muted", "› "),
-			continuation: editing ? this.theme.fg("success", "┃ ") : this.theme.fg("dim", "│ "),
+			prompt: this.theme.fg(editing ? "accent" : "muted", "› "),
+			continuation: "",
 			editing,
-			placeholder: editing ? "" : "press i to write a prompt for a new session",
+			placeholder: editing ? "" : "type a task to start a session",
 		});
 	}
 
@@ -1418,7 +1418,8 @@ export class DashboardComponent implements Component {
 			const contentWidth = Math.max(1, width - visibleWidth(opts.prompt));
 			return [clip(`${opts.prompt}${clip(this.theme.fg("muted", opts.placeholder ?? ""), contentWidth)}`, width)];
 		}
-		const rendered = this.editor.render(width);
+		// Its first and last lines are its own rules, and the frame already draws those.
+		const rendered = this.editor.render(width).slice(1, -1);
 		return opts.editing ? rendered : rendered.map((line) => stripInactiveEditorCursor(line));
 	}
 
@@ -1540,17 +1541,17 @@ export class DashboardComponent implements Component {
 		if (this.mode === "reply") {
 			out.push(
 				...this.renderEditorInputLines(width, {
-					prompt: `${this.modeBadge("REPLY", "success")} ${t.fg("success", "› ")}`,
+					prompt: t.fg("accent", "› "),
 					continuation: t.fg("success", "reply┃ "),
 					editing: true,
 					placeholder: "",
 				}),
 			);
-			out.push(clip(this.hintLine("REPLY INSERT", "success", ["enter send", "shift+enter newline", "esc back"]), width));
+			out.push(clip(this.hintLine("reply", "accent", ["enter send", "shift+enter newline", "esc back"]), width));
 			const notice = this.currentInputNotice();
 			if (notice) out.push(clip(t.fg(notice.color, `ⓘ ${notice.text}`), width));
 		} else {
-			out.push(clip(t.fg("dim", "↑↓/j/k prev/next · →/l attach · d done · v transcript · e evidence · r reply · esc back"), width));
+			out.push(clip(t.fg("dim", "type to reply   ↑↓ prev/next   ←/→ attach   ctrl+d done   ctrl+o transcript   ctrl+e evidence   esc back"), width));
 		}
 		return out;
 	}
@@ -1684,8 +1685,8 @@ export class DashboardComponent implements Component {
 	private renderLaunchButton(width: number, selected: boolean): string {
 		const label = ` ${this.launch?.action === "attach" ? "Start & attach" : "Start session"} `;
 		const button = selected
-			? `${ansiBg(56, 189, 248)}${ansiFg(15, 23, 42, this.theme.bold(label))}\x1b[49m\x1b[39m`
-			: `${ansiBg(30, 41, 59)}${ansiFg(226, 232, 240, label)}\x1b[49m\x1b[39m`;
+			? this.theme.bg("selectedBg", this.theme.fg("accent", this.theme.bold(label)))
+			: this.theme.fg("muted", label);
 		const pad = Math.max(0, width - visibleWidth(label));
 		return `${" ".repeat(pad)}${button}`;
 	}
@@ -1708,35 +1709,38 @@ export class DashboardComponent implements Component {
 	private renderHelp(width: number): string[] {
 		const t = this.theme;
 		const rows: Array<[string, string]> = [
-			["normal", "Dashboard owns keys; i enters insert mode"],
-			["insert", "Editor owns text keys; / is literal, arrows move cursor"],
-			["i", "Enter insert/compose mode; then / is literal for slash commands"],
-			["m", "Enter multi-select mode from the board list"],
-			["enter", "Normal/insert with draft: open start-session dialog; empty: attach/resume"],
-			["shift+enter", "Insert a newline while in insert/reply"],
-			["esc", "Insert → normal; Normal with draft clears; empty quits standalone dashboard"],
-			["↑/↓ or j/k", "Normal: move selection; Insert: move cursor"],
-			["ctrl/alt+←/→", "Jump by word in insert mode"],
-			["→ / > / l", "Attach to the selected real Pi session"],
-			["d", "Confirm and mark selected inactive session done"],
-			["h", "Hold / unhold the selected inactive session (on-hold state)"],
-			["space", "Peek when input is empty; in multi-select: toggle current row"],
-			["e", "Open evidence / diagnostics panel for selected session"],
-			["/", "Filter in normal mode; use i then / for slash commands"],
-			["?", "Open the key help overlay (list and multi-select)"],
-			["!", "Open node-pty diagnostics and fix steps"],
-			["ctrl+n", "While typing a task: choose its folder, model and thinking first"],
-			["ctrl+r/t/s", "Rename · pin · stop selected"],
-			["x", "Delete selected session (y/N confirm)"],
-			["ctrl+x x2", "Delete selected session (quick double-press, no confirm)"],
-			["X", "Delete all inactive sessions in selected state"],
-			["v", "Open read-only transcript view"],
-			["In select", "↑↓/j/k move · space toggle · a all · u clear · d done · ctrl+x delete · m/esc cancel"],
-			["In peek", "→/l attach · v transcript · e evidence · r reply · ↑↓/j/k adjacent"],
-			["In session", "← back · ↑↓/j/k scroll · e evidence · enter attach · r reply"],
-			["In evidence", "← back · ↑↓/j/k scroll · →/l attach · r reply · v transcript · x clear diag"],
+			["type", "Start writing a task, with no key first"],
+			["enter", "With a task: start it. Empty: attach to the selected session"],
+			["ctrl+enter", "Start the task and attach to it"],
+			["shift+enter", "New line (ctrl+j too)"],
+			["ctrl+n", "While typing: choose the folder, model and thinking first"],
+			["← / →", "Attach to the selected session"],
+			["↑ / ↓", "Move between rows"],
+			["pgup / pgdn", "Move by a screenful"],
+			["home / end", "First or last row"],
+			["alt+↑ / alt+↓", "Previous or next group"],
+			["alt+1..9", "Attach to that row"],
+			["space", "Open or close the peek panel"],
+			["/ or ctrl+f", "Filter the list"],
+			["ctrl+t", "Pin or unpin"],
+			["ctrl+r", "Rename"],
+			["ctrl+x", "Stop the session; press again within 2s to delete it"],
+			["ctrl+d", "Mark done"],
+			["ctrl+b", "Hold or unhold"],
+			["ctrl+a", "Select several rows"],
+			["ctrl+o", "Read-only transcript"],
+			["ctrl+e", "Evidence and diagnostics"],
+			["ctrl+k", "Delete every inactive session in this state"],
+			["esc", "Close, clear the input, or leave the board"],
+			["ctrl+c", "Clear the input; press twice to leave"],
+			["!", "node-pty diagnostics"],
+			["?", "This help"],
+			["In select", "↑↓ move · space toggle · a all · u clear · d done · ctrl+x delete · esc cancel"],
+			["In peek", "type to reply · ←/→ attach · ↑↓ adjacent · ctrl+o transcript · ctrl+e evidence"],
+			["In session", "← back · ↑↓ scroll · e evidence · enter attach · r reply"],
+			["In evidence", "← back · ↑↓ scroll · → attach · r reply · v transcript · x clear diag"],
 		];
-		const dialog = [t.fg("accent", t.bold("Hotkeys / keybindings")), ""];
+		const dialog = [t.fg("accent", t.bold("Keys")), ""];
 		for (const [k, v] of rows) dialog.push(`  ${t.fg("accent", k.padEnd(14))} ${t.fg("muted", v)}`);
 		dialog.push("");
 		dialog.push(t.fg("dim", `  press any key to return to ${this.helpReturnMode}`));
@@ -1858,9 +1862,9 @@ function renderCenteredBox(lines: string[], width: number, height: number, theme
 	const boxWidth = Math.min(width, innerWidth + 4);
 	const left = Math.max(0, Math.floor((width - boxWidth) / 2));
 	const box = [
-		`${theme.fg("borderMuted", "┌")}${theme.fg("borderMuted", "─".repeat(Math.max(0, boxWidth - 2)))}${theme.fg("borderMuted", "┐")}`,
+		`${theme.fg("borderMuted", "╭")}${theme.fg("borderMuted", "─".repeat(Math.max(0, boxWidth - 2)))}${theme.fg("borderMuted", "╮")}`,
 		...lines.map((line) => `${theme.fg("borderMuted", "│")} ${padTo(clip(line, boxWidth - 4), boxWidth - 4)} ${theme.fg("borderMuted", "│")}`),
-		`${theme.fg("borderMuted", "└")}${theme.fg("borderMuted", "─".repeat(Math.max(0, boxWidth - 2)))}${theme.fg("borderMuted", "┘")}`,
+		`${theme.fg("borderMuted", "╰")}${theme.fg("borderMuted", "─".repeat(Math.max(0, boxWidth - 2)))}${theme.fg("borderMuted", "╯")}`,
 	];
 	const top = Math.max(0, Math.floor((height - box.length) / 2) - 1);
 	const out: string[] = [];
@@ -1869,7 +1873,7 @@ function renderCenteredBox(lines: string[], width: number, height: number, theme
 	return out;
 }
 
-const DELETE_DOUBLE_PRESS_MS = 500;
+const DELETE_DOUBLE_PRESS_MS = 2_000;
 
 const AGENTBOARD_VERSION = readAgentBoardVersion();
 function readAgentBoardVersion(): string {
@@ -1882,19 +1886,31 @@ function readAgentBoardVersion(): string {
 	}
 }
 // ANSI rendering of /Users/rutvik/Downloads/pi-logo-on-dark.svg.
-// The SVG is a 4x4 grid mark: P-shaped left form plus a separate lower-right stem.
-const PI_ICON = [
-	" ▐▛███▜▌",
-	"▝▜█████▛▘",
-] as const;
-const PI_ICON_WIDTH = Math.max(...PI_ICON.map((line) => visibleWidth(line)));
-const HEADER_LEFT_PADDING = 2;
-const HEADER_TEXT_GAP = 4;
-const HEADER_TOP_PADDING = 0;
-const HEADER_BOTTOM_PADDING = 1;
-const AGENTBOARD_HEADER_MIN_WIDTH = HEADER_LEFT_PADDING + PI_ICON_WIDTH + HEADER_TEXT_GAP + 24;
-
 type HeaderCounts = { needs: number; working: number; completed: number; unread: number };
+
+/** Corners and edges as pi-frame draws them, with text set into the top and bottom edges. */
+function renderFrame(
+	theme: ThemeLike,
+	color: string,
+	width: number,
+	edges: { title?: string; right?: string; hints?: string },
+	body: string[],
+): string[] {
+	const paint = (text: string) => theme.fg(color as never, text);
+	const edge = (left: string, right: string, text: string, side: string) => {
+		const set = text ? ` ${text} ` : "";
+		const end = side ? ` ${side} ${paint("─")}` : "";
+		const room = width - 3 - visibleWidth(end);
+		const shown = visibleWidth(set) > room ? clip(set, Math.max(0, room)) : set;
+		return `${paint(`${left}─`)}${shown}${paint("─".repeat(Math.max(0, room - visibleWidth(shown))))}${end}${paint(right)}`;
+	};
+	const inner = Math.max(1, width - 4);
+	return [
+		edge("╭", "╮", edges.title ?? "", edges.right ?? ""),
+		...body.map((line) => `${paint("│")} ${padTo(clip(line, inner), inner)} ${paint("│")}`),
+		edge("╰", "╯", edges.hints ?? "", ""),
+	];
+}
 
 function renderAgentboardHeader(
 	width: number,
@@ -1903,39 +1919,15 @@ function renderAgentboardHeader(
 	ptyHealth: PtyHealth,
 	filterQuery: string,
 ): string[] {
-	if (width < AGENTBOARD_HEADER_MIN_WIDTH) {
-		const raw = [
-			...blankLines(HEADER_TOP_PADDING),
-			clip(`${" ".repeat(HEADER_LEFT_PADDING)}${theme.fg("accent", "◉")} ${theme.fg("accent", theme.bold("AgentBoard"))} ${theme.fg("muted", AGENTBOARD_VERSION)} ${theme.fg("dim", "·")} ${renderPtyHealth(theme, ptyHealth)}`, width),
-			clip(headerStageSummary(theme, counts, filterQuery, true), width),
-			...blankLines(HEADER_BOTTOM_PADDING),
-		];
-		return raw.map((line) => headerBgLine(line, width));
-	}
-
-	const textRows = headerTextRows(theme, counts, ptyHealth, filterQuery);
-	const textStart = Math.max(0, Math.round((PI_ICON.length - textRows.length) / 2));
-	const raw = blankLines(HEADER_TOP_PADDING);
-	raw.push(
-		...PI_ICON.map((iconLine, i) =>
-			clip(`${" ".repeat(HEADER_LEFT_PADDING)}${renderPiIconLine(theme, iconLine)}${" ".repeat(HEADER_TEXT_GAP)}${textRows[i - textStart] ?? ""}`, width),
-		),
+	const title = `${theme.fg("accent", theme.bold("π-board"))} ${theme.fg("muted", AGENTBOARD_VERSION.replace(/^v/, ""))}`;
+	const narrow = width < 60;
+	return renderFrame(
+		theme,
+		"borderMuted",
+		width,
+		{ title, right: narrow ? "" : renderPtyHealth(theme, ptyHealth) },
+		[headerStageSummary(theme, counts, filterQuery, narrow)],
 	);
-	raw.push(...blankLines(HEADER_BOTTOM_PADDING));
-	return raw.map((line) => headerBgLine(line, width));
-}
-
-function headerTextRows(
-	theme: ThemeLike,
-	counts: HeaderCounts,
-	ptyHealth: PtyHealth,
-	filterQuery: string,
-): string[] {
-	const title = `${theme.fg("accent", theme.bold("AgentBoard"))} ${theme.fg("muted", AGENTBOARD_VERSION)} ${theme.fg("dim", "·")} ${renderPtyHealth(theme, ptyHealth)}`;
-	return [
-		title,
-		headerStageSummary(theme, counts, filterQuery, false),
-	];
 }
 
 function headerStageSummary(theme: ThemeLike, counts: HeaderCounts, filterQuery: string, compact: boolean): string {
@@ -1986,20 +1978,24 @@ function compactPtyReason(reason: string): string {
 	return truncate(first.length >= 12 ? first : cleaned, 44);
 }
 
-const STAGE_RGB = {
-	queued: [148, 163, 184],
-	working: [56, 189, 248],
-	needs_input: [245, 158, 11],
-	idle: [129, 140, 248],
-	holding: [251, 191, 36],
-	completed: [34, 197, 94],
-	failed: [248, 113, 113],
-	stopped: [100, 116, 139],
-} as const satisfies Record<keyof typeof GROUP_LABELS, readonly [number, number, number]>;
+/** From the Pi theme, as pi-frame's colors are. */
+const STAGE_TOKENS: Record<keyof typeof GROUP_LABELS, string> = {
+	queued: "muted",
+	working: "accent",
+	needs_input: "warning",
+	idle: "syntaxType",
+	holding: "syntaxNumber",
+	completed: "success",
+	failed: "error",
+	stopped: "dim",
+};
+
+/** Set by the component: stageFg is called from places that aren't handed a theme. */
+let stageTheme: ThemeLike | null = null;
+
 
 function stageFg(state: keyof typeof GROUP_LABELS, text: string): string {
-	const [r, g, b] = STAGE_RGB[state];
-	return ansiFg(r, g, b, text);
+	return stageTheme ? stageTheme.fg(STAGE_TOKENS[state] as never, text) : text;
 }
 
 /**
@@ -2013,28 +2009,6 @@ export function applyRowHighlight(
 	text: string,
 ): string {
 	return selected ? theme.bg("selectedBg", text) : text;
-}
-
-function renderPiIconLine(theme: ThemeLike, line: string): string {
-	return theme.fg("accent", line);
-}
-
-function ansiFg(r: number, g: number, b: number, text: string): string {
-	return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
-}
-
-function ansiBg(r: number, g: number, b: number): string {
-	return `\x1b[48;2;${r};${g};${b}m`;
-}
-
-function headerBgLine(content: string, width: number): string {
-	const clipped = clip(content, width);
-	const rest = Math.max(0, width - visibleWidth(clipped));
-	return `${clipped}${" ".repeat(rest)}`;
-}
-
-function blankLines(count: number): string[] {
-	return Array.from({ length: count }, () => "");
 }
 
 function isPrintable(data: string): boolean {
@@ -2115,27 +2089,8 @@ function editorTheme(theme: ThemeLike): EditorTheme {
 }
 
 function renderFlashBanner(flash: { text: string; level: FlashLevel }, width: number, opts: { bottomGap?: boolean } = {}): string[] {
-	const style = flashStyle(flash.level);
-	const contentWidth = Math.max(1, width - 1);
-	const content = clip(` ${style.icon} ${flash.text} `, contentWidth);
-	const line = clip(`${ansiFg(...style.accent, "▌")}${ansiBg(...style.bg)}${ansiFg(...style.fg, content)}\x1b[49m`, width);
+	const [icon, token] = flash.level === "warn" ? ["!", "warning"] : flash.level === "error" ? ["×", "error"] : ["i", "accent"];
+	const text = ` ${icon} ${flash.text}`;
+	const line = clip(stageTheme ? stageTheme.fg(token as never, text) : text, width);
 	return opts.bottomGap ? [line, ""] : [line];
-}
-
-type FlashStyle = {
-	icon: string;
-	accent: readonly [number, number, number];
-	bg: readonly [number, number, number];
-	fg: readonly [number, number, number];
-};
-
-function flashStyle(level: FlashLevel): FlashStyle {
-	switch (level) {
-		case "warn":
-			return { icon: "!", accent: [245, 158, 11], bg: [39, 31, 14], fg: [253, 230, 138] };
-		case "error":
-			return { icon: "×", accent: [248, 113, 113], bg: [45, 18, 23], fg: [254, 202, 202] };
-		default:
-			return { icon: "i", accent: [56, 189, 248], bg: [8, 31, 49], fg: [186, 230, 253] };
-	}
 }

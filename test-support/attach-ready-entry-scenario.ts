@@ -69,8 +69,8 @@ export const ENTRY_F0_CURSOR: { x: number; y: number; visible: boolean } = s17Ge
  *  matchesKey(data, "ctrl+\\") — the C0 FS byte 0x1C). */
 export const DETACH_INPUT = "\x1c";
 
-/** The dashboard's list-mode attach key (dashboard.ts handleInput: `>`). */
-const ATTACH_KEY = ">";
+/** The dashboard's list-mode attach key (dashboard.ts handleListKey: Right). */
+const ATTACH_KEY = "\x1b[C";
 /** The dashboard's list-mode exit key (Key.escape). */
 const EXIT_KEY = "\x1b";
 

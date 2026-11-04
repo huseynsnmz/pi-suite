@@ -85,7 +85,7 @@ try {
 	const firstFrameBgCalls = bgCalls;
 
 	// select mode: press `m`, then space to batch-mark the current row.
-	dash.handleInput("m");
+	dash.handleInput("\x01");
 	dash.handleInput(" ");
 	const selectLines = dash.render(160);
 	const selectMarkerPresent = selectLines.some((line) => line.includes("◉"));

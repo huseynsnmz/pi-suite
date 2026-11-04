@@ -5,6 +5,16 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.15.0] - 2026-11-04
+
+### Features
+
+- **keys**: typing starts a task with no key first, and the keys follow Claude Code's agent view
+- **board**: `Left` twice puts the session you're in on the board, so you can come back to it
+- **config**: settings move to `~/.pi/agent/extensions/pi-board/config.json`
+- **model**: `/board-model` chooses the helper model, which is now off until you choose one
+- **ui**: drawn with frames and Pi's theme colors, to match pi-frame
+
 ## [0.14.0] - 2026-11-04
 
 First release of `@huseynsnmz/pi-board`, a fork of `@zhuxixi/pi-agent-board` 0.13.1.

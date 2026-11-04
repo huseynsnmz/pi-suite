@@ -95,161 +95,69 @@ function snap(dash: DashboardComponent, env: ReturnType<typeof makeEnv>): Snapsh
 
 const report: Record<string, unknown> = {};
 
-// 1) idle row: x opens the confirm prompt, nothing archived yet
+// Typed text never reaches the delete gesture.
 {
 	const env = makeEnv();
 	const dash = makeDash(env);
-	dash.handleInput("x");
-	report.idlePrompt = snap(dash, env);
-	dash.dispose();
-}
-
-// 2) busy row: prompt names the stopped run
-{
-	const env = makeEnv();
-	env.setRowPatch((r) => ({ ...r, alive: true, hostAlive: true, state: { ...(r.state ?? {}), semanticState: "working" } }));
-	const dash = makeDash(env);
-	dash.handleInput("x");
-	report.busyPrompt = snap(dash, env);
-	dash.dispose();
-}
-
-// 3) cancel paths: n / esc / x again / q must not delete
-{
-	const cancel: Record<string, Snapshot> = {};
-	for (const [name, key] of [["n", "n"], ["escape", "\x1b"], ["x", "x"], ["q", "q"]] as const) {
-		const env = makeEnv();
-		const dash = makeDash(env);
-		dash.handleInput("x");
-		dash.handleInput(key);
-		cancel[name] = snap(dash, env);
-		dash.dispose();
-	}
-	report.cancel = cancel;
-}
-
-// 4) y confirms: archive runs, notice lands, the row leaves the list
-{
-	const env = makeEnv();
-	const dash = makeDash(env);
-	const before = (dash as unknown as { orderedIds: string[] }).orderedIds[0];
-	const beforeName = env.service.row(before)?.meta.name ?? "?";
-	dash.handleInput("x");
-	dash.handleInput("y");
-	await waitFor(() => env.archiveCalls.length > 0, 5000);
-	const after = dash as unknown as { orderedIds: string[]; selectedId: string; mode: string; flash: { level: string } | null };
-	await waitFor(() => after.flash !== null, 5000);
-	report.confirm = { ...snap(dash, env), beforeId: before, beforeName, orderedIds: after.orderedIds, selectedId: after.selectedId, level: after.flash?.level ?? null };
-	dash.dispose();
-}
-
-// 5) insert mode: x is literal editor text
-{
-	const env = makeEnv();
-	const dash = makeDash(env);
-	dash.handleInput("i");
 	dash.handleInput("x");
 	const d = dash as unknown as { mode: string; input: string };
-	report.insertMode = { mode: d.mode, input: d.input, archived: [...env.archiveCalls] };
+	report.typing = { mode: d.mode, input: d.input, archived: [...env.archiveCalls] };
 	dash.dispose();
 }
 
-// 6) empty list: x is a no-op
-{
-	const root = mkdtempSync(join(tmpdir(), "agentview-delete-key-empty-"));
-	const service = createService({
-		root,
-		runnerScript: "/no/runner.mjs",
-		piCommand: "pi",
-		piArgsPrefix: [],
-		defaultCwd: root,
-		launch: () => ({ pid: null, configPath: "/no/config.json" }),
-		launchHost: () => ({ pid: null, configPath: "/no/host-config.json" }),
-		launchTitle: () => ({ pid: null, configPath: "/no/title-config.json" }),
-	});
-	const dash = new DashboardComponent(tui as never, theme as never, { matches: () => false } as never, () => {}, {
-		service,
-		root,
-		defaultCwd: root,
-		availableModels: [],
-		currentModel: null,
-		currentThinkingLevel: "off",
-	} as never);
-	dash.handleInput("x");
-	const d = dash as unknown as { mode: string; pending: unknown };
-	report.emptyList = { mode: d.mode, pending: d.pending ?? null, crashed: false };
-	dash.dispose();
-}
-
-// 7) legacy shortcut: ctrl+x twice inside the window still deletes without confirm
+// An inactive row: ctrl+x twice inside the window deletes, with no confirm step.
 {
 	const env = makeEnv();
 	const dash = makeDash(env);
 	dash.handleInput("\x18");
+	const armed = (dash as unknown as { inputNotice: { text: string } | null }).inputNotice?.text ?? null;
 	dash.handleInput("\x18");
 	await waitFor(() => env.archiveCalls.length > 0);
-	report.legacyDoublePress = snap(dash, env);
+	report.double = { ...snap(dash, env), armed };
 	dash.dispose();
 }
 
-// 8) legacy window: a second ctrl+x after 700ms only re-arms
+// A press that isn't ctrl+x disarms it.
 {
 	const env = makeEnv();
 	const dash = makeDash(env);
 	dash.handleInput("\x18");
-	await new Promise((r) => setTimeout(r, 700));
+	dash.handleInput("\x1b[B");
 	dash.handleInput("\x18");
-	report.legacySlow = snap(dash, env);
+	report.disarmed = snap(dash, env);
 	dash.dispose();
 }
 
-// 9) multi-select keeps ctrl+x; plain x does nothing there
+// A live row: the first press stops it, the second deletes.
+{
+	const env = makeEnv();
+	const stopped: string[] = [];
+	env.setRowPatch((r) => ({ ...r, alive: true }));
+	(env.service as unknown as { stop: (id: string) => unknown }).stop = (id: string) => {
+		stopped.push(id);
+		return { ok: true };
+	};
+	const dash = makeDash(env);
+	dash.handleInput("\x18");
+	report.live = { stopped: [...stopped], archivedAfterFirst: [...env.archiveCalls] };
+	dash.dispose();
+}
+
+// Multi-select keeps its own ctrl+x confirm.
 {
 	const env = makeEnv();
 	env.setRowPatch((r) => ({ ...r, state: { ...(r.state ?? {}), semanticState: "completed" } }));
 	const dash = makeDash(env);
 	const target = (dash as unknown as { orderedIds: string[] }).orderedIds[0];
-	dash.handleInput("m");
+	dash.handleInput("\x01");
 	dash.handleInput(" ");
-	const d0 = dash as unknown as { mode: string; pending: { prompt: string; returnMode?: string } | null };
-	dash.handleInput("x");
-	const afterX = { mode: d0.mode, prompt: d0.pending?.prompt ?? null };
 	dash.handleInput("\x18");
 	const d1 = dash as unknown as { mode: string; pending: { prompt: string; returnMode?: string } | null };
 	const ctrlX = { mode: d1.mode, prompt: d1.pending?.prompt ?? null, returnMode: d1.pending?.returnMode ?? null };
 	dash.handleInput("y");
-	const d2 = dash as unknown as { mode: string; orderedIds: string[] };
+	const d2 = dash as unknown as { orderedIds: string[] };
 	await waitFor(() => !d2.orderedIds.includes(target), 5000);
-	report.selectMode = { afterX, ctrlX, target, confirmed: { archiveManyCalls: [...env.archiveManyCalls], mode: d2.mode, orderedIds: [...d2.orderedIds] }, archived: [...env.archiveCalls] };
-	dash.dispose();
-}
-
-// 10) copy: list hints and the help overlay both advertise the new key
-{
-	const env = makeEnv();
-	const dash = makeDash(env);
-	const d = dash as unknown as { mode: string };
-	// 240 cols: the hints line clips at narrow widths (pre-existing behavior);
-	// assert against the unclipped source string.
-	const hints = dash.render(240).join("\n");
-	d.mode = "help";
-	const help = dash.render(240).join("\n");
-	report.copy = { hints, help };
-	dash.dispose();
-}
-
-// 11) x clears a pending ctrl+x arm — no stacked deletion (post-review pin)
-{
-	const env = makeEnv();
-	const dash = makeDash(env);
-	dash.handleInput("\x18"); // arm the legacy double-press
-	const d = dash as unknown as { mode: string; inputNotice: { text: string } | null };
-	const armedNotice = d.inputNotice?.text ?? null;
-	dash.handleInput("x"); // must clear the arm and open the confirm prompt instead
-	const afterX = d.mode;
-	dash.handleInput("\x18"); // confirm mode: cancels (key consumed, no re-arm)
-	dash.handleInput("\x18"); // back in list mode: fresh arm, no delete
-	report.armClear = { armedNotice, afterX, final: snap(dash, env) };
+	report.selectMode = { ctrlX, target, archiveManyCalls: [...env.archiveManyCalls], archived: [...env.archiveCalls] };
 	dash.dispose();
 }
 

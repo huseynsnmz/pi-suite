@@ -79,28 +79,27 @@ rm ~/.pi/agent/extensions/agent-board
 
 ## Quick Start
 
-Open the board with `/agent-board` inside Pi, or press `Left` twice on an empty prompt, then:
+Open the board with `/agent-board` inside Pi, or press `Left` twice on an empty prompt. That also puts the session you're in on the board, and `Esc` or `Enter` on its row brings you back. Then:
 
-1. Press `i` to enter INSERT mode.
-2. Type a task.
-3. Press `Enter`. It starts right away in the current folder, with this session's model and thinking level.
+1. Type a task.
+2. Press `Enter`. It starts right away in the current folder, with this session's model and thinking level.
 
 To choose the folder, model or thinking level first, press `Ctrl+N` while typing. With an empty input, `Enter` attaches/resumes the selected session. The row starts in `Queued`, then moves through `Running` to a terminal state such as `Needs answer`, `Needs instructions`, `Done`, `Failed`, or `Stopped`.
 
 From the board:
 
 - Press `Space` to peek at the selected session's summary, blocker, and latest output.
-- In Peek, press `r` to reply without attaching.
-- Press `v` for a read-only transcript, or `e` for evidence and diagnostics.
-- Press `Enter`, `Right`, or `>` to attach to the real Pi session.
+- In Peek, type to reply without attaching.
+- Press `Ctrl+O` for a read-only transcript, or `Ctrl+E` for evidence and diagnostics.
+- Press `Enter`, `Left` or `Right` to attach to the real Pi session.
 - In PTY attach mode, press `Ctrl+Left` to return to the board at any time (even mid-draft), or `Ctrl+\` — the unconditional escape: it detaches regardless of editor state on any terminal that forwards the raw 0x1c byte (raw, kitty, and modifyOtherKeys keyboard modes all work). `Left` detaches only while the child Pi reports an empty editor; otherwise (draft, or unknown editor state) it is forwarded to the child. `Ctrl+]` is not a detach key — it is passed through to the child Pi editor. When the host is disconnected, `Left` always exits. `Ctrl+\` caveats: on keyboard layouts where `\` sits on AltGr (e.g. German) the chord may never produce the byte — use `Ctrl+Left` there; in legacy keyboard modes `Ctrl+4` emits the same byte and also detaches; and the key is captured from the child while attached, so the child's own `Ctrl+\` binding (e.g. the vim terminal-mode prefix) is unavailable. Automatic themes also resolve correctly in attach sessions: the child's background probe (OSC 11) and color-scheme change notifications are forwarded to your real terminal, replies flow back to the child when your terminal answers, and attach re-probes the background once when it settles so the theme is right from the first frame. Set `AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0` to disable this (default on); keyboard-protocol negotiation (kitty/DA) is not forwarded — it happens once at child spawn, before attach exists. `Ctrl+X` opens an in-place delete confirm: press `y` (or Enter) to archive the row and return to the board with the next row selected — any other key cancels and is passed through to the session. While attached, the child Pi's own `Ctrl+X` bindings (copy in `/tree` and fullscreen, clear-all in the models dialog) are captured by this gesture.
 
 ## Dashboard Workflow
 
-The dashboard has two input modes:
+The input is always ready:
 
-- **Normal mode** owns dashboard shortcuts such as navigation, peek, attach, and filtering.
-- **INSERT mode** owns text editing. Press `i` before typing or pasting a task; `/` is literal while editing a prompt.
+- With an empty input, keys drive the board. `/`, `!`, `?` and `Space` are shortcuts only here.
+- Once you've typed something, keys edit the task, and `/` is literal.
 
 When you press `Ctrl+N` while typing a task, the **Start session** dialog lets you review:
 
@@ -113,11 +112,11 @@ Launch preferences are persisted and reused for later sessions. **Start & attach
 
 Session actions are deliberately confirmation-aware:
 
-- `d` confirms moving an inactive session to **Done**. Manual completion is the default.
-- `h` toggles the on-hold state (manual verdict — automated writers are fenced).
-- Press `x`, then `y` to confirm deleting the selected row. `Ctrl+X` twice quickly still deletes without confirmation. Archiving removes the row from the board but preserves its underlying Pi session file.
-- `X` archives inactive rows in the selected state; live work is skipped.
-- `m` enters multi-select mode; see [Multi-select](#multi-select) for its keys.
+- `Ctrl+D` confirms moving an inactive session to **Done**. Manual completion is the default.
+- `Ctrl+B` toggles the on-hold state (manual verdict — automated writers are fenced).
+- `Ctrl+X` stops a session, and a second press within 2 seconds deletes its row. Deleting removes the row from the board but preserves its underlying Pi session file.
+- `Ctrl+K` archives inactive rows in the selected state; live work is skipped.
+- `Ctrl+A` enters multi-select mode; see [Multi-select](#multi-select) for its keys.
 
 ## Views and Actions
 
@@ -125,34 +124,43 @@ Shortcuts are scoped to the view where they are available:
 
 ### Main list
 
+Typing goes straight into the input, as in Claude Code's agent view, so there's no mode to enter first.
+
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` / `j` / `k` | Move the selection. |
-| `i` | Enter INSERT mode for a new task. |
-| `Enter` | Start a draft right away, or attach/resume when the input is empty. |
-| `Right` / `>` / `l` | Attach to the selected session. |
-| `Space` | Open Peek. |
-| `v` | Open the read-only transcript. |
-| `e` | Open Evidence / Diagnostics. |
-| `/` | Enter filter mode. |
-| `Ctrl+N` | Enter INSERT mode with a pre-filled `hello` prompt. |
-| `Left` twice | From an empty Pi prompt, open the board. |
-| `Ctrl+R` | Rename the selected session. |
-| `Ctrl+T` | Pin or unpin the selected session. |
-| `Ctrl+S` | Stop the selected active session. |
-| `d` | Confirm marking the selected inactive session Done. |
-| `h` | Hold or unhold the selected inactive session. |
-| `x`, then `y` | Archive/delete the selected row (confirmation prompt). |
-| `Ctrl+X` twice quickly | Archive/delete the selected row without confirmation. |
-| `X` | Delete inactive rows in the selected state. |
-| `m` | Enter multi-select mode. |
-| `!` | Open node-pty diagnostics and fix steps. |
-| `?` | Open the help overlay. |
-| `Esc` | Clear a draft, or exit when the input is empty. |
+| Any text | Start writing a task. |
+| `Enter` | Start the task, or attach to the selected session when the input is empty. |
+| `Ctrl+Enter` | Start the task and attach to it. |
+| `Shift+Enter` / `Ctrl+J` | New line in the task. |
+| `Ctrl+N` | While typing, choose the folder, model and thinking level first. |
+| `Left` / `Right` | Attach to the selected session. |
+| `Left` twice | From an empty Pi prompt, put this session on the board and open it. |
+| `Up` / `Down` | Move between rows. |
+| `PgUp` / `PgDn` | Move by a screenful. |
+| `Home` / `End` | First or last row. |
+| `Alt+Up` / `Alt+Down` | Previous or next group. |
+| `Alt+1`..`Alt+9` | Attach to that row. |
+| `Space` | Open or close Peek. |
+| `/` / `Ctrl+F` | Filter the list. |
+| `Ctrl+T` | Pin or unpin. |
+| `Ctrl+R` | Rename. |
+| `Ctrl+X` | Stop the session; press again within 2 seconds to delete it. |
+| `Ctrl+D` | Confirm marking an inactive session Done. |
+| `Ctrl+B` | Hold or unhold an inactive session. |
+| `Ctrl+A` | Select several rows. |
+| `Ctrl+O` | Read-only transcript. |
+| `Ctrl+E` | Evidence / Diagnostics. |
+| `Ctrl+K` | Delete inactive rows in the selected state. |
+| `!` | node-pty diagnostics and fix steps. |
+| `?` | Help. |
+| `Esc` | Clear a draft, or leave the board. |
+| `Ctrl+C` | Clear a draft; press twice to leave. |
+
+On macOS, the `Alt` keys need your terminal to send Option as Alt.
 
 ### Multi-select
 
-Press `m` in the main list to act on several sessions at once.
+Press `Ctrl+A` in the main list to act on several sessions at once.
 
 | Key | Action |
 | --- | --- |
@@ -172,15 +180,15 @@ Peek shows the selected session's summary, blocker or question, latest output, a
 
 | Key | Action |
 | --- | --- |
-| `r` or `Enter` | Enter reply mode; type a follow-up and press `Enter` to send it without attaching. |
-| `a`, `Right`, `>`, or `l` | Attach to the session. |
-| `v` | Open the read-only transcript. |
-| `e` | Open Evidence / Diagnostics. |
-| `d` | Confirm marking the inactive session Done. |
-| `h` | Hold or unhold the session. |
+| Any text | Start a reply, and press `Enter` to send it without attaching. |
+| `Left` / `Right` | Attach to the session. |
+| `Up` / `Down` | Move to the previous or next session. |
+| `Ctrl+O` | Open the read-only transcript. |
+| `Ctrl+E` | Open Evidence / Diagnostics. |
+| `Ctrl+D` | Confirm marking the inactive session Done. |
+| `Ctrl+B` | Hold or unhold the session. |
 | `!` | Open node-pty diagnostics and fix steps. |
-| `Up` / `Down` / `j` / `k` | Move to the previous or next session. |
-| `Esc` | Return to the main list. |
+| `Space` / `Esc` | Return to the main list. |
 
 When a Pi question or questionnaire tool is pending, inline reply is rejected; attach to answer that interactive question in the real Pi session.
 
@@ -320,33 +328,46 @@ Other current limitations:
 
 ## Configuration
 
-Set these variables before starting Pi. Model-backed features fall back gracefully where noted, so disabling them does not prevent the core dashboard from working.
+Settings live in `~/.pi/agent/extensions/pi-board/config.json`. Everything is optional, and a missing or broken file means the defaults. Restart Pi after editing it.
 
-| Variable | Default / values | Purpose |
+```json
+{
+  "model": "provider/model-id",
+  "autoDone": false
+}
+```
+
+### Helper model
+
+Titles, row summaries and telling `Needs answer` from `Needs instructions` can use a model. **It's off by default**, so the board makes no model calls of its own and uses built-in rules instead.
+
+Run `/board-model` inside Pi to pick a model or turn it off. It's saved to the file above and applies to sessions started from then on. These calls run through Pi, so any model Pi can use works, and they send up to 6,000 characters of a session's latest reply to that model.
+
+### Other settings
+
+| Key | Default | Purpose |
 | --- | --- | --- |
-| `AGENT_BOARD_ROOT` | `~/.pi/agent/agent-board/` | Override the durable store location. |
-| `AGENT_BOARD_AUTO_STATE` | enabled; `off` disables | Enable automatic terminal-state refinement after a turn. |
-| `AGENT_BOARD_AUTO_STATE_MODEL` | `gpt-4o`; `off` uses heuristics | Model for classifying the terminal state of a finished turn. |
-| `AGENT_BOARD_AUTO_STATE_NO_DONE` | unset = manual Done; `0`, `false`, `off`, or `no` restores auto-Done | Keep completion manual by default, or restore automatic `Done` classification. |
-| `AGENT_BOARD_SUMMARY_MODEL` | `gpt-4o`; `off` disables | Generate short row summaries. Heuristic summaries remain available as a fallback. |
-| `AGENT_BOARD_TITLE_MODEL` | `openai-codex/gpt-5.5`; `off` disables | Generate a short session title after dispatch. The initial slug remains if generation fails. |
-| `AGENT_BOARD_TITLE_THINKING_LEVEL` | `low`; `off` omits the option | Thinking level used by title generation. |
-| `AGENT_BOARD_CODE_REFS` | enabled; `off` disables | Extract issue/PR badges from session evidence. |
-| `AGENT_BOARD_DISABLE_PTY` | unset; `1` disables | Disable PTY host and attach mode. |
-| `AGENT_BOARD_FORCE_PTY` | unset; `1` forces the PTY path | Force the PTY availability path when diagnosing or controlling fallback behavior. |
-| `AGENT_BOARD_ATTACH_MOUSE` | enabled; `0`, `off`, or `false` disables | Disable attach-view mouse handling and use terminal-native selection instead. |
-| `AGENT_BOARD_ENABLE_MOUSE_SCROLL` | enabled; `0` disables | Compatibility switch to disable attach-view mouse scrolling. |
-| `AGENT_BOARD_WHEEL_LINES` | `1`, clamped to `1..50` | Lines scrolled per mouse-wheel notch in the attach view (regular TUI mode; in fullscreen the TUI's own wheel accelerator decides the line count). |
-| `AGENT_BOARD_MAX_WARM_HOSTS` | `4`, clamped to `0..50` | Maximum number of idle PTY hosts retained for faster attach. |
-| `AGENT_BOARD_WARM_HOST_TTL_MS` | `600000` (10 minutes); `0` disables TTL eviction | How long an idle warm host may remain before it is evicted. |
-| `AGENT_BOARD_ATTACH_NATIVE_PASTE` | enabled; `0` disables | Disable X11 PRIMARY selection copy and middle-click paste integration. |
-| `AGENT_BOARD_FORWARD_OSC52` | enabled; `0` disables | Disable OSC 52 clipboard sequence forwarding from an attached session. |
-| `AGENT_BOARD_FORWARD_IMAGES` | enabled; `0` disables | Disable terminal image/file passthrough forwarding from an attached session. |
-| `AGENT_BOARD_IME_FIX` | enabled; `0` disables | Disable the attach-view IME cursor coalescer if your terminal has compatibility problems. |
-| `AGENT_BOARD_TERMINAL_SNAPSHOT` | enabled; `0` forces legacy | Force the pre-phase-4 attach path (screen.log replay + jiggle); escape hatch / rollback switch for the snapshot+subscribe attach protocol. |
-| `AGENT_BOARD_REPLY_GUARD` | enabled; `0`, `off`, or `false` disables | Discard terminal reply fragments (device attributes, kitty flags, cell size, DCS) that pi-tui delivers as input, and forward color replies whole. While a reply head is open, up to 64 bytes / 250ms of following input is absorbed. |
+| `model` | off | Helper model, as `provider/id`. |
+| `root` | `~/.pi/agent/agent-board/` | Where the board stores its state. |
+| `titleThinking` | `low` | Thinking level for titles. |
+| `autoDone` | `false` | Let the helper model mark sessions Done. |
+| `codeRefs` | `true` | Issue and pull request badges. |
+| `disablePty` | `false` | Turn off live terminal sessions and attach. |
+| `attachMouse` | `true` | Mouse handling in attached sessions. |
+| `mouseScroll` | `true` | Mouse wheel scrolling in attached sessions. |
+| `wheelLines` | `1` | Lines per wheel notch, from 1 to 50. |
+| `maxWarmHosts` | `4` | Idle sessions kept ready for fast attach, from 0 to 50. |
+| `warmHostTtlMs` | `600000` | How long an idle one is kept; `0` keeps it. |
+| `nativePaste` | `true` | X11 PRIMARY copy and middle-click paste. |
+| `forwardClipboard` | `true` | Forward OSC 52 clipboard writes from attached sessions. |
+| `forwardImages` | `true` | Forward terminal images from attached sessions. |
+| `imeFix` | `true` | IME cursor fix in attached sessions. |
+| `terminalSnapshot` | `true` | Newer attach path; `false` uses the older one. |
+| `replyGuard` | `true` | Discard stray terminal replies delivered as input. |
 
-`AGENT_BOARD_TERMINAL_SNAPSHOT=0` routes attach onto the legacy fallback family: the screen.log replay tail plus the shrink-and-hold jiggle redraw. These paths exist only for pre-protocol runners and as a rollback hatch — they are not part of the snapshot+subscribe protocol path (issue #91 phase 4). They will be retired once the installed runner fleet is on the snapshot protocol baseline (detectable on the wire via hello protocol fields).
+An `AGENT_BOARD_*` environment variable that's already set overrides the file for that run.
+
+Setting `terminalSnapshot` to `false` routes attach onto the legacy fallback family: the screen.log replay tail plus the shrink-and-hold jiggle redraw. These paths exist only for pre-protocol runners and as a rollback hatch — they are not part of the snapshot+subscribe protocol path (issue #91 phase 4). They will be retired once the installed runner fleet is on the snapshot protocol baseline (detectable on the wire via hello protocol fields).
 
 Older `AGENT_VIEW_*` names are still read in selected compatibility paths. Prefer `AGENT_BOARD_*` for new setups. Internal child markers are managed by Agent Board and are not user settings.
 
@@ -413,23 +434,7 @@ npm run verify
 
 ## Publishing
 
-Releases run through `scripts/release.mjs` and are published by CI when a GitHub Release is created. The flow checks the parts that are easy to get wrong — the changelog range, tag ancestry against `main`, and drift from a late merge — instead of assuming them. See [docs/RELEASE.md](docs/RELEASE.md) for the full process, the one-time npm trusted-publisher setup, and failure recovery.
-
-```bash
-node scripts/release.mjs precheck          # gate: clean main, nothing in flight
-node scripts/release.mjs prepare minor     # changelog + verify + bump + tag + release branch
-node scripts/release.mjs open-pr 0.9.0     # push the branch and tag, open the release PR
-# merge the PR with a merge commit, then:
-node scripts/release.mjs finish 0.9.0      # GitHub Release → CI publishes to npm
-```
-
-After publishing, users install the scoped package with:
-
-```bash
-pi install npm:@huseynsnmz/pi-board
-```
-
-The Pi package gallery uses the `pi.video` and `pi.image` URLs from `package.json`.
+Published to npm by hand, with `npm publish --access public`. There's no publish workflow.
 
 ## Further Reading
 

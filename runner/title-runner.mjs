@@ -25,7 +25,7 @@ function main() {
 async function maybeGenerateTitle(config) {
 	const configured = process.env.AGENT_BOARD_TITLE_MODEL ?? process.env.AGENT_VIEW_TITLE_MODEL;
 	if (configured === "off") return;
-	const model = config.model ?? configured ?? DEFAULT_TITLE_MODEL;
+	const model = configured ?? config.model ?? DEFAULT_TITLE_MODEL;
 	const thinking = process.env.AGENT_BOARD_TITLE_THINKING_LEVEL ?? process.env.AGENT_VIEW_TITLE_THINKING_LEVEL ?? DEFAULT_TITLE_THINKING_LEVEL;
 	const prompt = titlePrompt(config.prompt);
 	const args = [...config.piArgsPrefix, "--mode", "json", "-p", "--no-session", "--model", model];

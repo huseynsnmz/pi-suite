@@ -23,19 +23,19 @@ const service = {
 };
 const tui = { terminal: { rows: 24, cols: 80, columns: 80, write: () => {} }, requestRender: () => {} };
 const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
-const dash = new DashboardComponent(tui as never, theme as never, {} as never, () => {}, {
+const dash = new DashboardComponent(tui as never, theme as never, { matches: () => false } as never, () => {}, {
 	service: service as never, root: "/", defaultCwd: "/", availableModels: [], currentModel: null, currentThinkingLevel: "off",
 });
 dash.selectedId = "v1";
-dash.handleInput("h");            // list mode, idle row -> mark_holding
+dash.handleInput("\x02");            // list mode, idle row -> mark_holding
 dash.selectedId = "v2";
-dash.handleInput("h");            // list mode, holding row -> clear_holding
+dash.handleInput("\x02");            // list mode, holding row -> clear_holding
 dash.peekId = "v2"; dash.mode = "peek";
-dash.handleInput("h");            // peek mode -> (v2 was reset to idle by the previous press) mark_holding
+dash.handleInput("\x02");            // peek mode -> (v2 was reset to idle by the previous press) mark_holding
 dash.mode = "session";
-dash.handleInput("h");            // session mode -> clear_holding
+dash.handleInput("h");    // session mode -> clear_holding
 dash.mode = "list";
 dash.selectedId = "v3";
-dash.handleInput("h");            // list mode, busy row -> busy pre-check blocks, sent must not grow
+dash.handleInput("\x02");            // list mode, busy row -> busy pre-check blocks, sent must not grow
 dash.dispose();
 console.log(JSON.stringify(sent));

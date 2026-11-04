@@ -5,6 +5,7 @@
  * launch background workers and the detached runner, and keeps a small footer status with
  * the count of sessions needing attention. See docs/EXPLORATION.md for the design.
  */
+import "./core/load-config.mjs";
 import { fileURLToPath } from "node:url";
 import { createConnection } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -15,6 +16,7 @@ import { createService, envInt } from "./runtime/service.mjs";
 import { attachWarmHostSweeper } from "./core/warm-host-sweeper.mjs";
 import { openDashboard, registerAgentBoardCommand } from "./commands/agent-board.js";
 import { registerBgCommand } from "./commands/bg.js";
+import { registerBoardModelCommand } from "./commands/board-model.ts";
 import { announceBoardClosedOn } from "./ui/chrome.ts";
 import { watchDoubleLeft } from "./ui/double-left.ts";
 
@@ -85,6 +87,7 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 
 	registerAgentBoardCommand(pi, commandOpts);
 	registerBgCommand(pi, commandOpts);
+	registerBoardModelCommand(pi);
 	pi.registerFlag("agent-board", {
 		description: "Open the agent-board dashboard on startup",
 		type: "boolean",

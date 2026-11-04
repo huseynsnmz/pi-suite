@@ -73,7 +73,7 @@ export function registerAgentBoardCommand(pi: ExtensionAPI, opts: AgentBoardComm
 }
 
 export async function openDashboard(
-	ctx: Pick<ExtensionCommandContext, "ui" | "cwd" | "modelRegistry" | "model">,
+	ctx: Pick<ExtensionCommandContext, "ui" | "cwd" | "modelRegistry" | "model" | "sessionManager">,
 	service: ReturnType<typeof createService>,
 	options: {
 		initialSelectedId?: string | null;
@@ -104,6 +104,7 @@ export async function openDashboard(
 					service,
 					root: service.getRoot(),
 					defaultCwd: ctx.cwd,
+					currentSessionFile: ctx.sessionManager?.getSessionFile?.() ?? null,
 					initialSelectedId: options.initialSelectedId,
 					initialNotice: options.initialNotice,
 					availableModels,
@@ -159,6 +160,8 @@ export async function dashboardAttachLoop(
 		});
 		pendingNotice = undefined;
 		if (result.action !== "attach") return;
+		// That session is the one on screen behind the board: going back to it is just closing.
+		if (result.viewId === currentId) return;
 		selectedId = result.viewId;
 		const outcome = await attach(ctx, service, root, result.viewId, result.stopFirst);
 		if (outcome.afterDelete) {
