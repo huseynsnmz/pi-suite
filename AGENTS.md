@@ -5,6 +5,7 @@
 ## Things that are easy to break
 
 - Web text must never reach the agent: no raw mode, no fallback when the reader fails, and no page text in an error. `test/e2e/run.mjs` is what proves this, by recording every model request.
+- The reader's confidence score is its own opinion, and a fooled reader can fake it. Never let a high score skip another check.
 - The reader must have no tools. That's why a fooled reader can only spoil an answer.
 - Search links go to the agent, so they're checked and listed without titles, which are web text.
 - Nothing from a server goes in an error, including header values. Pi passes errors to the agent without the reader.

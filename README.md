@@ -42,6 +42,7 @@ SearXNG only answers in JSON if you list it under `search.formats` in its `setti
 | `denyDomains` | These domains and their subdomains can't be fetched |
 | `dnsFilter` | `cloudflare-family` blocks malware and adult sites, and is the default. `cloudflare-security` blocks malware only. `off` turns it off |
 | `privateWords` | Words a search can never hold, such as client or project names |
+| `minConfidence` | Answers the reader scores below this, out of 10, are withheld. Defaults to 4 |
 | `askNewDomains` | Set to `true` to be asked before the first fetch from each site |
 
 `/web` shows what's in use. If `web.json` can't be read or has a wrong value, the web tools stay off and Pi says why.
@@ -60,6 +61,7 @@ SearXNG only answers in JSON if you list it under `search.formats` in its `setti
 
 **Before the agent sees an answer:**
 
+- The reader scores from 1 to 10 how well the page supports its answer, and the agent sees the score. Below `minConfidence` the answer is withheld. A page that fools the reader can fake this score, so it's a measure of quality, not safety.
 - Links that weren't in the page are removed.
 - An answer that reads like instructions to an AI is withheld.
 - If the page itself holds such wording, the agent is told.
