@@ -9,6 +9,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { restoreChrome } from "../ui/chrome.ts";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { createService } from "../runtime/service.mjs";
 import { planAttachPrelude, planAttachResolved } from "./attach-decision.mjs";
@@ -57,9 +58,7 @@ export async function openPtyAttach(
 			},
 		);
 	} finally {
-		ctx.ui.setHeader(undefined);
-		ctx.ui.setFooter(undefined);
-		ctx.ui.setWorkingVisible(true);
+		restoreChrome(ctx);
 	}
 }
 

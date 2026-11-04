@@ -1,16 +1,18 @@
-# Pi Agent Board
+# pi-board
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zhuxixi/pi-agent-board/main/assets/banner.png" alt="Pi Agent Board" width="100%" />
+  <img src="https://raw.githubusercontent.com/huseynsnmz/pi-board/main/assets/banner.png" alt="Pi Agent Board" width="100%" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/zhuxixi/pi-agent-board/blob/main/assets/demo.mp4"><strong>30s demo</strong></a>
-  | <a href="https://pi.dev/packages?name=@zhuxixi/pi-agent-board">Pi package gallery</a>
-  | <a href="https://www.npmjs.com/package/@zhuxixi/pi-agent-board">npm</a>
+  <a href="https://github.com/huseynsnmz/pi-board/blob/main/assets/demo.mp4"><strong>30s demo</strong></a>
+  | <a href="https://pi.dev/packages?name=@huseynsnmz/pi-board">Pi package gallery</a>
+  | <a href="https://www.npmjs.com/package/@huseynsnmz/pi-board">npm</a>
 </p>
 
-Pi Agent Board is a full-screen TUI dashboard for [Pi](https://github.com/earendil-works/pi-mono) that manages durable background Pi sessions. Use one global board to dispatch work across projects, watch progress, triage summaries and evidence, reply without opening a transcript, and attach to a real interactive session when hands-on work is needed.
+pi-board is a full-screen TUI dashboard for [Pi](https://github.com/earendil-works/pi-mono) that manages durable background Pi sessions. Use one global board to dispatch work across projects, watch progress, triage summaries and evidence, reply without opening a transcript, and attach to a real interactive session when hands-on work is needed.
+
+It started as a fork of [`@zhuxixi/pi-agent-board`](https://github.com/zhuxixi/pi-agent-board) 0.13.1, so the design and most of the code are theirs, under the MIT license. The command is still `/agent-board`.
 
 ## What It Does
 
@@ -42,7 +44,7 @@ A healthy command emits an assistant `message_end`, then an `agent_end` event, a
 ### Published package
 
 ```bash
-pi install npm:@zhuxixi/pi-agent-board
+pi install npm:@huseynsnmz/pi-board
 ```
 
 Start Pi normally and run `/agent-board`, or use one of the startup entry points below.
@@ -77,15 +79,13 @@ rm ~/.pi/agent/extensions/agent-board
 
 ## Quick Start
 
-Open the board with `/agent-board` inside Pi, then:
+Open the board with `/agent-board` inside Pi, or press `Left` twice on an empty prompt, then:
 
 1. Press `i` to enter INSERT mode.
 2. Type a task.
-3. Press `Enter` to open the **Start session** dialog.
-4. Review or change the working directory (`cwd`), model, thinking level, and action.
-5. Press `Enter` on **Start session** to launch the task.
+3. Press `Enter`. It starts right away in the current folder, with this session's model and thinking level.
 
-With a draft in the input, `Enter` opens **Start session**; with an empty input, `Enter` attaches/resumes the selected session. The row starts in `Queued`, then moves through `Running` to a terminal state such as `Needs answer`, `Needs instructions`, `Done`, `Failed`, or `Stopped`.
+To choose the folder, model or thinking level first, press `Ctrl+N` while typing. With an empty input, `Enter` attaches/resumes the selected session. The row starts in `Queued`, then moves through `Running` to a terminal state such as `Needs answer`, `Needs instructions`, `Done`, `Failed`, or `Stopped`.
 
 From the board:
 
@@ -102,7 +102,7 @@ The dashboard has two input modes:
 - **Normal mode** owns dashboard shortcuts such as navigation, peek, attach, and filtering.
 - **INSERT mode** owns text editing. Press `i` before typing or pasting a task; `/` is literal while editing a prompt.
 
-When you submit a task, the **Start session** dialog lets you review:
+When you press `Ctrl+N` while typing a task, the **Start session** dialog lets you review:
 
 - `cwd`: an existing-directory picker with usage-ranked favorites, filesystem browsing, and Tab completion;
 - `model`: models available to Pi, including models scoped by the current directory's Pi settings;
@@ -129,13 +129,14 @@ Shortcuts are scoped to the view where they are available:
 | --- | --- |
 | `Up` / `Down` / `j` / `k` | Move the selection. |
 | `i` | Enter INSERT mode for a new task. |
-| `Enter` | Open Start session for a draft, or attach/resume when the input is empty. |
+| `Enter` | Start a draft right away, or attach/resume when the input is empty. |
 | `Right` / `>` / `l` | Attach to the selected session. |
 | `Space` | Open Peek. |
 | `v` | Open the read-only transcript. |
 | `e` | Open Evidence / Diagnostics. |
 | `/` | Enter filter mode. |
-| `Ctrl+N` | Enter INSERT mode with a pre-filled `hello` prompt; press `Enter` to open the Start session dialog. |
+| `Ctrl+N` | Enter INSERT mode with a pre-filled `hello` prompt. |
+| `Left` twice | From an empty Pi prompt, open the board. |
 | `Ctrl+R` | Rename the selected session. |
 | `Ctrl+T` | Pin or unpin the selected session. |
 | `Ctrl+S` | Stop the selected active session. |
@@ -425,7 +426,7 @@ node scripts/release.mjs finish 0.9.0      # GitHub Release → CI publishes to 
 After publishing, users install the scoped package with:
 
 ```bash
-pi install npm:@zhuxixi/pi-agent-board
+pi install npm:@huseynsnmz/pi-board
 ```
 
 The Pi package gallery uses the `pi.video` and `pi.image` URLs from `package.json`.

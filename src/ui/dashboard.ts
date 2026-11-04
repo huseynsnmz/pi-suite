@@ -320,7 +320,8 @@ export class DashboardComponent implements Component {
 				this.handleSelectKey(data);
 				break;
 			case "dispatch":
-				this.handleTextMode(data, () => this.openLaunchDialog(), () => this.leaveDispatchMode());
+				if (matchesKey(data, Key.ctrl("n"))) return this.openLaunchDialog();
+				this.handleTextMode(data, () => this.startNow(), () => this.leaveDispatchMode());
 				break;
 			case "filter":
 				this.handleTextMode(data, () => this.toListMode(), () => this.clearFilter(), { live: true });
@@ -364,7 +365,7 @@ export class DashboardComponent implements Component {
 		if (data === "v") return this.openSessionView();
 		if (data === "e") return this.openEvidenceView();
 		if (matchesKey(data, Key.enter)) {
-			if (this.input.trim()) return this.openLaunchDialog();
+			if (this.input.trim()) return this.startNow();
 			return this.attachSelected();
 		}
 		if (matchesKey(data, Key.space)) return this.openPeek();
@@ -673,6 +674,13 @@ export class DashboardComponent implements Component {
 		}
 	}
 
+	/** In this folder, with this session's model. Ctrl+N is there for anything else. */
+	private startNow(): void {
+		const cwd = this.deps.defaultCwd;
+		const { model, thinking } = this.buildLaunchState(cwd, this.deps.currentModel, this.deps.currentThinkingLevel);
+		this.submitDispatch({ cwd, model: model ? canonicalModelRef(model) : null, thinkingLevel: thinking });
+	}
+
 	private openLaunchDialog(): void {
 		const prompt = this.input.trim();
 		if (!prompt) return this.toListMode();
@@ -836,7 +844,7 @@ export class DashboardComponent implements Component {
 				return;
 			case "list":
 			case "dispatch":
-				return this.input.trim() ? this.openLaunchDialog() : this.attachSelected();
+				return this.input.trim() ? this.startNow() : this.attachSelected();
 		}
 	}
 
@@ -1717,7 +1725,7 @@ export class DashboardComponent implements Component {
 			["/", "Filter in normal mode; use i then / for slash commands"],
 			["?", "Open the key help overlay (list and multi-select)"],
 			["!", "Open node-pty diagnostics and fix steps"],
-			["ctrl+n", "Open the new-session launch dialog (prompt pre-filled)"],
+			["ctrl+n", "While typing a task: choose its folder, model and thinking first"],
 			["ctrl+r/t/s", "Rename · pin · stop selected"],
 			["x", "Delete selected session (y/N confirm)"],
 			["ctrl+x x2", "Delete selected session (quick double-press, no confirm)"],

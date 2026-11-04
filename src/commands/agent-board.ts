@@ -3,6 +3,7 @@
  * agent-board PTY hosts for fast switching. `ctx.switchSession` is only a no-PTY fallback.
  * Also wires dispatch+attach and stale-row recovery on open.
  */
+import { restoreChrome } from "../ui/chrome.ts";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -131,9 +132,7 @@ export async function openDashboard(
 			},
 		);
 	} finally {
-		ctx.ui.setHeader(undefined);
-		ctx.ui.setFooter(undefined);
-		ctx.ui.setWorkingVisible(true);
+		restoreChrome(ctx);
 	}
 }
 
@@ -283,9 +282,7 @@ async function openPtyAttach(
 			},
 		);
 	} finally {
-		ctx.ui.setHeader(undefined);
-		ctx.ui.setFooter(undefined);
-		ctx.ui.setWorkingVisible(true);
+		restoreChrome(ctx);
 	}
 }
 

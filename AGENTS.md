@@ -4,10 +4,12 @@ Guidance for coding agents working in this repository.
 
 ## What this is
 
-`@zhuxixi/pi-agent-board` — a Pi extension that adds a dashboard for
+`@huseynsnmz/pi-board` — a fork of `@zhuxixi/pi-agent-board`, and a Pi extension that adds a dashboard for
 dispatching, monitoring, peeking at, replying to, and attaching to background Pi
 sessions. Runtime source is TypeScript under `src/` and `runner/`; the extension
 entry point is `index.ts`.
+
+Describe it neutrally as a fork. Don't compare the two or list problems with the original. Publishing to npm has no workflow here.
 
 ## Commands
 

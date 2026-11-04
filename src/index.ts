@@ -15,6 +15,8 @@ import { createService, envInt } from "./runtime/service.mjs";
 import { attachWarmHostSweeper } from "./core/warm-host-sweeper.mjs";
 import { openDashboard, registerAgentBoardCommand } from "./commands/agent-board.js";
 import { registerBgCommand } from "./commands/bg.js";
+import { announceBoardClosedOn } from "./ui/chrome.ts";
+import { watchDoubleLeft } from "./ui/double-left.ts";
 
 const RUNNER_SCRIPT = fileURLToPath(new URL("../runner/job-runner.mjs", import.meta.url));
 const PTY_RUNNER_SCRIPT = fileURLToPath(new URL("../runner/pty-runner.mjs", import.meta.url));
@@ -36,6 +38,8 @@ let hostedFrameWitness: { stop(): void } | null = null;
 let hostedSessionEpoch = 0;
 
 export default function piAgentBoard(pi: ExtensionAPI): void {
+	announceBoardClosedOn(pi.events);
+	let stopDoubleLeft: (() => void) | null = null;
 	const root = defaultRoot();
 	const { piCommand, piArgsPrefix } = resolvePiInvocation();
 
@@ -190,6 +194,10 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", async (event, ctx) => {
+		if (!isHostedChild && ctx.mode === "tui") {
+			stopDoubleLeft?.();
+			stopDoubleLeft = watchDoubleLeft(ctx);
+		}
 		if (isHostedChild && !hostedEditorReporter && typeof ctx.ui?.getEditorText === "function" && hostedViewId) {
 			const { createEditorStateReporter } = await import("./core/editor-state-reporter.mjs");
 			hostedEditorReporter = createEditorStateReporter({

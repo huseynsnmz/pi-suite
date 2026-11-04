@@ -5,6 +5,16 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.14.0] - 2026-11-04
+
+First release of `@huseynsnmz/pi-board`, a fork of `@zhuxixi/pi-agent-board` 0.13.1.
+
+### Features
+
+- **dispatch**: `Enter` starts a task right away; `Ctrl+N` while typing opens the Start session dialog
+- **board**: `Left` twice on an empty prompt opens the board
+- **board**: announce `agent-board:closed`, so an extension can draw its header and footer again
+
 ## [0.13.1] - 2026-10-28
 
 ### Fixes
