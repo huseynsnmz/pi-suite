@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -64,6 +64,52 @@ test("a repository's own diff program doesn't run", async () => {
   const changes = await changesToReview(git);
   assert.match(changes.diff, /\+edited/);
   assert.equal(spawnSync("test", ["-e", marker]).status, 1);
+});
+
+test("a repository's filter and hooks don't run, and it stops rather than miss the file", async () => {
+  const { dir, sh, git } = repo();
+  const marker = join(dir, "ran");
+  writeFileSync(join(dir, ".gitattributes"), "a.txt filter=x\n");
+  sh("config", "filter.x.clean", `touch ${marker}`);
+  writeFileSync(join(dir, "a.txt"), "edited\n");
+  assert.match((await changesToReview(git)).problem ?? "", /filter/);
+  assert.equal(spawnSync("test", ["-e", marker]).status, 1);
+  sh("config", "--unset", "filter.x.clean");
+  mkdirSync(join(dir, "hooks"));
+  writeFileSync(join(dir, "hooks/post-index-change"), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+  sh("config", "core.hooksPath", join(dir, "hooks"));
+  assert.equal((await changesToReview(git)).problem, undefined);
+  assert.equal(spawnSync("test", ["-e", marker]).status, 1);
+});
+
+test(".gitattributes can't hide a change as binary", async () => {
+  const { dir, sh, git } = repo();
+  writeFileSync(join(dir, ".gitattributes"), "a.txt -diff\n");
+  sh("add", ".");
+  sh("-c", "user.name=t", "commit", "-qm", "attrs");
+  writeFileSync(join(dir, "a.txt"), "evil\n");
+  assert.match((await changesToReview(git)).diff, /\+evil/);
+});
+
+test("a failed or killed git call is a problem, not an empty review", async () => {
+  const { git } = repo();
+  for (const broken of [{ code: 1 }, { code: 0, killed: true }]) {
+    const flaky: GitRun = async (args) => (args.includes("--text") ? { stdout: "", ...broken } : git(args));
+    assert.match((await changesToReview(flaky)).problem ?? "", /couldn't read/);
+  }
+});
+
+test("from a subfolder it still sees new files elsewhere in the repository", async () => {
+  const { dir } = repo();
+  mkdirSync(join(dir, "sub"));
+  mkdirSync(join(dir, "other"));
+  writeFileSync(join(dir, "other/new.txt"), "new\n");
+  const changes = await changesToReview(async (args) => {
+    const done = spawnSync("git", args, { cwd: join(dir, "sub"), encoding: "utf8" });
+    return { stdout: done.stdout, code: done.status ?? 1 };
+  });
+  assert.equal(changes.untracked, "other/new.txt\n");
+  assert.equal(changes.files, 1);
 });
 
 test("a diff too long to send is replaced by its summary", async () => {

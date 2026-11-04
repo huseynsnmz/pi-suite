@@ -18,13 +18,14 @@ function escaped(text: string): string {
   return text
     .replace(/\\/g, "\\\\")
     .replace(/[*`[\]_]/g, "\\$&")
-    .replace(/^(\s*)([-+=>]|#{1,6}(?=\s)|~~~)/, "$1\\$2")
+    .replace(/^(\s*)([-+=>]|#|~~~)/, "$1\\$2")
     .replace(/^(\s*\d+)\./, "$1\\.");
 }
 
 /** Text with backticks in it needs a longer run of them around it. */
 function fenceFor(text: string, shortest: number): string {
-  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((run) => run[0].length));
+  let longest = 0;
+  for (const run of text.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
   return "`".repeat(Math.max(shortest, longest + 1));
 }
 
@@ -33,16 +34,35 @@ function inside(node: DomNode): string {
 }
 
 function list(node: DomNode, ordered: boolean): string {
-  let number = 0;
-  const items = [...node.childNodes]
-    .filter((child) => child.tagName?.toLowerCase() === "li")
-    .map((item) => {
-      number++;
-      const marker = ordered ? `${number}. ` : "- ";
-      const body = inside(item).trim().replace(/\n{3,}/g, "\n\n");
-      return marker + body.replace(/\n/g, `\n${" ".repeat(marker.length)}`);
-    });
+  let number = Number.parseInt(node.getAttribute?.("start") ?? "", 10);
+  if (!Number.isSafeInteger(number)) number = 1;
+  const items: string[] = [];
+  for (const child of node.childNodes) {
+    if (child.tagName?.toLowerCase() !== "li") {
+      // Not valid HTML, but browsers show it, so it's part of the page.
+      const stray = render(child).trim();
+      if (stray !== "") items.push(`  ${stray.replace(/\n/g, "\n  ")}`);
+      continue;
+    }
+    const marker = ordered ? `${number++}. ` : "- ";
+    const body = inside(child).trim().replace(/\n{3,}/g, "\n\n");
+    items.push(marker + body.replace(/\n/g, `\n${" ".repeat(marker.length)}`));
+  }
   return `\n\n${items.join("\n")}\n\n`;
+}
+
+/** Marks go right around the words, and the spaces beside them stay outside, or the words run together. */
+function wrapped(text: string, wrap: (words: string) => string): string {
+  const words = text.trim();
+  if (words === "") return text;
+  const at = text.indexOf(words);
+  return text.slice(0, at) + wrap(words) + text.slice(at + words.length);
+}
+
+/** Only these can be followed from a page. The characters that could end a Markdown link are encoded. */
+const LINKABLE = /^(?:https?|mailto):/i;
+function linkTarget(href: string): string {
+  return href.replace(/[()\s]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
 }
 
 function render(node: DomNode): string {
@@ -89,15 +109,14 @@ function render(node: DomNode): string {
     case "b":
     case "em":
     case "i": {
-      const text = inside(node);
       const mark = tag === "strong" || tag === "b" ? "**" : "_";
-      return text.trim() === "" ? text : `${mark}${text.trim()}${mark}`;
+      return wrapped(inside(node), (words) => `${mark}${words}${mark}`);
     }
     case "a": {
-      const text = inside(node).trim().replace(/\s*\n\s*/g, " ");
+      const text = inside(node).replace(/\n+/g, " ");
       const href = node.getAttribute?.("href");
-      if (text === "" || !href) return text;
-      return `[${text}](${href.replace(/[()\s]/g, encodeURIComponent)})`;
+      if (!href || !LINKABLE.test(href)) return text;
+      return wrapped(text, (words) => `[${words}](${linkTarget(href)})`);
     }
     case "table":
       return `\n\n${[...node.childNodes].map(render).join("").trim()}\n\n`;
@@ -112,11 +131,26 @@ function render(node: DomNode): string {
   }
 }
 
+/** Removes trailing spaces and extra blank lines, a line at a time so a page of spaces costs nothing, and leaves code blocks exactly as they are. */
+function tidied(markdown: string): string {
+  const out: string[] = [];
+  let fence: string | undefined;
+  for (const line of markdown.split("\n")) {
+    if (fence !== undefined) {
+      out.push(line);
+      if (line === fence) fence = undefined;
+      continue;
+    }
+    // Page text has its backticks escaped, so only a real code block can start one of these.
+    const opening = /^(`{3,})[\w+-]*$/.exec(line)?.[1];
+    if (opening !== undefined) fence = opening;
+    const tidy = line.trimEnd();
+    if (tidy !== "" || (out.length > 0 && out.at(-1) !== "")) out.push(tidy);
+  }
+  return out.join("\n").trim();
+}
+
 export function markdownOf(html: string): string {
   const { document } = parseHTML(`<!doctype html><html><body>${html}</body></html>`);
-  return render(document.body as unknown as DomNode)
-    .replace(/[ \t]*\n[ \t]*(?=\n)/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return tidied(render(document.body as unknown as DomNode));
 }

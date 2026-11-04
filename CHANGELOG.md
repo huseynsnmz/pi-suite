@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.1]
+
+### Fixes
+
+- `/security-review` no longer lets a repository's git config run programs: it turns off hooks and stops if the repository sets a filter. `.gitattributes` can't hide a change as binary, a failed git call is reported instead of reading as no changes, and it sees the whole repository from a subfolder.
+- Page-to-Markdown: a link can't break out of its address, only web and mail links stay links, a page of spaces can't hang Pi, code blocks keep their spacing, words beside bold text and links stay apart, and list items outside `<li>` are kept.
+- Message colors: resuming a session the same length as the last one, and messages sent with a skill, now show the right mode.
+- The board's `verify` script no longer calls the removed coverage script.
+
 ## [0.2.0]
 
 ### Features

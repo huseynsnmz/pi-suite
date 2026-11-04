@@ -23,7 +23,7 @@ import type {
 	ExtensionContext,
 	ReadonlyFooterDataProvider,
 } from "@earendil-works/pi-coding-agent";
-import { keyText } from "@earendil-works/pi-coding-agent";
+import { keyText, parseSkillBlock } from "@earendil-works/pi-coding-agent";
 import { Key, type KeyId, type TUI } from "@earendil-works/pi-tui";
 
 import { type GitState, readGit } from "./data/git.ts";
@@ -224,6 +224,7 @@ export const frameFeature = defineFeature({
 			telemetry.reset();
 			telemetry.restore(ctx.sessionManager.getEntries());
 			sentLive.clear();
+			sentSaved = { length: -1, modes: new Map() };
 			void probeGit(live);
 			if (ctx.mode !== "tui") return;
 
@@ -257,7 +258,8 @@ export const frameFeature = defineFeature({
 			if (mode === undefined) return;
 			const { content, timestamp } = event.message;
 			const text = typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
-			sentLive.set(text, mode);
+			// Pi draws a skill's message as only what you typed after it.
+			sentLive.set(parseSkillBlock(text)?.userMessage ?? text, mode);
 			// Normal draws as a plain message, so a resumed session needs nothing saved for it.
 			if (mode !== "normal") scope.appendEntry(SENT_IN_ENTRY, { at: timestamp, mode });
 		});

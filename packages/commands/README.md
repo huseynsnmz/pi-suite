@@ -14,6 +14,7 @@ The screen shows one line, and the diff goes to the model. A diff over 200,000 c
 
 **Limits:**
 
+- It turns off git hooks and diff programs while reading the changes. If the repository sets a git filter, it stops instead, since nothing can turn those off.
 - It asks the model not to change files, but the current mode decides what it can do. Use `read-only` to be sure, especially on a repository you don't trust.
 - The review is sent to your current model, like any other message.
 - It's one model's judgment, so it can miss things and isn't a replacement for a real audit.
