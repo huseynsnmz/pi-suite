@@ -12,8 +12,10 @@ import {
 
 import type { Piece } from "../render/fit.ts";
 import { BOXES, border } from "../render/frame.ts";
+import { paintLead, promptLead } from "../render/lead.ts";
 import { SETTINGS_KEY, SETTINGS_SHORTCUT_INPUT } from "../render/keys.ts";
 import type { CursorStyle } from "../settings.ts";
+import { findPrompt, type HistorySearch, shownText, startSearch } from "./history-search.ts";
 import { type Screen, type SlotName, slotPieces } from "./screen.ts";
 
 type WorkingIndicator = Parameters<CustomEditor["setWorkingStatusIndicator"]>[0];
@@ -24,6 +26,7 @@ const BOTTOM = "\u0000look:bottom\u0000";
 // oxlint-disable-next-line no-control-regex -- pi's software cursor is an escape sequence
 const INVERTED_CELL = /\x1b\[7m([\s\S]*?)\x1b\[0m/;
 const MIN_WIDTH = 24;
+const SEARCH_KEY = "ctrl+r";
 const LEAD_MIN = 10;
 
 const CURSOR_SEQUENCES: Record<CursorStyle, string> = {
@@ -40,6 +43,7 @@ export class FrameEditor extends CustomEditor {
 	#hiddenAbove = 0;
 	#hiddenBelow = 0;
 	#inset = 0;
+	#search: HistorySearch | undefined;
 
 	constructor(
 		tui: TUI,
@@ -69,6 +73,19 @@ export class FrameEditor extends CustomEditor {
 	 * leaves the cursor in a `/name` (a typed slash, a deleted or retyped letter) lists the skills.
 	 */
 	override handleInput(data: string): void {
+		if (this.#search) {
+			this.#searchKey(this.#search, data);
+			return;
+		}
+		if (matchesKey(data, SEARCH_KEY) && !this.isShowingAutocomplete()) {
+			// What Up browses, then what was typed in this folder's other sessions.
+			const own: unknown = Reflect.get(this, "history");
+			this.#search = startSearch(this.getText(), [
+				...(Array.isArray(own) ? (own as string[]) : []),
+				...this.#screen.pastPrompts(),
+			]);
+			return;
+		}
 		if (this.#keybindings.matches(data, "app.clear") && !this.isShowingAutocomplete()) {
 			this.#screen.interrupt(() => this.setText(""));
 			return;
@@ -82,6 +99,29 @@ export class FrameEditor extends CustomEditor {
 		if (this.isShowingAutocomplete() || !this.#screen.skills() || this.getText() === before) return;
 		const { line, col } = this.getCursor();
 		if (skillQueryAt(this.getLines(), line, col) !== undefined) openAutocomplete(this);
+	}
+
+	/** Enter sends the match, Esc goes back, and any other key keeps the match to edit. */
+	#searchKey(search: HistorySearch, data: string): void {
+		if (matchesKey(data, SEARCH_KEY)) {
+			const next = findPrompt(search, search.at + 1);
+			if (next >= 0) search.at = next;
+		} else if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+g")) {
+			this.#search = undefined;
+			this.setText(search.draft);
+			return;
+		} else if (matchesKey(data, "backspace")) {
+			search.query = search.query.slice(0, -1);
+			search.at = search.query ? findPrompt(search, 0) : -1;
+		} else if (data.length > 0 && !data.startsWith("\x1b") && data >= " " && !matchesKey(data, "enter")) {
+			search.query += data;
+			search.at = findPrompt(search, 0);
+		} else {
+			this.#search = undefined;
+			this.handleInput(data);
+			return;
+		}
+		this.setText(shownText(search));
 	}
 
 	override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -143,6 +183,9 @@ export class FrameEditor extends CustomEditor {
 		const right = style === "line" ? "" : ` ${paint.frame(box.vertical)}`;
 		const result: string[] = [];
 		let inside = false;
+		let first = this.#hiddenAbove === 0;
+		const text = this.getText();
+		const lead = promptLead(text);
 
 		for (const line of lines) {
 			if (line === TOP) {
@@ -173,11 +216,21 @@ export class FrameEditor extends CustomEditor {
 				);
 				inside = false;
 			} else if (inside) {
-				const text = this.#screen.decorate(cursor === "block" ? line : withoutSoftwareCursor(line));
-				result.push(`${left}${fill(text, inner)}${right}`);
+				let shown = this.#screen.decorate(cursor === "block" ? line : withoutSoftwareCursor(line));
+				if (first && lead) shown = paintLead(shown, lead.length, this.#screen.promptColor(lead.kind));
+				first = false;
+				result.push(`${left}${fill(shown, inner)}${right}`);
 			} else {
 				result.push(`${" ".repeat(this.#inset)}${line}`);
 			}
+		}
+
+		if (this.#search) {
+			const { query, at } = this.#search;
+			const state = query && at < 0 ? " (no match)" : "";
+			result.push(
+				` ${paint.dim(`search history: ${query}${state}   ctrl+r older · enter send · esc cancel`)}`,
+			);
 		}
 
 		// Every line is drawn to the width already, and measuring is cheaper than cutting.

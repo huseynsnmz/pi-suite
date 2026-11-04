@@ -54,6 +54,7 @@ import {
 	userFrame,
 	timing,
 } from "./settings.ts";
+import { pastPrompts } from "./data/past-prompts.ts";
 import { applyCursor, FrameEditor } from "./ui/editor.ts";
 import { registerEffort } from "./ui/effort.ts";
 import { FooterComponent, StripComponent } from "./ui/footer.ts";
@@ -427,6 +428,18 @@ function createScreen(
 		},
 		interrupt: (clearEditor) => pressCtrlC(live, clearEditor),
 		slot: (name) => SLOTS[name],
+		promptColor: (kind) => {
+			const theme = live.ctx?.ui.theme;
+			if (theme === undefined) return (text) => text;
+			return (text) => theme.fg(kind === "bash" ? "bashMode" : "accent", text);
+		},
+		pastPrompts: () => {
+			try {
+				return pastPrompts(live.ctx?.sessionManager.getSessionDir() ?? "");
+			} catch {
+				return [];
+			}
+		},
 		frameStyle: () => frame.get(scope),
 		frameColor: () => {
 			const theme = live.ctx?.ui.theme;

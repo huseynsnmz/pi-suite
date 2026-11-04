@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- `Ctrl+R` searches what you've typed, here and in this folder's other recent sessions. It takes this key from Pi's Rename; `/name` still renames.
+- A `/command` or `!command` at the start of the prompt is colored.
+
 ## 0.3.7
 
 ### Added

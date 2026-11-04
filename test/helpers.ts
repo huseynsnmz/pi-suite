@@ -52,6 +52,8 @@ export function screen(
 		notice: () => undefined,
 		interrupt: () => {},
 		decorate: (line) => line,
+		promptColor: () => (text) => text,
+		pastPrompts: () => [],
 		skills: () => false,
 		cursor: () => "block",
 		revision: () => revision,

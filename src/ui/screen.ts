@@ -28,6 +28,10 @@ export interface Screen {
 	frameColor(): ((text: string) => string) | undefined;
 	cursor(): CursorStyle;
 	decorate(line: string): string;
+	/** The color of a `/command` or `!command` at the start of the prompt. */
+	promptColor(kind: "command" | "bash"): (text: string) => string;
+	/** What was typed in this folder's sessions, newest first. */
+	pastPrompts(): string[];
 	skills(): boolean;
 	/** Changes when another package reports something new. */
 	statusesKey(): string;

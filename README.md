@@ -17,7 +17,7 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.3.7
+   pi install npm:@huseynsnmz/pi-frame@0.4.0
    ```
 
 3. Restart Pi. The start card says `π-frame`.
@@ -40,6 +40,7 @@ Some pieces, such as rooms, boards, peers and the remote page, appear only with 
 | Key | What it does |
 |---|---|
 | `Ctrl+C` | Stops a run and says `Aborted`. With nothing running, it clears the editor and says to press it again within 2 seconds to exit |
+| `Ctrl+R` | Search what you've typed, here and in this folder's other sessions. `Ctrl+R` again goes further back, `Enter` sends, `Esc` cancels, any other key keeps the match to edit. It replaces Pi's Rename on this key; `/name` still renames |
 | `Alt+O` | Scroll through the session's tool output, one call at a time |
 | `Ctrl+O` | Expand every call in the transcript |
 | `Ctrl+S` | Settings: icons, editor frame style, framed messages. With the editor frame off, use `/harness` |
