@@ -67,3 +67,21 @@ test("short of room, the clock and total stay longest", () => {
 test("a call with no record shows only its time", () => {
 	expect(line(undefined)).toBe(CLOCK);
 });
+
+{
+	const timing = { at: 1, streaming: false, waitMs: 5, waitingMs: 0, serverMs: undefined, thoughtMs: undefined, totalMs: 900, writingMs: 800, stallMs: 0, output: 10, estimated: false };
+	const message = { timestamp: 1, stopReason: "stop", model: "m" };
+
+	test("a finished call's line follows what it depends on, though it isn't rebuilt each time", () => {
+		const wide = timingLine(timing, message, 80);
+		expect(timingLine(timing, message, 80)).toBe(wide);
+		expect(timingLine({ ...timing, totalMs: 1900 }, message, 80)).toContain("1.900s");
+		expect(timingLine(timing, message, 12).length).toBeLessThan(wide.length);
+	});
+
+	test("a call still being written is never held", () => {
+		const live = { ...timing, streaming: true, writingMs: 100 };
+		const first = timingLine(live, message, 80);
+		expect(timingLine({ ...live, writingMs: 200 }, message, 80)).not.toBe(first);
+	});
+}

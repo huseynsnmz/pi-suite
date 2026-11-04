@@ -70,12 +70,30 @@ function modelPart(message: AnsweredMessage): Part[] {
 	return name ? [[name, 1]] : [];
 }
 
+interface Settled {
+	key: string;
+	line: string;
+}
+
+/** A finished call's line can't change, and every one of them is asked for on every redraw. */
+const settled = new WeakMap<AnsweredMessage, Settled>();
+
 /** What's known of a call to the model, as much of it as fits. */
 export function timingLine(
 	timing: Timing | undefined,
 	message: AnsweredMessage,
 	width: number,
 ): string {
+	if (timing?.streaming === true) return buildLine(timing, message, width);
+	const key = `${width}|${timing?.at}|${timing?.totalMs}|${timing?.output}|${message.stopReason}|${message.model}`;
+	const known = settled.get(message);
+	if (known?.key === key) return known.line;
+	const line = buildLine(timing, message, width);
+	settled.set(message, { key, line });
+	return line;
+}
+
+function buildLine(timing: Timing | undefined, message: AnsweredMessage, width: number): string {
 	const [clock, ...rest] = partsOf(timing, message) as [Part, ...Part[]];
 	let parts: Part[] = [clock, ...modelPart(message), ...rest];
 	const text = () => parts.map(([part]) => part).join("  ");

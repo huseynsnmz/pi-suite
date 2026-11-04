@@ -17,7 +17,7 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.4.0
+   pi install npm:@huseynsnmz/pi-frame@0.4.1
    ```
 
 3. Restart Pi. The start card says `π-frame`.

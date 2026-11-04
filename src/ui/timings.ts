@@ -10,6 +10,20 @@ const PAD = 1;
 let source: TimingSource = () => undefined;
 let installed = false;
 
+interface Drawn {
+	source: readonly string[];
+	line: string;
+	width: number;
+	lines: string[];
+}
+
+/** Every message in the session draws again on each keypress, so a long one must not redo this work. */
+const drawnBefore = new WeakMap<object, Drawn>();
+
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+	return a === b || (a.length === b.length && a.every((line, index) => line === b[index]));
+}
+
 /**
  * Pi has no hook for what follows a response, so this adds a line to its drawing. It asks on each
  * drawing, so the line keeps up while the response is written. Calling again changes the source.
@@ -25,6 +39,10 @@ export function showTimings(next: TimingSource): void {
 		const message = (this as unknown as { lastMessage?: AnsweredMessage }).lastMessage;
 		const line = message === undefined ? undefined : source(message, Math.max(1, width - PAD));
 		if (line === undefined) return lines;
-		return [...lines, truncateToWidth(`${" ".repeat(PAD)}${line}`, width)];
+		const known = drawnBefore.get(this);
+		if (known?.line === line && known.width === width && sameLines(known.source, lines)) return known.lines;
+		const drawn = [...lines, truncateToWidth(`${" ".repeat(PAD)}${line}`, width)];
+		drawnBefore.set(this, { source: lines, line, width, lines: drawn });
+		return drawn;
 	};
 }

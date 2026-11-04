@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+### Changed
+
+- Long sessions draw faster. Each response's timing line was built again on every redraw, which took over half the drawing time when typing or scrolling.
+
 ## 0.4.0
 
 ### Added
