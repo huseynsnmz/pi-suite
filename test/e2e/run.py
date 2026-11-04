@@ -434,6 +434,13 @@ try:
         check("left twice with text only moves the cursor", "π-board" not in term.plain()[before:])
         term.send("\x7f" * 5)
         term.pump(0.4)
+        for switch in ("/new", "/reload", "/resume", "/new", "/resume"):
+            term.send(switch + "\r")
+            term.pump(3)
+            if switch == "/resume":
+                term.send("\r")
+                term.pump(3)
+            check(f"pi survives {switch} with the board", "stale after session" not in term.plain() and os.waitpid(term.pid, os.WNOHANG)[0] == 0)
 finally:
     term.close()
     model.terminate()
