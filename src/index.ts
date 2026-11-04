@@ -5,6 +5,7 @@
  * launch background workers and the detached runner, and keeps a small footer status with
  * the count of sessions needing attention.
  */
+import { chmodSync, mkdirSync } from "node:fs";
 import "./core/load-config.mjs";
 import { fileURLToPath } from "node:url";
 import { createConnection } from "node:net";
@@ -40,11 +41,22 @@ let hostedFrameWitness: { stop(): void } | null = null;
 // candidates). No other topology is used here.
 let hostedSessionEpoch = 0;
 
+/** Transcripts and screen logs live under here, and can hold whatever a session printed. */
+function keepRootPrivate(root: string): void {
+	try {
+		mkdirSync(root, { recursive: true, mode: 0o700 });
+		chmodSync(root, 0o700);
+	} catch {
+		/* The board still works, as it did before it had this. */
+	}
+}
+
 export default function piAgentBoard(pi: ExtensionAPI): void {
 	announceBoardClosedOn(pi.events);
 	let stopDoubleLeft: (() => void) | null = null;
 	let stopWaiting: (() => void) | null = null;
 	const root = defaultRoot();
+	keepRootPrivate(root);
 	const { piCommand, piArgsPrefix } = resolvePiInvocation();
 
 	const isHostedChild = process.env.AGENT_BOARD_CHILD === "1" || process.env.AGENT_VIEW_CHILD === "1";

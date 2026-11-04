@@ -24,11 +24,11 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-board@0.17.0
+   pi install npm:@huseynsnmz/pi-board@0.18.0
    ```
 
 2. Restart Pi, and press `Left` twice on an empty prompt, or run `/agent-board`.
-3. Type a task and press `Enter`. It starts right away in this folder, with this session's model.
+3. Type a task and press `Enter`. It starts right away in the selected session's folder, shown on the input's title, with this session's model. With no sessions, that's this folder.
 
 Your current session becomes a row too, even with no messages yet. `Esc`, or `Enter` on its row, brings you back to it.
 

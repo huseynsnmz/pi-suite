@@ -446,6 +446,7 @@ function legacyMain(config) {
 			hostRows: () => host.rows,
 			applyResize,
 			currentDims: () => ({ cols: terminalModel.cols, rows: terminalModel.rows }),
+			frameRevision: () => (frameReporter === null ? null : { geometryRevision: frameReporter.geometryRevision, intentId: frameReporter.requestSeq }),
 			applyInterrupt: () => {
 				if (child) child.write("\x1b");
 			},
@@ -1216,6 +1217,7 @@ async function ownedMain(config) {
 			hostRows: () => host.rows,
 			applyResize,
 			currentDims: () => ({ cols: terminalModel.cols, rows: terminalModel.rows }),
+			frameRevision: () => (frameReporter === null ? null : { geometryRevision: frameReporter.geometryRevision, intentId: frameReporter.requestSeq }),
 			applyInterrupt: () => {
 				if (child) child.write("\x1b");
 			},
@@ -2016,6 +2018,7 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 					return;
 				}
 				pendingResizeSockets.set(msg.commandId, socket);
+				const dimsBefore = actions.currentDims();
 				actions.applyResize(cols, rows);
 				// The paired resize step keeps the model mirroring the REAL PTY
 				// (reflow only on successful child.resize), so the model's dims are
@@ -2023,7 +2026,16 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 				const dims = actions.currentDims();
 				resizes.applied(msg.commandId, dims.cols, dims.rows);
 				pendingResizeSockets.delete(msg.commandId);
-				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied", cols: dims.cols, rows: dims.rows });
+				// A client numbers its resizes from zero at each attach, so it matches frame proofs against these.
+				const revision = actions.frameRevision?.() ?? null;
+				reply(socket, {
+					type: "cmd_ack",
+					commandId: msg.commandId,
+					stage: "applied",
+					cols: dims.cols,
+					rows: dims.rows,
+					...(revision === null ? {} : { ...revision, resized: dims.cols !== dimsBefore.cols || dims.rows !== dimsBefore.rows }),
+				});
 				return;
 			}
 			case "interrupt": {

@@ -1,6 +1,16 @@
 const HTTP_URL_RE = /https?:\/\/[^\s<>"'`]+/g;
 const WORD_CHAR_RE = /[A-Za-z0-9_]/;
 
+/**
+ * Whether a link in a session's output may be handed to the system's opener. The text comes from
+ * whatever the session printed, and `open` would just as well start an app from a `file:` or custom
+ * scheme link, or read a leading `-` as an option.
+ * @param {string} target
+ */
+export function isOpenableLink(target) {
+	return /^https?:\/\/[^\s]/i.test(target);
+}
+
 export function trimTrailingUrlPunctuation(value) {
 	let url = value;
 	while (url.length > 0) {

@@ -808,14 +808,19 @@ export class DashboardComponent implements Component {
 		}
 	}
 
-	/** In this folder, with this session's model. Ctrl+N is there for anything else. */
+	/** The selected session's folder, or this one with nothing selected or if that folder is gone. */
+	private newTaskCwd(): string {
+		return resolveDirectoryValue(this.selectedRow()?.meta.cwd ?? "", this.deps.defaultCwd) ?? this.deps.defaultCwd;
+	}
+
+	/** In the folder on the input's title, with this session's model. Ctrl+N is there for anything else. */
 	private startNow(attach = false): void {
 		const text = this.input.trim();
 		if (runsInPi(text, this.deps.commands ?? [])) {
 			this.setInput("");
 			return this.done({ action: "command", text });
 		}
-		const cwd = this.deps.defaultCwd;
+		const cwd = this.newTaskCwd();
 		const { model, thinking } = this.buildLaunchState(cwd, this.deps.currentModel, this.deps.currentThinkingLevel);
 		this.submitDispatch({ cwd, model: model ? canonicalModelRef(model) : null, thinkingLevel: thinking, attach });
 	}
@@ -836,7 +841,7 @@ export class DashboardComponent implements Component {
 
 	private launchDefaults(): { cwd: string; model: LaunchModel | null; thinking: ThinkingLevel } {
 		const saved = this.lastLaunchPrefs;
-		const cwd = resolveDirectoryValue(saved?.cwd ?? "", this.deps.defaultCwd) ?? this.deps.defaultCwd;
+		const cwd = this.selectedRow() ? this.newTaskCwd() : (resolveDirectoryValue(saved?.cwd ?? "", this.deps.defaultCwd) ?? this.deps.defaultCwd);
 		const model = saved?.model ? findLaunchModelByRef(this.deps.availableModels, saved.model) ?? this.deps.currentModel : this.deps.currentModel;
 		const thinking = saved?.thinkingLevel ?? this.deps.currentThinkingLevel;
 		return { cwd, model, thinking };
@@ -925,7 +930,8 @@ export class DashboardComponent implements Component {
 		if (!this.launch) return;
 		const next = this.buildLaunchState(cwd, this.launch.model, this.launch.thinking);
 		next.action = this.launch.action;
-		next.fieldIndex = 1;
+		// Back on the top row, where Enter starts the session. On this one it opens the picker again.
+		next.fieldIndex = 0;
 		next.cwdQuery = cwd;
 		next.cwdSuggestions = listDirectorySuggestions(cwd, cwd);
 		this.launch = next;
@@ -1438,7 +1444,8 @@ export class DashboardComponent implements Component {
 		if (this.mode === "confirm" && this.pending) {
 			return renderFrame(t, "warning", width, { title: t.fg("warning", "confirm"), hints: "" }, [t.fg("warning", this.pending.prompt)]);
 		}
-		let title = t.fg("muted", "new session");
+		// Enter starts it right there, so the folder has to be in view first.
+		let title = t.fg("muted", `new session in ${truncate(displayPath(this.newTaskCwd()), Math.max(10, inner - 20))}`);
 		let hints = this.listHints();
 		let body: string[];
 		if (this.mode === "filter" || this.mode === "rename") {

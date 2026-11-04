@@ -7,7 +7,8 @@ import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme,
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
 import { createDoublePress, QUIT_PRESS_MS } from "../core/double-press.mjs";
-import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
+import { isOpenableLink, findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
+import { holdInputListeners } from "../core/hold-input.mjs";
 import { canPublishAttachView, createAttachOutputRenderScheduler, decideAttachPresentation, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
@@ -67,6 +68,11 @@ const LOADING_TICK_MS = 120;
 const ATTACH_SETTLE_MS = 250;
 /** Hard cap on the attach transition so a silent session can't stall the banner. */
 const ATTACH_HARD_TIMEOUT_MS = 2500;
+/** A session can redraw for a resize without proving it, and then idles, so nothing would ever
+ * finish the attach. It's resized away and back to draw again, a few times at most. */
+const GEOMETRY_NUDGE_LIMIT = 3;
+const GEOMETRY_NUDGE_SETTLE_MS = 100;
+const GEOMETRY_NUDGE_WAIT_MS = 1000;
 /** Protocol-race guard for legacy jiggle arming (issue #91 phase 4): the
  * undecided window must not pulse the child before the snapshot probe
  * resolves — a resize-free attach is the protocol-mode contract. Invisible
@@ -97,6 +103,9 @@ const REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS = 500;
  * (not the whole file) so multi-MB logs don't block startup; ~60KB covers the last
  * handful of screens, which is all a fresh attach needs. */
 const ATTACH_REPLAY_BYTES = 60_000;
+/** A frame the session draws this soon after a key or wheel event is the answer to it, so it paints
+ * as soon as it's whole rather than waiting out the output throttle. */
+const INTERACTIVE_RENDER_WINDOW_MS = 250;
 const OSC52_PREFIX = "\x1b]52;";
 const OSC52_MAX_BYTES = 1_000_000;
 const OSC52_CARRY_MAX_BYTES = OSC52_MAX_BYTES + 4096;
@@ -357,6 +366,12 @@ export class PtyAttachComponent implements Component {
 	private resizeIntentRequired = false;
 	private resizeIntentSatisfied = false;
 	private resizeIntentId = 0;
+	// What the runner calls this resize. Its count spans every attach to the session and ours starts
+	// again at each attach, so a frame's proof can only be matched against the runner's own numbers.
+	private geometryNudges = 0;
+	private proofGeometryRevision = 0;
+	private lastProofMetadata: { geometryRevision?: unknown; intentId?: unknown } | undefined;
+	private proofIntentId = 0;
 	private pendingEarlySyncTarget: string | null = null;
 	/** Protocol transition facts; timers may mark expiry but never publish. */
 	private deadlineState: "pending" | "expired" = "pending";
@@ -445,6 +460,8 @@ export class PtyAttachComponent implements Component {
 	// terminal reports one stable IME cursor rect per frame instead of two (issue #28).
 	// Never active when AGENT_BOARD_IME_FIX=0; no-op passthrough if pi-tui changes shape.
 	private readonly imeCoalesceUninstall: (() => void) | null;
+	private readonly releaseInput: () => void;
+	private lastUserInputAt = Number.NEGATIVE_INFINITY;
 
 	constructor(
 		private readonly tui: TUI,
@@ -459,6 +476,7 @@ export class PtyAttachComponent implements Component {
 		// Assigned in the body (not as a field initializer) so it runs after the `tui`
 		// parameter property is set regardless of the TS loader's field-init semantics.
 		this.imeCoalesceUninstall = installImeCursorCoalesce(this.tui);
+		this.releaseInput = holdInputListeners(this.tui);
 		this.term = new Terminal({ cols: this.cols, rows: this.rows, scrollback: 2000, allowProposedApi: true });
 		this.parserObservers = this.installParserObservers(this.term, this.parserEpoch);
 		this.parserObservationSupported = this.parserObservers.length > 0;
@@ -527,6 +545,7 @@ export class PtyAttachComponent implements Component {
 	 * by `handleInput` without touching the selection or the viewport, because it carries no user
 	 * intent (focus events, query replies). */
 	private handleKeyInput(data: string): void {
+		this.lastUserInputAt = this.nowFn();
 		// Issue #147: in-place delete gesture. The resolver is pure and never
 		// reads connection state, so the gesture works even while the host is
 		// down. cancel falls through so input is never swallowed.
@@ -1072,14 +1091,19 @@ export class PtyAttachComponent implements Component {
 			this.finishAttachTransition();
 			return;
 		}
+		if (this.attachMode === "protocol" && this.resizeIntentRequired && this.connected && this.geometryNudges < GEOMETRY_NUDGE_LIMIT) {
+			this.nudgeGeometry(waitToken);
+			return;
+		}
 		this.deadlineState = "expired";
 		this.notReadyReason = this.attachMode === "protocol" ? "deadline-expired:waiting-for-complete-frame" : "deadline-expired:mode-undecided";
 		this.publishabilityState = "unknown";
 		const proof = this.latestViewProof as { status?: string } | null;
+		const nudgedInVain = this.resizeIntentRequired && this.geometryNudges >= GEOMETRY_NUDGE_LIMIT;
 		if (
 			this.committedView !== null &&
-			!this.resizeIntentRequired &&
-			(proof === null || proof.status !== "covered")
+			(!this.resizeIntentRequired || nudgedInVain) &&
+			(proof === null || proof.status !== "covered" || nudgedInVain)
 		) {
 			this.finishAttachTransition();
 			return;
@@ -1333,10 +1357,10 @@ export class PtyAttachComponent implements Component {
 			targetCols: this.cols,
 			targetRows: this.rows,
 			geometryRevision: this.geometryRevision,
-			requiredGeometryRevision: this.resizeIntentRequired ? this.geometryRevision : undefined,
+			requiredGeometryRevision: this.resizeIntentRequired ? this.proofGeometryRevision : undefined,
 			resizeIntentRequired: this.resizeIntentRequired,
 			resizeIntentSatisfied: this.resizeIntentSatisfied,
-			intentId: this.resizeIntentId,
+			intentId: this.proofIntentId,
 			deadlineState: this.deadlineState,
 		});
 		this.notReadyReason = decision.action === "wait" ? decision.reason : null;
@@ -1709,6 +1733,7 @@ export class PtyAttachComponent implements Component {
 				if (wheel === 0) continue;
 				this.clearPendingClick();
 				this.clearSelection();
+				this.lastUserInputAt = this.nowFn();
 				if (!this.tryScrollBy(wheel * this.mouseWheelLines)) this.send({ type: "input", data: raw });
 				continue;
 			}
@@ -2085,6 +2110,8 @@ export class PtyAttachComponent implements Component {
 		}
 		this.geometryRevision += 1;
 		this.resizeIntentId = this.geometryRevision;
+		this.proofGeometryRevision = this.geometryRevision;
+		this.proofIntentId = this.resizeIntentId;
 		this.resizeIntentRequired = true;
 		this.resizeIntentSatisfied = false;
 		this.committedView = null;
@@ -2117,6 +2144,7 @@ export class PtyAttachComponent implements Component {
 	 * body starts at local row 1 (header row 0, footer last row), and SGR is
 	 * one-based. */
 	private forwardWheelToChild(linesUp: number, event: TuiMouseEvent): void {
+		this.lastUserInputAt = this.nowFn();
 		this.send({
 			type: "input",
 			data: encodeWheelReport(linesUp > 0 ? "up" : "down", {
@@ -2503,11 +2531,15 @@ export class PtyAttachComponent implements Component {
 				const record = payload as Record<string, unknown>;
 				this.noteViewProofRecord(record);
 				if (record.marker === "F") {
-					const metadata = record.metadata as { geometryRevision?: unknown; intentId?: unknown } | undefined;
-					this.resizeIntentSatisfied = !this.resizeIntentRequired || (metadata?.geometryRevision === this.geometryRevision && metadata?.intentId === this.resizeIntentId);
+					this.lastProofMetadata = record.metadata as { geometryRevision?: unknown; intentId?: unknown } | undefined;
+					this.resizeIntentSatisfied = this.proofMeetsResizeIntent();
 				}
 				this.evaluateAttachReady();
 			}
+			return;
+		}
+		if (event === "cmdAck") {
+			this.noteResizeAck(payload);
 			return;
 		}
 		if (event === "epochReset") {
@@ -2528,6 +2560,40 @@ export class PtyAttachComponent implements Component {
 		// surface (hydrate, mode switching, size-sync) is unchanged. host_starting
 		// resize retries are also client-internal (parity with the legacy runner-
 		// side cachedResize).
+	}
+
+	private nudgeGeometry(waitToken: number): void {
+		this.geometryNudges += 1;
+		const { cols, rows } = this;
+		this.sendResize(cols, Math.max(5, rows - 1));
+		const back = setTimeout(() => {
+			if (!this.closed && this.cols === cols && this.rows === rows) this.sendResize(cols, rows);
+		}, GEOMETRY_NUDGE_SETTLE_MS);
+		back.unref?.();
+		this.attachHardTimeout = setTimeout(() => this.handleAttachHardTimeout(waitToken), GEOMETRY_NUDGE_WAIT_MS);
+	}
+
+	private proofMeetsResizeIntent(): boolean {
+		if (!this.resizeIntentRequired) return true;
+		const metadata = this.lastProofMetadata;
+		return metadata?.geometryRevision === this.proofGeometryRevision && metadata?.intentId === this.proofIntentId;
+	}
+
+	/** Learns the runner's numbers for the resize we're waiting on. Runners from before it sent them
+	 * outlive an upgrade, and keep being compared with ours. */
+	private noteResizeAck(ack: { type?: string; stage?: string; cols?: number; rows?: number; resized?: boolean; geometryRevision?: unknown; intentId?: unknown }): void {
+		if (ack?.type !== "resize" || ack.stage !== "applied") return;
+		if (ack.cols !== this.cols || ack.rows !== this.rows) return; // A newer resize owns the gate.
+		if (typeof ack.geometryRevision !== "number" || typeof ack.intentId !== "number") return;
+		if (ack.resized === false) {
+			// Already that size, so the session won't draw a frame for it.
+			this.resizeIntentRequired = false;
+		} else {
+			this.proofGeometryRevision = ack.geometryRevision;
+			this.proofIntentId = ack.intentId;
+		}
+		this.resizeIntentSatisfied = this.proofMeetsResizeIntent();
+		this.evaluateAttachReady();
 	}
 
 	private forwardTerminalProtocols(data: string): void {
@@ -2653,7 +2719,12 @@ export class PtyAttachComponent implements Component {
 			}
 			this.receivedOutput = true;
 				this.deferAttachSettle();
-				this.outputRenderScheduler.request();
+				if (this.parserWritesInFlight === 0 && !this.parserSyncOpen && this.nowFn() - this.lastUserInputAt < INTERACTIVE_RENDER_WINDOW_MS) {
+					this.outputRenderScheduler.cancel();
+					this.scheduleRender();
+				} else {
+					this.outputRenderScheduler.request();
+				}
 				this.evaluateAttachReady();
 			});
 		} catch {
@@ -2709,6 +2780,7 @@ export class PtyAttachComponent implements Component {
 		this.recoveryGeneration = null;
 		this.disposeCurrentParser();
 		this.imeCoalesceUninstall?.();
+		this.releaseInput();
 		this.detachColorSchemeBridge();
 		this.clearReplyGuardTimer();
 		this.replyGuard?.reset();
@@ -2781,7 +2853,7 @@ function asciiCellsForBufferLine(line: BufferLineLike, reusable: BufferCellLike)
 
 function openExternalTarget(target: string): boolean {
 	const sanitized = sanitizeOscPayload(target).trim();
-	if (!sanitized) return false;
+	if (!isOpenableLink(sanitized)) return false;
 	// Opening the target is best-effort: an async spawn failure (e.g. xdg-open
 	// missing on a minimal server) must be swallowed, not crash the host (issue #86).
 	try {
@@ -2908,25 +2980,24 @@ function lineToAnsi(
 }
 
 function attrKey(cell: BufferCellLike, selected = false, isCursor = false): string {
-	return [
-		selected ? 1 : 0,
-		isCursor ? 1 : 0,
-		cell.isBold(),
-		cell.isDim(),
-		cell.isItalic(),
-		cell.isUnderline(),
-		cell.isBlink(),
-		cell.isInverse(),
-		cell.isInvisible(),
-		cell.isStrikethrough(),
-		cell.isOverline(),
-		cell.isFgRGB(),
-		cell.isFgPalette(),
-		cell.getFgColor(),
-		cell.isBgRGB(),
-		cell.isBgPalette(),
-		cell.getBgColor(),
-	].join(";");
+	// Runs for every cell of every frame, so no array to build and join.
+	const flags =
+		(selected ? 1 : 0) |
+		(isCursor ? 2 : 0) |
+		(cell.isBold() ? 4 : 0) |
+		(cell.isDim() ? 8 : 0) |
+		(cell.isItalic() ? 16 : 0) |
+		(cell.isUnderline() ? 32 : 0) |
+		(cell.isBlink() ? 64 : 0) |
+		(cell.isInverse() ? 128 : 0) |
+		(cell.isInvisible() ? 256 : 0) |
+		(cell.isStrikethrough() ? 512 : 0) |
+		(cell.isOverline() ? 1024 : 0) |
+		(cell.isFgRGB() ? 2048 : 0) |
+		(cell.isFgPalette() ? 4096 : 0) |
+		(cell.isBgRGB() ? 8192 : 0) |
+		(cell.isBgPalette() ? 16384 : 0);
+	return `${flags};${cell.getFgColor()};${cell.getBgColor()}`;
 }
 
 function attrsToAnsi(cell: BufferCellLike, selected = false, isCursor = false): string {
@@ -3047,7 +3118,9 @@ function extractTerminalPassthroughSequences(input: string): { sequences: string
 		}
 		const [endIndex, terminatorLength] = end;
 		const seq = input.slice(start, endIndex + terminatorLength);
-		if (seq.length <= TERMINAL_PASSTHROUGH_MAX_BYTES) sequences.push(seq);
+		// Without inline=1, iTerm2 takes this as a file download rather than an image.
+		const isInlineImage = prefix !== ITERM2_FILE_PREFIX || /^[^:]*\binline=1\b/.test(seq.slice(prefix.length));
+		if (seq.length <= TERMINAL_PASSTHROUGH_MAX_BYTES && isInlineImage) sequences.push(seq);
 		scanFrom = endIndex + terminatorLength;
 	}
 	const carry = carryStart >= 0 ? input.slice(carryStart).slice(-TERMINAL_PASSTHROUGH_CARRY_MAX_BYTES) : terminalPassthroughPrefixSuffix(input);

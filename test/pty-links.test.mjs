@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findHttpUrlAtCells, findHttpUrlRangeAtCells, findWordRangeAtCells, trimTrailingUrlPunctuation } from "../src/core/pty-links.mjs";
+import { isOpenableLink, findHttpUrlAtCells, findHttpUrlRangeAtCells, findWordRangeAtCells, trimTrailingUrlPunctuation } from "../src/core/pty-links.mjs";
 
 test("trimTrailingUrlPunctuation removes unmatched wrappers and punctuation", () => {
 	assert.equal(trimTrailingUrlPunctuation("https://example.com."), "https://example.com");
@@ -37,3 +37,14 @@ test("findWordRangeAtCells selects word and prefers full url", () => {
 		kind: "url",
 	});
 });
+
+for (const [name, target, want] of [
+	["opens a web link", "https://example.com/a?b=1", true],
+	["opens a plain http link", "http://localhost:3000", true],
+	["refuses a file link, which could start an app", "file:///Applications/Calculator.app", false],
+	["refuses a custom scheme", "x-man-page://ls", false],
+	["refuses what open would read as an option", "-a Calculator", false],
+	["refuses a scheme with nothing after it", "https://", false],
+]) {
+	test(`isOpenableLink ${name}`, () => assert.equal(isOpenableLink(target), want));
+}

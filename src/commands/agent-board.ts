@@ -3,6 +3,7 @@
  * agent-board PTY hosts for fast switching. `ctx.switchSession` is only a no-PTY fallback.
  * Also wires dispatch+attach and stale-row recovery on open.
  */
+import { holdInputListeners } from "../core/hold-input.mjs";
 import { restoreChrome } from "../ui/chrome.ts";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -102,7 +103,9 @@ export async function openDashboard(
 			(tui, theme, keybindings, done) => {
 				board = tui;
 				let interval: ReturnType<typeof setInterval> | null = null;
+				const releaseInput = holdInputListeners(tui);
 				const wrappedDone = (result: DashboardResult) => {
+					releaseInput();
 					if (interval) clearInterval(interval);
 					interval = null;
 					done(result);
@@ -130,6 +133,7 @@ export async function openDashboard(
 				const origDispose = comp.dispose.bind(comp);
 				withDispose.dispose = () => {
 					origDispose();
+					releaseInput();
 					if (interval) clearInterval(interval);
 					interval = null;
 				};

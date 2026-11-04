@@ -1,6 +1,6 @@
 // Drives the board's keys through handleInput() and reports what they did, as JSON.
 // Run via `node --experimental-transform-types`. Not typechecked.
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createService } from "../src/runtime/service.mjs";
@@ -222,6 +222,26 @@ const out = {};
 	press(dash, "draft", "\x07");
 	await new Promise((r) => setTimeout(r, 700));
 	out.editor = { input: dash.input, mode: dash.mode, stops };
+	dash.dispose();
+}
+{
+	// A new task goes where the selected row is, and says so first.
+	const elsewhere = join(root, "elsewhere");
+	mkdirSync(elsewhere);
+	createView(root, { id: "v9", name: "there", cwd: elsewhere });
+	dispatched.length = 0;
+	const dash = make({ initialSelectedId: "v9" });
+	const title = dash.render(80).some((line) => line.includes("new session in") && line.includes("elsewhere"));
+	press(dash, "go", "\r");
+	await new Promise((r) => setTimeout(r, 20));
+	dash.selectedId = "v9"; // The fake dispatch selects v1.
+	press(dash, "more", "\x0e");
+	const dialog = dash.launch?.cwd;
+	press(dash, "\x1b", "\x1b");
+	rmSync(elsewhere, { recursive: true });
+	press(dash, "go", "\r");
+	await new Promise((r) => setTimeout(r, 20));
+	out.folder = { title, dialog, elsewhere, root, cwds: dispatched.map((d) => d.cwd) };
 	dash.dispose();
 }
 console.log(JSON.stringify(out));

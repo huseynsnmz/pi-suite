@@ -24,6 +24,12 @@ test("enter starts the task with no dialog", () => {
 	assert.equal(out.started.dispatched[0].text, "go");
 });
 
+test("a new task starts in the selected row's folder, shown first, or here if it's gone", () => {
+	assert.equal(out.folder.title, true);
+	assert.equal(out.folder.dialog, out.folder.elsewhere);
+	assert.deepEqual(out.folder.cwds, [out.folder.elsewhere, out.folder.root]);
+});
+
 test("rows move with the arrows and page keys", () => {
 	assert.deepEqual(out.moves, [1, 0, 2, 0, 2, 0]);
 });

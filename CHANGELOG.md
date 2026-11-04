@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.18.0] - 2026-11-04
+
+### Features
+
+- **board**: a new task starts in the selected session's folder, and the input's title shows which
+
+### Fixes
+
+- **attach**: reattaching at a new window size, or resizing during an attach, no longer sticks on "waiting for the session to render"
+- **attach**: a session that redraws for a resize without proving it finished gets resized away and back, so the attach can't hang
+- **keys**: the board and attached sessions get every key. Shift+Tab reached the Pi behind them, where `pi-modes` changed its permission mode
+- **launch**: after choosing a folder, Enter starts the session rather than opening the picker again
+- **security**: only `http` and `https` links open on click, since `open` also starts apps from other schemes
+- **security**: session output can no longer start an iTerm2 file download, only show an inline image
+- **security**: the board's folder is private to you, as it holds transcripts and screen logs
+
+### Performance
+
+- **attach**: frames that answer a key or the wheel paint as soon as they're whole. A wheel notch took 58 ms in testing, and now takes 17 ms
+
 ## [0.17.0] - 2026-11-04
 
 ### Features

@@ -631,7 +631,7 @@ export function createTerminalAttachClient({
 						emit("protocolError", { code: "ack_invalid", message: verdict.reason, commandId: msg.commandId });
 					}
 				}
-				emit("cmdAck", { commandId: msg.commandId, type: pending?.type, stage: msg.stage, cols: msg.cols, rows: msg.rows, byCommandId: msg.byCommandId, value: msg.value, exitConfirmed: msg.exitConfirmed, runnerFinalizing: msg.runnerFinalizing });
+				emit("cmdAck", { commandId: msg.commandId, type: pending?.type, stage: msg.stage, cols: msg.cols, rows: msg.rows, ...(msg.geometryRevision === undefined ? {} : { resized: msg.resized, geometryRevision: msg.geometryRevision, intentId: msg.intentId }), byCommandId: msg.byCommandId, value: msg.value, exitConfirmed: msg.exitConfirmed, runnerFinalizing: msg.runnerFinalizing });
 				return true;
 			}
 			case "reconcile_result": {

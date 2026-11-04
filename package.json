@@ -1,6 +1,6 @@
 {
   "name": "@huseynsnmz/pi-board",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "A board for Pi's background sessions: start, watch, reply to and attach to them. A fork of @zhuxixi/pi-agent-board.",
   "type": "module",
   "main": "./index.ts",
