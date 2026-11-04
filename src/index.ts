@@ -3,7 +3,7 @@
  *
  * Registers the `/agent-board` dashboard command, resolves how to
  * launch background workers and the detached runner, and keeps a small footer status with
- * the count of sessions needing attention. See docs/EXPLORATION.md for the design.
+ * the count of sessions needing attention.
  */
 import "./core/load-config.mjs";
 import { fileURLToPath } from "node:url";

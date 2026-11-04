@@ -90,3 +90,7 @@ test("ctrl+g edits the task in the external editor", () => {
 	assert.equal(out.editor.mode, "dispatch");
 	assert.deepEqual(out.editor.stops, ["stop", "start"]);
 });
+
+test("a reply during a dialog waits in the queue, so it can't answer the dialog", () => {
+	assert.deepEqual(out.replyDuringDialog, { queuedDuringDialog: true, pendingWhileWaiting: 1, pendingAfter: 0 });
+});

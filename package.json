@@ -1,22 +1,19 @@
 {
   "name": "@huseynsnmz/pi-board",
-  "version": "0.15.3",
+  "version": "0.16.0",
   "description": "A board for Pi's background sessions: start, watch, reply to and attach to them. A fork of @zhuxixi/pi-agent-board.",
   "type": "module",
   "main": "./index.ts",
   "exports": "./index.ts",
   "files": [
     "CHANGELOG.md",
-    "IMPLEMENTATION_PLAN.md",
+    "CONTRIBUTING.md",
     "LICENSE",
-    "PRD.md",
-    "PROGRESS.md",
     "README.md",
-    "VERIFY.md",
+    "SECURITY.md",
     "docs",
     "index.ts",
     "runner",
-    "scripts",
     "src"
   ],
   "keywords": [
@@ -46,9 +43,7 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ],
-    "video": "https://github.com/zhuxixi/pi-agent-board/raw/refs/heads/main/assets/demo.mp4",
-    "image": "https://github.com/zhuxixi/pi-agent-board/raw/refs/heads/main/assets/banner.png"
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -56,8 +51,7 @@
     "test:coverage": "c8 node scripts/run-tests.mjs",
     "test:perf": "node scripts/run-perf-gate.mjs",
     "pack:dry": "npm pack --dry-run",
-    "verify": "npm run typecheck && npm run test:perf && npm test && npm run test:coverage && npm run pack:dry",
-    "changelog": "node scripts/release_helper.mjs"
+    "verify": "npm run typecheck && npm run test:perf && npm test && npm run test:coverage && npm run pack:dry"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

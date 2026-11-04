@@ -1,9 +1,18 @@
 # Changelog
 
-All notable changes to this project are documented here, generated from
-conventional commits by `scripts/release_helper.mjs`. Entries are
-forward-only: they begin with the first release after this file landed —
-for earlier history, see the git log and the pull-request list.
+## [0.16.0] - 2026-11-04
+
+### Features
+
+- **keys**: `Alt+1..9` counts the rows in the selected session's folder
+
+### Fixes
+
+- **replies**: a reply during a permission prompt now waits in the queue. Sent straight to the session, its Enter could approve the prompt (from 0.15.1)
+
+### Changes
+
+- **repo**: its own repository, with new docs and without the original's plans and release tooling
 
 ## [0.15.3] - 2026-11-04
 

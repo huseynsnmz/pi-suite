@@ -1,449 +1,83 @@
 # pi-board
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/huseynsnmz/pi-board/main/assets/banner.png" alt="Pi Agent Board" width="100%" />
-</p>
+A board for [Pi](https://pi.dev)'s background sessions: start a task and keep working, see which sessions need you, peek at them, reply, and attach when you want the whole conversation. The keys follow Claude Code's agent view.
 
-<p align="center">
-  <a href="https://github.com/huseynsnmz/pi-board/blob/main/assets/demo.mp4"><strong>30s demo</strong></a>
-  | <a href="https://pi.dev/packages?name=@huseynsnmz/pi-board">Pi package gallery</a>
-  | <a href="https://www.npmjs.com/package/@huseynsnmz/pi-board">npm</a>
-</p>
-
-pi-board is a full-screen TUI dashboard for [Pi](https://github.com/earendil-works/pi-mono) that manages durable background Pi sessions. Use one global board to dispatch work across projects, watch progress, triage summaries and evidence, reply without opening a transcript, and attach to a real interactive session when hands-on work is needed.
-
-It started as a fork of [`@zhuxixi/pi-agent-board`](https://github.com/zhuxixi/pi-agent-board) 0.13.1, so the design and most of the code are theirs, under the MIT license. The command is still `/agent-board`.
-
-## What It Does
-
-- Run several Pi tasks at once without losing track of their current state.
-- Keep each task as a real, resumable Pi session that survives `/reload`, closing Pi, or restarting the terminal.
-- Triage the latest output, blockers, evidence, and diagnostics before opening a full transcript.
-- Reply to a session without attaching; replies sent while a session is busy are preserved for later delivery.
-- Fall back to a JSON runner for eligible background work when live PTY support is unavailable.
-
-> **Write-safety note:** Worktree isolation is currently disabled. Multiple sessions in the same repository may run concurrently, so avoid overlapping writes or provide your own isolation.
-
-## Requirements
-
-- [Pi](https://github.com/earendil-works/pi-mono) installed and working.
-- Node.js 20 or newer.
-- Working Pi provider authentication for real model execution. Agent Board does not have a separate login or credential store.
-- PTY support from `node-pty` for live attach and **start & attach**. Background work can use a JSON-runner fallback when PTY support is unavailable.
-
-If rows remain in `Running`, first verify that Pi itself can complete a one-shot model call:
-
-```bash
-pi --mode json -p --no-session "Reply with exactly: DONE"
-```
-
-A healthy command emits an assistant `message_end`, then an `agent_end` event, and exits. See [VERIFY.md](VERIFY.md) for the complete no-auth, provider-auth, and PTY checks.
-
-## Install
-
-### Published package
-
-```bash
-pi install npm:@huseynsnmz/pi-board
-```
-
-Start Pi normally and run `/agent-board`, or use one of the startup entry points below.
-
-### Local checkout
-
-```bash
-npm install
-pi install "$(pwd)"
-```
-
-This installs the current checkout as a Pi package. Remove that path installation with:
-
-```bash
-pi remove "$(pwd)"
-```
-
-### Development auto-discovery
-
-To have Pi load the checkout directly while developing:
-
-```bash
-ln -s "$(pwd)" ~/.pi/agent/extensions/agent-board
-pi
-```
-
-Remove the symlink when you no longer want Pi to auto-load the checkout:
-
-```bash
-rm ~/.pi/agent/extensions/agent-board
-```
-
-## Quick Start
-
-Open the board with `/agent-board` inside Pi, or press `Left` twice on an empty prompt. That also puts the session you're in on the board, and `Esc` or `Enter` on its row brings you back. Then:
-
-1. Type a task.
-2. Press `Enter`. It starts right away in the current folder, with this session's model and thinking level.
-
-To choose the folder, model or thinking level first, press `Ctrl+N` while typing. With an empty input, `Enter` attaches/resumes the selected session. The row starts in `Queued`, then moves through `Running` to a terminal state such as `Needs answer`, `Needs instructions`, `Done`, `Failed`, or `Stopped`.
-
-From the board:
-
-- Press `Space` to peek at the selected session's summary, blocker, and latest output.
-- In Peek, type to reply without attaching.
-- Press `Ctrl+O` for a read-only transcript, or `Ctrl+E` for evidence and diagnostics.
-- Press `Enter`, `Left` or `Right` to attach to the real Pi session.
-- In PTY attach mode, press `Ctrl+Left` to return to the board at any time (even mid-draft), or `Ctrl+\` — the unconditional escape: it detaches regardless of editor state on any terminal that forwards the raw 0x1c byte (raw, kitty, and modifyOtherKeys keyboard modes all work). `Left` detaches only while the child Pi reports an empty editor; otherwise (draft, or unknown editor state) it is forwarded to the child. `Ctrl+]` is not a detach key — it is passed through to the child Pi editor. When the host is disconnected, `Left` always exits. `Ctrl+\` caveats: on keyboard layouts where `\` sits on AltGr (e.g. German) the chord may never produce the byte — use `Ctrl+Left` there; in legacy keyboard modes `Ctrl+4` emits the same byte and also detaches; and the key is captured from the child while attached, so the child's own `Ctrl+\` binding (e.g. the vim terminal-mode prefix) is unavailable. Automatic themes also resolve correctly in attach sessions: the child's background probe (OSC 11) and color-scheme change notifications are forwarded to your real terminal, replies flow back to the child when your terminal answers, and attach re-probes the background once when it settles so the theme is right from the first frame. Set `AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0` to disable this (default on); keyboard-protocol negotiation (kitty/DA) is not forwarded — it happens once at child spawn, before attach exists. `Ctrl+X` opens an in-place delete confirm: press `y` (or Enter) to archive the row and return to the board with the next row selected — any other key cancels and is passed through to the session. While attached, the child Pi's own `Ctrl+X` bindings (copy in `/tree` and fullscreen, clear-all in the models dialog) are captured by this gesture.
-
-## Dashboard Workflow
-
-The input is always ready:
-
-- With an empty input, keys drive the board. `/`, `!`, `?` and `Space` are shortcuts only here.
-- Once you've typed something, keys edit the task, and `/` is literal.
-
-When you press `Ctrl+N` while typing a task, the **Start session** dialog lets you review:
-
-- `cwd`: an existing-directory picker with usage-ranked favorites, filesystem browsing, and Tab completion;
-- `model`: models available to Pi, including models scoped by the current directory's Pi settings;
-- `thinking`: a level supported by the selected model;
-- `action`: **start in background** or **start & attach**.
-
-Launch preferences are persisted and reused for later sessions. **Start & attach** requires PTY support; if PTY is unavailable, Agent Board launches the session in the background and shows a warning instead.
-
-Session actions are deliberately confirmation-aware:
-
-- `Ctrl+D` confirms moving an inactive session to **Done**. Manual completion is the default.
-- `Ctrl+B` toggles the on-hold state (manual verdict — automated writers are fenced).
-- `Ctrl+X` stops a session, and a second press within 2 seconds deletes its row. Deleting removes the row from the board but preserves its underlying Pi session file.
-- `Ctrl+K` archives inactive rows in the selected state; live work is skipped.
-- `Ctrl+A` enters multi-select mode; see [Multi-select](#multi-select) for its keys.
-
-## Views and Actions
-
-Shortcuts are scoped to the view where they are available:
-
-### Main list
-
-Typing goes straight into the input, as in Claude Code's agent view, so there's no mode to enter first.
-
-| Key | Action |
-| --- | --- |
-| Any text | Start writing a task. |
-| `Enter` | Start the task, or attach to the selected session when the input is empty. |
-| `Ctrl+Enter` | Start the task and attach to it. |
-| `Shift+Enter` / `Ctrl+J` | New line in the task. |
-| `Ctrl+N` | While typing, choose the folder, model and thinking level first. |
-| `Left` / `Right` | Attach to the selected session. |
-| `Left` twice | From an empty Pi prompt, put this session on the board and open it. |
-| `Up` / `Down` | Move between rows. |
-| `PgUp` / `PgDn` | Move by a screenful. |
-| `Home` / `End` | First or last row. |
-| `Alt+Up` / `Alt+Down` | Previous or next group. |
-| `Alt+1`..`Alt+9` | Attach to that row. |
-| `Space` | Open or close Peek. |
-| `/` / `Ctrl+F` | Filter the list. |
-| `Ctrl+S` | Group by state or by directory. |
-| `Shift+Up` / `Shift+Down` | Move the row up or down its group. |
-| `Ctrl+G` | Write the task in `$VISUAL` or `$EDITOR`. |
-| `Ctrl+T` | Pin or unpin. |
-| `Ctrl+R` | Rename. |
-| `Ctrl+X` | Stop the session; press again within 2 seconds to delete it. |
-| `Ctrl+D` | Confirm marking an inactive session Done. |
-| `Ctrl+B` | Hold or unhold an inactive session. |
-| `Ctrl+A` | Select several rows. |
-| `Ctrl+O` | Read-only transcript. |
-| `Ctrl+E` | Evidence / Diagnostics. |
-| `Ctrl+K` | Delete inactive rows in the selected state. |
-| `!` | node-pty diagnostics and fix steps. |
-| `?` | Help. |
-| `Esc` | Clear a draft, or leave the board. |
-| `Ctrl+C` | Clear a draft; press twice to leave. |
-
-On macOS, the `Alt` keys need your terminal to send Option as Alt.
-
-### Multi-select
-
-Press `Ctrl+A` in the main list to act on several sessions at once.
-
-| Key | Action |
-| --- | --- |
-| `Up` / `Down` / `j` / `k` | Move the selection. |
-| `Space` | Toggle the current row. |
-| `a` | Select all visible rows. |
-| `u` | Clear the selection. |
-| `d` | Confirm marking the selected inactive rows Done. |
-| `Ctrl+X` | Delete the selected Done rows (confirmation prompt). |
-| `m` / `Esc` / `Ctrl+C` | Leave multi-select mode. |
-| `?` | Open the help overlay. |
-| `!` | Open node-pty diagnostics and fix steps. |
-
-### Peek
-
-Peek shows the selected session's summary, blocker or question, latest output, and available issue/PR references.
-
-| Key | Action |
-| --- | --- |
-| Any text | Start a reply, and press `Enter` to send it without attaching. |
-| `Left` / `Right` | Attach to the session. |
-| `Up` / `Down` | Move to the previous or next session. |
-| `Ctrl+O` | Open the read-only transcript. |
-| `Ctrl+E` | Open Evidence / Diagnostics. |
-| `Ctrl+D` | Confirm marking the inactive session Done. |
-| `Ctrl+B` | Hold or unhold the session. |
-| `!` | Open node-pty diagnostics and fix steps. |
-| `Space` / `Esc` | Return to the main list. |
-
-When a Pi question or questionnaire tool is pending, inline reply is rejected; attach to answer that interactive question in the real Pi session.
-
-### Transcript
-
-The `v` view is a read-only projection of the durable Pi session JSONL. It does not interrupt a running worker.
-
-| Key | Action |
-| --- | --- |
-| `Up` / `Down` / `j` / `k` | Scroll one line. |
-| `PageUp` / `PageDown` | Scroll one page. |
-| `Space` | Open Peek. |
-| `r` | Enter reply mode. |
-| `Enter` or `a` | Attach to the session. |
-| `e` | Open Evidence / Diagnostics. |
-| `d` | Confirm marking the inactive session Done. |
-| `h` | Hold or unhold the session. |
-| `!` | Open node-pty diagnostics and fix steps. |
-| `Left` / `Esc` / `<` | Return to the main list. |
-
-### Evidence / Diagnostics
-
-The `e` view shows durable session evidence, including changed files, commands and their outcomes, command output previews, assistant evidence, errors, diagnostics, and artifact paths. Press `x` to clear diagnostics while preserving the evidence artifacts.
-
-| Key | Action |
-| --- | --- |
-| `Up` / `Down` / `j` / `k` | Scroll one line. |
-| `PageUp` / `PageDown` | Scroll one page. |
-| `r` | Enter reply mode. |
-| `v` | Open the read-only transcript. |
-| `Enter`, `a`, `Right`, or `l` | Attach to the session. |
-| `x` | Clear diagnostics; evidence is preserved. |
-| `Left` / `Esc` / `<` | Return to the main list. |
-
-### PTY attach
-
-PTY attach opens the real interactive Pi session. `Ctrl+Left` detaches and returns to the board regardless of editor state, and `Ctrl+\` is the unconditional escape — a single raw ASCII byte (0x1c) that terminals forward unchanged in raw mode (kitty CSI-u and modifyOtherKeys encodings included), honored no matter what the child editor reports. `Left` detaches only while the child Pi reports an empty editor; while you are editing text — or when the child's editor state is unknown (e.g. the child extension is missing) — `Left` is forwarded to the Pi editor. A disconnected host can always be exited with `Left`. `Ctrl+]` is not a detach key — it is passed through to the child Pi editor. `Ctrl+\` caveats: on keyboard layouts where `\` sits on AltGr (e.g. German) the chord may never produce the byte — use `Ctrl+Left` there; in legacy keyboard modes `Ctrl+4` emits the same byte and also detaches; and the key is captured from the child while attached, so the child's own `Ctrl+\` binding (e.g. the vim terminal-mode prefix) is unavailable. While attached, `PageUp`, `PageDown`, `Home`, `End`, and the mouse wheel scroll local scrollback; whenever that viewport cannot move — the session holds the alternate screen (pi's fullscreen default), or there is no local history to travel — the wheel is forwarded to the session instead, which scrolls its own transcript: the same fallback the paging keys use. The attach viewport only scrolls scrollback the hosted session actually produced: rows that a snapshot hydration had to scroll out of the local window are not history, and the wheel is forwarded to the session instead of consuming those rows. Mouse drag or double-click selects and copies text, clicks open detected links, and middle-click paste is available on systems with the required X11 tooling. `Ctrl+X` opens an in-place delete confirm: press `y` (or Enter) to archive the row and return to the board with the next row selected — any other key cancels and is passed through to the session. While attached, the child Pi's own `Ctrl+X` bindings (copy in `/tree` and fullscreen, clear-all in the models dialog) are captured by this gesture.
-
-Automatic light/dark themes work in attach sessions too. The child Pi's background-color probe (OSC 11) and its color-scheme change notification switch are forwarded to your real terminal; replies and notifications flow back to the child when your terminal answers — a terminal that never answers keeps the dark fallback. Attach also re-probes the background once when it settles, so the theme is correct from the first frame without re-selecting it in `/settings`. All of this is on by default; set `AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0` to disable it. Not covered: keyboard-protocol negotiation (kitty flags / DA1) is not forwarded — the child negotiates once at spawn, before any attach client exists, and forwarding it would retune the shared real-terminal keyboard stack — so modifier-key encoding can still differ from a directly-run Pi (the modifyOtherKeys fallback applies).
-
-The attach surface can forward terminal clipboard and image/file passthrough sequences. These behaviors can be disabled individually in [Configuration](#configuration). Cold hosts may briefly show a loading/reconnect surface while their PTY becomes ready.
-
-## States, Grouping, and Filters
-
-Agent Board separates a session's semantic task state from whether a worker process is currently alive. An exited worker can therefore leave a durable row that is still resumable or attachable.
-
-| Display state | Meaning |
-| --- | --- |
-| **Queued** | A run has been scheduled but has not started processing. |
-| **Running** | The session is actively processing. |
-| **Needs answer** | The session is waiting for user input or an answer to a question. |
-| **Needs instructions** | The run ended without being marked complete and needs the next directive. |
-| **On hold** | The user parked this session intentionally (manual verdict, `h` to toggle). Automated writers can't push it to Done; queued follow-ups do not wake it. |
-| **Done** | The user marked the inactive session complete; this is the default completion path. |
-| **Failed** | The worker or host ended with an error. |
-| **Stopped** | The user stopped the active work. |
-
-Rows are grouped by state. When a state contains sessions from multiple directories, rows are grouped by folder within that state. Pinned rows and folders come first, then creation order remains stable; activity does not reshuffle the list. New agent activity is marked unread with stronger row glyphs and header/footer counts. Replies sent while a session is busy enter a durable FIFO follow-up queue and are delivered when the session is ready; a `qN` badge shows queued follow-ups.
-
-Press `/` to enter filter mode. Filter tokens are case-insensitive and can be combined with free-text terms:
+It started as a fork of [`@zhuxixi/pi-agent-board`](https://github.com/zhuxixi/pi-agent-board) 0.13.1, so the design and most of the code are theirs, under the MIT license.
 
 ```text
-s:running
-s:hold
-review:ready
-diag:stalled
-evidence:error
-queued:true
-steer:awaiting-approval
+╭─ π-board 0.16.0 ────────────────────────────── node-pty healthy · hosts:2 ─╮
+│ 1 needs answer · 1 running · •1 unread · 0 done                            │
+╰────────────────────────────────────────────────────────────────────────────╯
+◇ NEEDS ANSWER 1 ─────────────────────────────────────────────────────────────
+ ›◆ fix the login test     my-app       Waiting on a prompt                 2m
+● RUNNING 1 ──────────────────────────────────────────────────────────────────
+  ● update the changelog   my-app       Running git log                    12s
+╭─ new session ──────────────────────────────────────────────────────────────╮
+│ › type a task to start a session                                           │
+╰─ enter resume   space peek   / filter   ctrl+x stop   ? keys ──────────────╯
 ```
 
-- `s:<state>` matches a state prefix, including display-label aliases such as `needs-answer`.
-- `review:ready` finds sessions with review-ready evidence.
-- `evidence:error` finds sessions whose evidence contains errors.
-- `queued:true` (also `yes` or `1`) finds sessions with queued follow-ups.
-- `steer:<state>` filters by a persisted steering state.
-- Bare words match name, summary, and working directory; multiple words use AND matching.
+## Quick start
 
-`diag:stalled` can consume persisted stalled diagnostics, but the current runner does not provide a general provider-stall detector. It should not be read as a complete automatic stall-detection feature.
+Requires Pi 1.5 or newer.
 
-## Evidence and Code References
+1. Install it:
 
-Evidence is collected locally from session events. Agent Board can extract issue and pull-request references from that evidence and show badges such as `#40` or `▸#45` on rows; Peek includes the provider, confidence, source, and URL when available. Built-in GitHub/GitLab-style providers are available, and an optional per-store `providers.json` can extend the provider rules. The `AGENT_BOARD_CODE_REFS=off` setting disables extraction.
+   ```bash
+   pi install npm:@huseynsnmz/pi-board@0.16.0
+   ```
 
-For internal code platforms (non-github/gitlab hosts) or custom CLIs, add a per-store `providers.json` so claim/action rules exist and sessions stop depending on the low-confidence mention fallback. Example — an internal CLI (`acli`) with claim-strength issue rules:
+2. Restart Pi, and press `Left` twice on an empty prompt, or run `/agent-board`.
+3. Type a task and press `Enter`. It starts right away in this folder, with this session's model.
 
-```json
-{
-  "providers": [
-    {
-      "name": "acode",
-      "hosts": ["acode.internal.example.com"],
-      "rules": [
-        { "pattern": "acli\\s+issue\\s+update\\s+#?(\\d+)(?=[\\s\\S]*--assignee)", "kind": "issue", "strength": "claim" },
-        { "pattern": "acli\\s+issue\\s+(?:note|comment|close)\\s+#?(\\d+)", "kind": "issue", "strength": "action" },
-        { "pattern": "acli\\s+issue\\s+(?:show|view)\\s+#?(\\d+)", "kind": "issue", "strength": "view" }
-      ]
-    }
-  ]
-}
-```
+Your current session becomes a row too, even with no messages yet. `Esc`, or `Enter` on its row, brings you back to it.
 
-`hosts` matches the repo's remote host; rules follow the same `pattern`/`kind`/`strength` shape as the built-in `gh`/`glab` tables (`strength`: `claim` > `action` > `view`), and the `#N` capture group supplies the number. Validation errors from a broken file surface in the diagnostics panel and never break extraction — an invalid file is simply ignored.
+Installing it runs `node-pty`'s install script, which sets up its terminal support.
 
-## Attach and Fallback Behavior
+## Keys
 
-When PTY support is healthy, Agent Board uses an interactive PTY host for attach and start-and-attach. If PTY support is unavailable, eligible managed sessions can still run in the background through the JSON runner; start-and-attach falls back to background launch with a warning. Adopted external foreground sessions require PTY to continue safely. Press `!` in the dashboard for diagnosis and fix steps.
-
-On Windows, PTY host control uses a named pipe and spawned child console windows are hidden. Terminal behavior can still vary between terminal emulators.
-
-## Entry Points
-
-| Entry point | What it does |
+| Key | Action |
 | --- | --- |
-| `/agent-board` | Opens the dashboard from an interactive Pi session. Use this command path to attach to managed sessions. |
-| `pi /agent-board` | Starts Pi by invoking the dashboard command. Quitting the standalone dashboard shuts down Pi instead of dropping into a normal chat session. |
-| `pi --agent-board` | Opens the dashboard through the extension startup flag. This startup path cannot attach to a managed session; use `/agent-board` from a normal Pi session for attach. |
-| `/bg [prompt]` | Adopts the current interactive Pi session into Agent Board. An optional prompt is added to its follow-up queue before the dashboard opens. |
+| Any text | Start writing a task |
+| `Enter` | Start the task, or attach to the selected session |
+| `Left` / `Right` | Attach to the selected session |
+| `Ctrl+\` | Back to the board from a session. `Left` also works on an empty prompt |
+| `Space` | Peek at a session, and type there to reply |
+| `/` | Filter |
+| `Ctrl+X` | Stop a session, and press again within 2 seconds to delete it |
+| `Ctrl+N` | While typing, choose the folder, model and thinking level |
+| `!` | `node-pty` diagnostics |
+| `?` | All the keys |
+| `Esc` | Clear the input, or leave the board |
 
-The board is global across projects by default. Rows are stored under `~/.pi/agent/agent-board/`; archiving a row removes it from the board but preserves the underlying Pi session file.
+The full list is in the [reference](docs/reference.md).
 
-## Persistence, Safety, and Limitations
+## Settings
 
-Agent Board stores its durable roster and per-session artifacts under `~/.pi/agent/agent-board/` by default. Set `AGENT_BOARD_ROOT` to use another location. The store includes the roster, launch preferences, per-session metadata and state, Pi session JSONL, run status/events, evidence, diagnostics, and (for PTY hosts) a replayable screen log.
+Settings live in `~/.pi/agent/extensions/pi-board/config.json`.
 
-Rows and session history survive Pi reloads, Pi restarts, and worker exits. When the dashboard opens, it reconciles stale runner or host records and keeps resumable sessions visible. Archiving a row removes it from the board but does not delete its underlying Pi session file.
+The board can use a model for titles, row summaries and working out what state a session is in. That's **off by default**, and built-in rules do the job instead. To choose a model, run `/board-model`. Helper calls cost tokens, and send up to 6,000 characters of a session's latest reply to that model.
 
-> **Worktree isolation is currently disabled.** Agent Board does not automatically create or manage Git worktrees. Multiple sessions in the same repository may run concurrently, so avoid overlapping writes or provide your own isolation before starting parallel coding tasks.
+## Good to know
 
-Other current limitations:
+- **No worktrees:** sessions in one repository share its files, so give each writer its own worktree.
+- **Sessions outlive Pi:** closing Pi leaves them running. That's the point, but idle ones are only cleaned up by a timer or the next board activity.
+- **Answering prompts:** a session waiting on a permission prompt shows `Needs answer`, and you attach to answer it. A reply from Peek waits in the queue.
+- **Saved to disk:** sessions and a screen log are plain files under `~/.pi/agent/agent-board/`.
 
-- Agent Board runs locally; it does not provide cloud execution, multi-user coordination, or shared dashboards.
-- Real model output still depends on Pi provider authentication and network access.
-- The `--agent-board` startup path opens the dashboard but cannot attach to a managed session; use `/agent-board` from a normal Pi session for attach.
-- Pending Pi question or questionnaire tools must be answered in the attached interactive session; inline reply is rejected while one is pending.
-- PTY-dependent features require a working `node-pty` installation. Background work can use the JSON-runner fallback when PTY is unavailable, but start & attach then becomes background-only.
+More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/reference.md).
 
-## Configuration
+## `pi-frame`
 
-Settings live in `~/.pi/agent/extensions/pi-board/config.json`. Everything is optional, and a missing or broken file means the defaults. Restart Pi after editing it.
+[`pi-frame`](https://github.com/huseynsnmz/pi-frame) 0.3.8 or newer draws its header and footer again when the board closes.
 
-```json
-{
-  "model": "provider/model-id",
-  "autoDone": false
-}
-```
+## Contributing
 
-### Helper model
+Issues are welcome, and pull requests are turned off. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
-Titles, row summaries and telling `Needs answer` from `Needs instructions` can use a model. **It's off by default**, so the board makes no model calls of its own and uses built-in rules instead.
+## Credits and license
 
-Run `/board-model` inside Pi to pick a model or turn it off. It's saved to the file above and applies to sessions started from then on. These calls run through Pi, so any model Pi can use works, and they send up to 6,000 characters of a session's latest reply to that model.
+MIT. See [LICENSE](LICENSE), which keeps the original copyright notice.
 
-### Other settings
-
-| Key | Default | Purpose |
-| --- | --- | --- |
-| `model` | off | Helper model, as `provider/id`. |
-| `groupBy` | `state` | `state` or `directory`. `Ctrl+S` changes it. |
-| `root` | `~/.pi/agent/agent-board/` | Where the board stores its state. |
-| `titleThinking` | `low` | Thinking level for titles. |
-| `autoDone` | `false` | Let the helper model mark sessions Done. |
-| `codeRefs` | `true` | Issue and pull request badges. |
-| `disablePty` | `false` | Turn off live terminal sessions and attach. |
-| `attachMouse` | `true` | Mouse handling in attached sessions. |
-| `mouseScroll` | `true` | Mouse wheel scrolling in attached sessions. |
-| `wheelLines` | `1` | Lines per wheel notch, from 1 to 50. |
-| `maxWarmHosts` | `4` | Idle sessions kept ready for fast attach, from 0 to 50. |
-| `warmHostTtlMs` | `600000` | How long an idle one is kept; `0` keeps it. |
-| `nativePaste` | `true` | X11 PRIMARY copy and middle-click paste. |
-| `forwardClipboard` | `true` | Forward OSC 52 clipboard writes from attached sessions. |
-| `forwardImages` | `true` | Forward terminal images from attached sessions. |
-| `imeFix` | `true` | IME cursor fix in attached sessions. |
-| `terminalSnapshot` | `true` | Newer attach path; `false` uses the older one. |
-| `replyGuard` | `true` | Discard stray terminal replies delivered as input. |
-
-An `AGENT_BOARD_*` environment variable that's already set overrides the file for that run.
-
-Setting `terminalSnapshot` to `false` routes attach onto the legacy fallback family: the screen.log replay tail plus the shrink-and-hold jiggle redraw. These paths exist only for pre-protocol runners and as a rollback hatch — they are not part of the snapshot+subscribe protocol path (issue #91 phase 4). They will be retired once the installed runner fleet is on the snapshot protocol baseline (detectable on the wire via hello protocol fields).
-
-Older `AGENT_VIEW_*` names are still read in selected compatibility paths. Prefer `AGENT_BOARD_*` for new setups. Internal child markers are managed by Agent Board and are not user settings.
-
-The `providers.json` file under the configured store root can extend the built-in issue/PR reference providers; see the [Evidence and Code References](#evidence-and-code-references) section for the feature overview.
-
-## Troubleshooting
-
-### Rows stay in `Running`
-
-First verify that Pi itself can complete a one-shot model call:
-
-```bash
-pi --mode json -p --no-session "Reply with exactly: DONE"
-```
-
-The command should emit an assistant reply, then an `agent_end` event, and exit. If it hangs before the assistant reply, fix Pi provider authentication or network access first. Agent Board cannot produce live model results until Pi works independently.
-
-### `node-pty unavailable`
-
-Press `!` in the dashboard to open the diagnostic panel and follow its fix steps. Common causes include a missing native `node-pty` binary, a Node/architecture mismatch, a missing or non-executable macOS `spawn-helper`, or macOS quarantine. You can temporarily set `AGENT_BOARD_DISABLE_PTY=1` to use background JSON-runner behavior where supported.
-
-### Attach is slow or keeps reconnecting
-
-A cold PTY host may briefly show a loading or reconnecting surface while it starts. Check the PTY status in the dashboard with `!`; stale hosts are diagnosed separately from active task workers. If the host never becomes healthy, repair `node-pty` or use background mode for eligible managed sessions.
-
-### IME candidate window is stuck at the window edge (Windows WezTerm)
-
-On Windows WezTerm with a WSL2 backend, the IME candidate window may stay pinned to the right edge instead of following the text cursor in an attached session. Windows WezTerm only tracks the IME candidate position from the visible hardware cursor, and Pi hides the hardware cursor by default — the block cursor you see in the editor is drawn content, not the hardware cursor. Linux terminals are not affected.
-
-Make the hardware cursor visible, either way:
-
-```bash
-export PI_HARDWARE_CURSOR=1    # machine-local, e.g. ~/.zshrc.local
-```
-
-or set `"showHardwareCursor": true` in Pi's `settings.json` (syncs across machines if the config is version-controlled; harmless on Linux).
-
-Trade-off: the real terminal cursor becomes visible inside the TUI. This is cosmetic only.
-
-### Start & attach falls back to background
-
-Start & attach requires PTY support. When PTY is unavailable, the task is still dispatched in the background and the dashboard displays a warning. Repair PTY and retry attach from the normal `/agent-board` command path.
-
-### Inline reply is rejected
-
-A pending Pi question or questionnaire requires the real interactive session. Attach to the row and answer it there; ordinary replies can be sent from Peek and are queued while a session is busy.
-
-### Sessions in the same repository conflict
-
-Worktree isolation is not enabled. Stop overlapping writers, separate their working directories, or create and manage Git worktrees yourself before running concurrent coding tasks.
-
-See [VERIFY.md](VERIFY.md) for no-auth checks, extension loading checks, provider checks, persistence checks, and the manual dashboard flow.
-
-## Development
-
-For local development:
-
-```bash
-npm install
-npm run verify
-```
-
-`npm run verify` runs typecheck, the perf gate (`npm run test:perf`), tests, coverage, and a package dry-run. The A11 perf assertions are opt-in — they skip under `npm test` / `npm run test:coverage` and only measure via `npm run test:perf` (issue #121). The same checks run in CI on Node 22 and Node 24. See [VERIFY.md](VERIFY.md) for the full verification checklist and known environment-dependent limitations.
-
-## Publishing
-
-Published to npm by hand, with `npm publish --access public`. There's no publish workflow.
-
-## Further Reading
-
-- [Manual verification](VERIFY.md) — static checks, Pi loading, provider authentication, persistence, and dashboard flows.
-- [Release process](docs/RELEASE.md) — release commands, trusted publishing setup, and failure recovery.
-- [Product requirements](PRD.md) — original product scope and design context.
-- [Progress log](PROGRESS.md) — implementation checkpoints and known environment notes.
-- [Exploration notes](docs/EXPLORATION.md) — Pi API and integration research.
+- [pi-agent-board](https://github.com/zhuxixi/pi-agent-board) by zhuxixi and its contributors
+- The keys and layout follow [Claude Code's agent view](https://code.claude.com/docs/en/agent-view).

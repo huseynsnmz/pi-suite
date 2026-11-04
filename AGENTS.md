@@ -1,65 +1,30 @@
 # AGENTS.md
 
-Guidance for coding agents working in this repository.
-
-## What this is
-
-`@huseynsnmz/pi-board` — a fork of `@zhuxixi/pi-agent-board`, and a Pi extension that adds a dashboard for
-dispatching, monitoring, peeking at, replying to, and attaching to background Pi
-sessions. Runtime source is TypeScript under `src/` and `runner/`; the extension
-entry point is `index.ts`.
-
-Describe it neutrally as a fork. Don't compare the two or list problems with the original. Publishing to npm has no workflow here.
-
-## Commands
-
-```bash
-npm run typecheck      # tsc --noEmit
-npm test               # node scripts/run-tests.mjs; fails on leaked coordinators
-npm run test:coverage  # c8 + the same tests; thresholds lines 85 / funcs 80 / branches 70
-npm run test:perf      # A11 perf gate — opt-in, skipped under plain `npm test`
-npm run pack:dry       # what would ship in the tarball
-npm run verify         # typecheck + perf gate + tests + coverage + pack:dry
-```
-
-Run `npm run verify` before claiming a change is done. `npm test` alone does not
-run the perf gate or the coverage thresholds.
-
-## Layout
-
-| Path | Contents |
-| --- | --- |
-| `src/` | runtime: coordinator, attach protocol, dashboard, persistence |
-| `runner/` | detached runner entry points |
-| `test/*.test.mjs` | unit and integration tests; `test-support/` holds shared fixtures |
-| `scripts/` | build, perf-gate, changelog, and release tooling |
-| `docs/` | design notes and the [release process](docs/RELEASE.md) |
-| `plans/`, `implementation-plans/` | in-flight work plans |
-
-## Conventions
-
-- Tabs for indentation, English comments and commit messages.
-- Prefer pure functions with a thin I/O shell, as in `scripts/release_helper.mjs`
-  (pure rendering/parsing is exported and unit-tested; the CLI layer owns git and
-  filesystem access). New tooling should follow that split.
-- Tests use `node:test` with `assert/strict`. Anything touching git or the
-  filesystem gets a self-contained fixture under a temp dir — never the host
-  repository, whose tags and remotes differ between checkouts and CI.
-- Conventional commit subjects: `feat`/`fix`/`perf`/`refactor`/`docs`/`test`/
-  `chore`, with the PR number appended as `(#N)`. The release changelog is
-  generated from these subjects, so the type matters.
-- Keep `CHANGELOG.md` machine-generated: entries come from
-  `scripts/release_helper.mjs`, not from hand editing (except when `verify`
-  reports a missing PR after a late merge).
+`README.md` and `docs/` explain what this does. This file holds what the code can't tell you.
 
 ## Releases
 
-Follow [docs/RELEASE.md](docs/RELEASE.md). The parts that are easy to get wrong:
+Release tags can't be moved or deleted, and `main` can't be force-pushed. To fix a release, make a new version.
 
-- Every change lands through a PR; `main` is protected and requires CI to pass.
-- Never publish by hand as the normal path — creating a GitHub Release triggers
-  CI to publish with provenance.
-- A release PR is merged with a **merge commit**. Squashing orphans the
-  `npm version` tag and corrupts the next changelog range.
-- The CHANGELOG section is generated **before** `npm version`, because
-  `npm version` moves the tag that defines the generation range.
+## Writing about the project
+
+Describe it neutrally as a fork of `@zhuxixi/pi-agent-board`. Don't compare the two or list problems with the original.
+
+## Testing
+
+- `npm run typecheck`, then `npm test`. `npm test` needs Node 24, since Node 26 rejects `--experimental-transform-types`.
+- Set `TMPDIR` to a short path, such as `/tmp/x`. On macOS, the default is long enough to break the control sockets, and about 30 tests fail with `listen EINVAL`.
+- Most of the suite drives the board and attach view through `test-support/`. A hung test usually means a key it sends has changed.
+- `pi-frame`'s end-to-end test covers the board in real Pi with a fake model: `PI_FRAME_E2E_AFTER=<this folder> python3 test/e2e/run.py` from there.
+- These fail on this code and the original alike: `attach selection mirror` needs X11's PRIMARY selection, and `step 15 integration` hits a limit on piped output.
+
+## Things that are easy to break
+
+- Anything held from `session_start` goes stale when the session is replaced, and using it takes Pi down. Stop it in `session_shutdown`.
+- Don't send text to a session's terminal while a dialog is open. Enter would answer the dialog. See `reply` in `src/runtime/service.mjs`.
+- The board must not start a second Pi on the session file open behind it. See `prewarmSelected` and `dashboardAttachLoop`.
+- Letters type into the task input, so a new shortcut needs `Ctrl`. macOS terminals often don't send `Alt`.
+
+## Other packages
+
+Treat downloaded packages as untrusted. Install them with scripts disabled, and read them before running them.

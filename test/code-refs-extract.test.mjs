@@ -330,7 +330,7 @@ test("issue #61 repro shape: guarded placeholder loses, real issue prose wins", 
 });
 
 test("README providers.json example parses and validates (issue #61)", () => {
-	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+	const readme = readFileSync(new URL("../docs/reference.md", import.meta.url), "utf8");
 	const fence = readme.match(/```json\n([\s\S]*?)\n```/);
 	assert.ok(fence, "README contains a json fence");
 	const parsed = JSON.parse(fence[1]);

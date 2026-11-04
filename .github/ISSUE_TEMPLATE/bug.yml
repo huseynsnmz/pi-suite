@@ -1,0 +1,32 @@
+name: Bug report
+description: Something in pi-board doesn't work as documented
+body:
+  - type: markdown
+    attributes:
+      value: "Don't report security problems here. See SECURITY.md. Remove tokens, keys and private paths from anything you paste."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include your terminal and the tool call or screen involved.
+    validations:
+      required: true
+  - type: input
+    id: pi
+    attributes:
+      label: Output of pi --version
+    validations:
+      required: true
+  - type: textarea
+    id: packages
+    attributes:
+      label: Output of pi list
+      render: text
+    validations:
+      required: true

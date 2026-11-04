@@ -159,10 +159,13 @@ const out = {};
 	await real.syncHostedEvent(id, { type: "agent_board_waiting", waiting: true });
 	await new Promise((r) => setTimeout(r, 300));
 	const waiting = real.row(id).state;
+	const reply = await real.reply(id, "y");
+	const queuedDuringDialog = reply.queued === true && reply.sent !== true;
 	await real.syncHostedEvent(id, { type: "agent_board_waiting", waiting: false });
 	await new Promise((r) => setTimeout(r, 300));
 	const resumed = real.row(id).state;
 	out.waiting = { state: waiting.semanticState, question: waiting.question, resumed: resumed.semanticState, cleared: resumed.question };
+	out.replyDuringDialog = { queuedDuringDialog, pendingWhileWaiting: waiting.pendingQuestions.length, pendingAfter: resumed.pendingQuestions.length };
 }
 {
 	// Ctrl+G hands the text to the editor, and takes back what it wrote.

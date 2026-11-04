@@ -151,6 +151,9 @@ export function resolveAttachResolveTimeoutMs(env = process.env) {
  *   },
  * }} opts
  */
+/** A pending question that is an open dialog, such as a permission prompt. */
+const DIALOG = "dialog";
+
 export function createService(opts) {
 	const root = opts.root;
 	const launch = opts.launch ?? launchRun;
@@ -1814,6 +1817,8 @@ export function createService(opts) {
 			status.semanticState = event.waiting ? "needs_input" : "working";
 			status.processState = "alive";
 			status.question = event.waiting ? "Waiting on a prompt. Attach to answer it." : null;
+			// Counts as pending so the host isn't evicted, and so a reply can tell it's there.
+			status.pendingQuestions = event.waiting ? [{ kind: DIALOG, question: status.question }] : [];
 			status.summary = event.waiting ? "Waiting on a prompt" : "Running…";
 			status.lastActivityAt = now;
 			void writeForegroundState(row, status);
@@ -1845,6 +1850,7 @@ export function createService(opts) {
 		}
 
 		if (event.type === "agent_end") {
+			status.pendingQuestions = status.pendingQuestions.filter((question) => question?.kind !== DIALOG);
 			// #46-class fence (issue #91): a manual verdict is a user judgment that
 			// outlives the turn. A late/duplicate agent_end after markCompleted must
 			// not resurrect the row via finalizeRun + projection — skip all semantic
@@ -2073,6 +2079,12 @@ export function createService(opts) {
 			if (!prompt) return { ok: false, error: "Empty reply" };
 			const row = loadRow(root, viewId);
 			if (!row) return { ok: false, error: "Unknown session" };
+			// Text and Enter sent to the terminal would go to the open dialog, and could approve what it
+			// asks. So it waits its turn, and answering the dialog takes attaching.
+			if (row.state?.pendingQuestions?.some((question) => question?.kind === DIALOG)) {
+				const queued = enqueueFollowUp(root, viewId, prompt, { kind: replyOpts.kind ?? "reply", delivery: "queue", source: "user" });
+				return queued.ok ? { ok: true, queued: true, summary: queued.summary } : queued;
+			}
 			if (hasPendingQuestions(row)) return { ok: false, error: "Attach to answer the pending question" };
 			const delivery = replyOpts.delivery ?? "auto";
 			const kind = replyOpts.kind ?? "reply";

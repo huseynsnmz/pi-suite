@@ -141,6 +141,7 @@ export class DashboardComponent implements Component {
 	private groupBy: "state" | "directory" = readConfig().groupBy === "directory" ? "directory" : "state";
 	private readonly groupOf = new Map<string, string>();
 	private readonly neighborsOf = new Map<string, string>();
+	private readonly folderOf = new Map<string, string>();
 	private helpReturnMode: ReturnableMode = "list";
 	private ptyHelpReturnMode: ReturnableMode = "list";
 	private peekId: string | null = null;
@@ -202,15 +203,17 @@ export class DashboardComponent implements Component {
 		this.rows = this.filterQuery ? filterRows(all, this.filterQuery) : all;
 		this.groupOf.clear();
 		this.neighborsOf.clear();
-		const place = (group: string, leaf: string, ids: string[]) => {
+		this.folderOf.clear();
+		const place = (group: string, folder: string, ids: string[]) => {
 			for (const id of ids) {
 				this.groupOf.set(id, group);
-				this.neighborsOf.set(id, `${group}\0${leaf}`);
+				this.folderOf.set(id, folder);
+				this.neighborsOf.set(id, `${group}\0${folder}`);
 			}
 			return ids;
 		};
 		this.orderedIds = this.groupBy === "directory"
-			? groupRowsByDirectory(this.rows, Date.now()).flatMap((f) => place(f.key, "", f.rows.map((r) => r.id)))
+			? groupRowsByDirectory(this.rows, Date.now()).flatMap((f) => place(f.key, f.key, f.rows.map((r) => r.id)))
 			: groupRowsByFolder(this.rows, Date.now()).flatMap((g) => g.folders.flatMap((f) => place(g.state, f.key, f.rows.map((r) => r.id))));
 		const visibleIds = new Set(this.orderedIds);
 		this.selectedIds = new Set([...this.selectedIds].filter((id) => visibleIds.has(id)));
@@ -399,7 +402,7 @@ export class DashboardComponent implements Component {
 		if (matchesKey(data, Key.ctrl("b"))) return this.toggleHold();
 		if (matchesKey(data, Key.ctrl("k"))) return this.confirmDeleteState();
 		for (let n = 1; n <= 9; n++) {
-			if (matchesKey(data, Key.alt(String(n) as never))) return this.attachRow(n - 1);
+			if (matchesKey(data, Key.alt(String(n) as never))) return this.attachInFolder(n - 1);
 		}
 		if (matchesKey(data, Key.escape)) return this.done({ action: "exit" });
 		if (matchesKey(data, Key.ctrl("c"))) {
@@ -496,9 +499,12 @@ export class DashboardComponent implements Component {
 		this.selectIndex(index);
 	}
 
-	private attachRow(index: number): void {
-		if (!this.orderedIds[index]) return;
-		this.selectIndex(index);
+	/** Counts the rows in the selected session's folder. */
+	private attachInFolder(index: number): void {
+		const folder = this.folderOf.get(this.selectedId ?? "");
+		const id = this.orderedIds.filter((other) => this.folderOf.get(other) === folder)[index];
+		if (!id) return;
+		this.selectIndex(this.orderedIds.indexOf(id));
 		this.attachSelected();
 	}
 
@@ -1798,7 +1804,7 @@ export class DashboardComponent implements Component {
 			["pgup / pgdn", "Move by a screenful"],
 			["home / end", "First or last row"],
 			["alt+↑ / alt+↓", "Previous or next group"],
-			["alt+1..9", "Attach to that row"],
+			["alt+1..9", "Attach to that row in this folder"],
 			["space", "Open or close the peek panel"],
 			["/ or ctrl+f", "Filter the list"],
 			["ctrl+s", "Group by state or by directory"],
