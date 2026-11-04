@@ -1,70 +1,25 @@
-export { type AskOptions, askQuestions, canAsk } from "./ask/client.ts";
-export * from "./app/builder.ts";
-export * from "./betas.ts";
-export * from "./app/feature.ts";
+// The part of @adeildo/pi-kit 6.0.0 that frame uses. See LICENSE.
+export { createApp } from "./app/builder.ts";
+export { defineFeature, type FeatureScope } from "./app/feature.ts";
 export { messageRendererFor, resolveToolRenderers } from "./app/renderers.ts";
-export * from "./contracts/accounts.ts";
-export * from "./contracts/ask.ts";
-export * from "./contracts/by.ts";
-export { bySession, handleOf } from "./by-session.ts";
-export * from "./contracts/calls.ts";
-export * from "./contracts/entries.ts";
-export * from "./contracts/inbox.ts";
-export * from "./contracts/screen.ts";
-export * from "./contracts/skills.ts";
-export * from "./contracts/sources.ts";
-export * from "./contracts/views.ts";
-export * from "./card.ts";
-export * from "./contracts/events.ts";
-export * from "./contracts/peers.ts";
-export * from "./contracts/mode.ts";
-export * from "./contracts/protected.ts";
-export * from "./contracts/names.ts";
-export * from "./contracts/board.ts";
-export * from "./contracts/prompts.ts";
-export * from "./board/model.ts";
-export { names, type NamesOptions } from "./names/feature.ts";
-export { piDocs } from "./pi-docs/feature.ts";
-export { board } from "./board/feature.ts";
-export { boardPanel } from "./board/panel.ts";
-export { BOARD_OP, boardOf } from "./board/log.ts";
-export { describeBoard } from "./board/text.ts";
-export { boardText } from "./board/tool.ts";
-export * from "./events/log.ts";
-export { Inbox } from "./inbox/inbox.ts";
-export { type Letter, type Want, isLetter } from "./inbox/letter.ts";
-export { fileSource, type FileSourceOptions, sourceFor } from "./sources/file.ts";
-export {
-	FileTail,
-	type FileRecord,
-	type FollowState,
-	followFile,
-	type TailItem,
-} from "./sources/follow.ts";
-export { piSource } from "./sources/pi.ts";
-export { type TasksUsage, tasksUsageOf } from "./legacy-tasks.ts";
-export * from "./totals.ts";
-export * from "./control.ts";
-export * from "./decode.ts";
-export * from "./contract.ts";
-export * from "./format.ts";
-export * from "./paths.ts";
-export * from "./presence/index.ts";
-export * from "./status.ts";
-export * from "./models.ts";
-export * from "./one-at-a-time.ts";
-export * from "./overlay-images.ts";
-export * from "./typing.ts";
-export * from "./ui/above-editor.ts";
-export * from "./ui/entry.ts";
-export * from "./ui/glyphs.ts";
-export * from "./ui/frame.ts";
-export * from "./ui/scroll.ts";
-export {
-	globalSettingsPath,
-	projectSettingsPath,
-	readSettingsFile,
-	writeSettingsFile,
-} from "./settings/files.ts";
-export * from "./settings/setting.ts";
-export * from "./settings/store.ts";
+export { type Board, type BoardCard, type BoardOp, emptyBoard, foldBoard } from "./board/model.ts";
+export { ACCOUNT, type AccountState, type AccountWindow } from "./contracts/accounts.ts";
+export { BOARD } from "./contracts/board.ts";
+export { type CallRuling, CALLS_FRAMED, callTarget, RULING, type RulingTone } from "./contracts/calls.ts";
+export { NAMES } from "./contracts/names.ts";
+export { type PeerMark, PEERS, type RoomMark, type WritingMark } from "./contracts/peers.ts";
+export { PROMPT_FROM } from "./contracts/prompts.ts";
+export { drawSkillRefs, SKILL_REF, skillNames, skillQueryAt } from "./contracts/skills.ts";
+export { type SessionSource, type SessionSummary, type SourceItem } from "./contracts/sources.ts";
+export { provideViews } from "./contracts/views.ts";
+export { type Json } from "./control.ts";
+export { boolean, isObject, literal } from "./decode.ts";
+export { formatClock, formatCost, formatTokens } from "./format.ts";
+export { hideImagesUnderOverlays } from "./overlay-images.ts";
+export { tildify } from "./paths.ts";
+export { setting } from "./settings/setting.ts";
+export { sourceFor } from "./sources/file.ts";
+export { emptyTotals, promptOf, tokensOf, type Totals, totalsOf, type UsageLike, usageTotals } from "./totals.ts";
+export { CHANGES_CUT, CHANGES_X, drawnByWidth, type EntryFrame, entryFrame } from "./ui/entry.ts";
+export { frame, FRAME_Y, frameInner, type KeyHint } from "./ui/frame.ts";
+export { CUT, GLYPH, LINE, SPIN } from "./ui/glyphs.ts";

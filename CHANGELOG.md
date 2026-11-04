@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0]
 
 ### Features
 
@@ -12,7 +12,7 @@
 
 - Board notices now show at the bottom of the screen, go away by themselves, and no longer move the list.
 - Deleting a session on the board moves the cursor up one in the same group instead of to the top.
-- Fewer outside packages run inside Pi. `@adeildo/pi-kit` is now a copy in `packages/frame/src/kit`, while word diffs and page-to-Markdown are our own code in place of `diff` and `turndown`. Removing `c8`, used only for a coverage script, clears the open `minimatch` alert.
+- Fewer outside packages run inside Pi. The parts of `@adeildo/pi-kit` that frame uses are now a copy in `packages/frame/src/kit`, while word diffs and page-to-Markdown are our own code in place of `diff` and `turndown`. Removing `c8`, used only for a coverage script, clears the open `minimatch` alert.
 
 ## [0.1.0]
 
