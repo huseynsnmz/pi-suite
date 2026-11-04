@@ -31,6 +31,7 @@ function scriptedCall(text, tools) {
   if (verb === "WRITE") return off ? { name: "yolo_write", args: { file: arg, content: "x" } } : { name: "write", args: { path: arg, content: "x" } };
   if (verb === "READ") return { name: "read", args: { path: arg } };
   if (verb === "SUBAGENT") return { name: "subagent", args: { agent: "scout", task: "x" } };
+  if (verb === "APPLY") return { name: "permissions_apply", args: { bash: [arg] } };
   if (verb === "PLAN") return { name: "submit_plan", args: { plan: "PLANBODY step one" } };
   return undefined;
 }

@@ -40,6 +40,11 @@ const ALLOW: ToolDecision = { action: "allow" };
  * Unknown tools are blocked in restricted modes, because an MCP tool or a
  * subagent could write without this extension seeing how.
  */
+export function notReadOnly(mode: Mode, reason: string): ToolDecision {
+  if (mode === "plan") return { action: "ask", reason };
+  return { action: "block", reason: `read-only mode blocked this command: ${reason}. Press Shift+Tab to change mode.` };
+}
+
 export function decideToolCall(mode: Mode, toolName: string, input: unknown): ToolDecision {
   if (mode === "normal" || mode === "auto" || mode === "yolo") return ALLOW;
   const leave = "Press Shift+Tab to change mode.";
@@ -50,9 +55,7 @@ export function decideToolCall(mode: Mode, toolName: string, input: unknown): To
     const command = (input as { command?: unknown } | null)?.command;
     if (typeof command !== "string") return { action: "block", reason: `${mode} mode: bash needs a command.` };
     const verdict = classifyBash(command);
-    if (verdict.readOnly) return ALLOW;
-    if (mode === "plan") return { action: "ask", reason: verdict.reason };
-    return { action: "block", reason: `read-only mode blocked this command: ${verdict.reason}. ${leave}` };
+    return verdict.readOnly ? ALLOW : notReadOnly(mode, verdict.reason);
   }
 
   return { action: "block", reason: `${mode} mode blocks ${toolName}. ${leave}` };

@@ -1,9 +1,7 @@
-#!/usr/bin/env node
-// Prints the approvals worth reviewing. Reads the log and config, and writes nothing.
+// Finds the approvals worth reviewing. Reads the log and config, and writes nothing.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 
 const APPROVED = new Set(["approved", "approved_for_session", "session_approved"]);
 /** Who approved: you, a rule you granted for the session, or your answer in a parent session. */
@@ -173,18 +171,32 @@ function parseLog(text) {
   });
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  const agent = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+/** More than anyone would read through, and the model would pay for each one. */
+export const MAX_CANDIDATES = 60;
+
+function capped({ candidates, ...rest }) {
+  return { ...rest, candidates: candidates.slice(0, MAX_CANDIDATES), more: Math.max(0, candidates.length - MAX_CANDIDATES) };
+}
+
+/** Everything the skill needs to assess. One file at a time, so Pi stays responsive with a long history. */
+export async function reviewData(agent) {
   const dir = join(agent, "extensions", "pi-permission-system");
   const logPath = join(dir, "logs", "pi-permission-system-permission-review.jsonl");
   const configPath = join(dir, "config.json");
   const logFound = existsSync(logPath);
   const permission = existsSync(configPath) ? (JSON.parse(readFileSync(configPath, "utf8")).permission ?? {}) : {};
-  const sessions = join(agent, "sessions");
-  const files = existsSync(sessions) ? readdirSync(sessions, { recursive: true }).map(String).filter((name) => name.endsWith(".jsonl")) : [];
-  const sessionEntries = files.map((name) => parseLog(readFileSync(join(sessions, name), "utf8")));
-  const history = sessionEntries.flatMap(ranCommands);
-  const result = collect(logFound ? parseLog(readFileSync(logPath, "utf8")) : [], permission, history);
+  const history = [];
+  const blocks = [];
+  // Sessions started from pi-board are kept apart from the others.
+  for (const sessions of [join(agent, "sessions"), join(agent, "agent-board", "sessions")]) {
+    if (!existsSync(sessions)) continue;
+    for (const name of readdirSync(sessions, { recursive: true }).map(String).filter((file) => file.endsWith(".jsonl"))) {
+      const entries = parseLog(await readFile(join(sessions, name), "utf8").catch(() => ""));
+      history.push(...ranCommands(entries));
+      blocks.push(...sandboxBlocks(entries));
+    }
+  }
+  const result = capped(collect(logFound ? parseLog(await readFile(logPath, "utf8")) : [], permission, history));
   const sandboxPath = join(agent, "sandbox.json");
   let sandboxConfig = {};
   try {
@@ -192,6 +204,5 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   } catch {
     // Comments are allowed there. Already-allowed entries may show up, and apply won't add them twice.
   }
-  const sandbox = collectSandbox(sessionEntries.flatMap(sandboxBlocks), sandboxConfig);
-  console.log(JSON.stringify({ logFound, ...result, sandbox }, null, 2));
+  return { logFound, ...result, sandbox: capped(collectSandbox(blocks, sandboxConfig)) };
 }

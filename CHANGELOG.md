@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0]
+
+### Security
+
+- `git status`, `git diff` and others no longer count as read-only in a repository whose config or hooks could run code. A plain clone could bring these, as a bare repository committed in a subfolder.
+- Git after `cd` no longer counts as read-only, since that folder can't be checked.
+- `rg*`, `file*` and `date*` can't be added as rules, since those commands can run programs, write files or set the clock.
+- A plan mode question shows hidden and reordering characters in its reason too.
+
+### Changed
+
+- The `review-permissions` skill uses the `permissions_review` and `permissions_apply` tools rather than scripts through `bash`. The tool asks you itself, and works when the sandbox would stop a script writing the config. It also reads sessions started from `pi-board`, and keeps its list to 60 items.
+
 ## [0.3.0]
 
 ### Added

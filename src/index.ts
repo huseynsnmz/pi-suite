@@ -4,9 +4,12 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { isKeyRelease, matchesKey, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { borrowStatusReader, loadsFirst, sandboxInstalled, sandboxIsOn, type StatusReader } from "./sandbox.ts";
+import { runsGit } from "./bash.ts";
+import { gitRisk } from "./git-safety.ts";
+import { registerReviewTools } from "./review/tools.ts";
 import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
 import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "./judge-gate.ts";
-import { decideToolCall, displayCommand, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
+import { decideToolCall, displayCommand, notReadOnly, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
 const DENY_STATUS_KEY = "pi-modes-deny";
@@ -230,16 +233,22 @@ export default function piModes(pi: ExtensionAPI): void {
       if (ctx.hasUI) ctx.ui.notify("The sandbox went off, so yolo ended.", "warning");
       return { block: true, reason: "Yolo ended because the sandbox is off." };
     }
-    const decision = decideToolCall(mode, event.toolName, event.input);
+    let decision = decideToolCall(mode, event.toolName, event.input);
+    if (decision.action === "allow" && (mode === "plan" || mode === "read-only") && event.toolName === "bash") {
+      const risk = runsGit((event.input as { command: string }).command) ? await gitRisk(ctx.cwd) : undefined;
+      if (risk !== undefined) decision = notReadOnly(mode, risk);
+    }
     if (decision.action === "allow") return undefined;
     if (decision.action === "block") return { block: true, reason: decision.reason };
 
     const denied = `Plan mode blocked this command: ${decision.reason}.`;
     if (!ctx.hasUI) return { block: true, reason: denied };
     const command = (event.input as { command: string }).command;
-    const approved = await ctx.ui.confirm("Plan mode: run this command?", `${decision.reason}\n\n${displayCommand(command)}`);
+    const approved = await ctx.ui.confirm("Plan mode: run this command?", `${displayCommand(decision.reason)}\n\n${displayCommand(command)}`);
     return approved ? undefined : { block: true, reason: denied };
   });
+
+  registerReviewTools(pi);
 
   pi.registerTool({
     name: SUBMIT_PLAN_TOOL,

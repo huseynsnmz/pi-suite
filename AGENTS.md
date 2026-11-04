@@ -17,9 +17,9 @@ Release tags can't be moved or deleted, and `main` can't be force-pushed. To fix
 
 ## Review skill
 
-- The scripts in `skills/review-permissions/scripts` stay plain `.mjs`, because Pi needs Node and there's no build step.
-- They match what the permission system and `pi-sandbox` really write, so check a real log or session file before changing a pattern. Text built from their docs has been wrong before.
-- `pi-sandbox`'s defaults stop applying once a list is set, so `apply.mjs` starts a new list from a copy of them. Check that copy when moving to a new `pi-sandbox` version.
+- `permissions_apply` writes outside any sandbox, so it asks the user itself. Never leave that question to the skill's text, or let another path into `applyChoices`: the model must not be able to give itself permissions.
+- `src/review` matches what the permission system and `pi-sandbox` really write, so check a real log or session file before changing a pattern. Text built from their docs has been wrong before.
+- `pi-sandbox`'s defaults stop applying once a list is set, so `src/review/apply.mjs` starts a new list from a copy of them. Check that copy when moving to a new `pi-sandbox` version.
 
 ## Testing
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyRules, applySandbox, refuseBash, refuseDomain, refuseSandboxPath, refuseTool, withBashAllows } from "../skills/review-permissions/scripts/apply.mjs";
-import { collect, collectSandbox, ranCommands, ruleFor, sandboxBlocks, suggestPattern } from "../skills/review-permissions/scripts/collect.mjs";
+import { applyRules, applySandbox, refuseBash, refuseDomain, refuseSandboxPath, refuseTool, withBashAllows } from "../src/review/apply.mjs";
+import { collect, collectSandbox, ranCommands, ruleFor, sandboxBlocks, suggestPattern } from "../src/review/collect.mjs";
 
 const approved = (command, extra = {}) => ({ event: "permission_request.approved", resolution: "approved", decidedBy: { kind: "user", via: "dialog" }, surface: "bash", command, timestamp: "2026-11-03T10:00:00Z", ...extra });
 

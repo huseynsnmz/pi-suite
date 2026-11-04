@@ -1,14 +1,15 @@
-#!/usr/bin/env node
 // Adds allow rules to the permission system's config, after a backup.
 import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 
 const RUNS_ANYTHING = /^(?:bash|sh|zsh|dash|ksh|fish|eval|exec|source|sudo|su|doas|env|xargs|python\d*|node|bun|deno|ruby|perl|php|npx|bunx|pnpx|curl|wget|ssh|scp|rsync|rm|mv|dd|chmod|chown|find|awk|sed)\b/;
 const OUTWARD = /^(?:git\s+(?:push|reset|clean|rebase|filter-branch)|gh\s+(?:pr\s+merge|release|repo|api|auth|secret)|glab\s+(?:mr\s+merge|release|repo|api|auth)|(?:npm|pnpm|yarn|bun)\s+publish|docker\s+(?:push|run|exec)|kubectl|terraform|wrangler)\b/;
-/** Commands with no subcommands that only read, so a trailing `*` adds just their options. */
-const READERS = new Set(["ls", "pwd", "wc", "head", "tail", "which", "file", "grep", "rg", "tree", "du", "df", "stat", "date", "diff"]);
+/**
+ * Commands with no subcommands that only read, so a trailing `*` adds just their options. Not `rg`,
+ * whose --pre runs a program, `file`, whose -C writes, or `date`, whose -s sets the clock.
+ */
+const READERS = new Set(["ls", "pwd", "wc", "head", "tail", "which", "grep", "tree", "du", "df", "stat", "diff"]);
 const BUILT_IN_TOOLS = new Set(["read", "grep", "find", "ls", "submit_plan"]);
 const REFUSED_SURFACES = new Set(["bash", "path", "external_directory", "mcp", "skill", "*"]);
 
@@ -120,48 +121,36 @@ function writeWithBackup(path, config) {
   return backup;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  const bash = [];
-  const tools = [];
-  const read = [];
-  const write = [];
-  const domains = [];
-  const args = process.argv.slice(2);
-  for (let i = 0; i < args.length; i += 2) {
-    if (args[i] === "--bash" && args[i + 1] !== undefined) bash.push(args[i + 1]);
-    else if (args[i] === "--tool" && args[i + 1] !== undefined) tools.push(args[i + 1]);
-    else if (args[i] === "--sandbox-read" && args[i + 1] !== undefined) read.push(args[i + 1]);
-    else if (args[i] === "--sandbox-write" && args[i + 1] !== undefined) write.push(args[i + 1]);
-    else if (args[i] === "--sandbox-domain" && args[i + 1] !== undefined) domains.push(args[i + 1]);
-    else {
-      console.error("usage: apply.mjs [--bash PATTERN]... [--tool NAME]... [--sandbox-read PATH]... [--sandbox-write PATH]... [--sandbox-domain DOMAIN]...");
-      process.exit(2);
-    }
-  }
-  const agent = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-  const fail = (message) => {
-    console.error(`Nothing was changed.\n${message}`);
-    process.exit(1);
-  };
+function planChoices(agent, { bash = [], tools = [], read = [], write = [], domains = [] }) {
   const path = join(agent, "extensions", "pi-permission-system", "config.json");
   const sandboxPath = join(agent, "sandbox.json");
   const wantsRules = bash.length > 0 || tools.length > 0;
   const wantsSandbox = read.length > 0 || write.length > 0 || domains.length > 0;
-  if (wantsRules && !existsSync(path)) fail(`No config at ${path}.`);
+  if (wantsRules && !existsSync(path)) return { refusals: [`No config at ${path}.`] };
   const rules = wantsRules ? applyRules(JSON.parse(readFileSync(path, "utf8")), { bash, tools }) : { refusals: [] };
   let sandboxConfig = {};
   if (wantsSandbox && existsSync(sandboxPath)) {
     try {
       sandboxConfig = JSON.parse(readFileSync(sandboxPath, "utf8"));
     } catch {
-      fail(`${sandboxPath} isn't plain JSON, perhaps because of comments, and writing it back would lose them. Add these by hand.`);
+      return { refusals: [`${sandboxPath} isn't plain JSON, perhaps because of comments, and writing it back would lose them. Add these by hand.`] };
     }
   }
   const sandbox = wantsSandbox ? applySandbox(sandboxConfig, { read, write, domains }) : { refusals: [] };
   const refusals = [...rules.refusals, ...sandbox.refusals];
-  if (refusals.length > 0) fail(refusals.join("\n"));
-  const backups = [];
-  if (wantsRules) backups.push(writeWithBackup(path, rules.config));
-  if (wantsSandbox) backups.push(writeWithBackup(sandboxPath, sandbox.config));
-  console.log(JSON.stringify({ added: { bash, tools, read, write, domains }, backups: backups.filter(Boolean) }, null, 2));
+  if (refusals.length > 0) return { refusals };
+  return { refusals: [], writes: [...(wantsRules ? [[path, rules.config]] : []), ...(wantsSandbox ? [[sandboxPath, sandbox.config]] : [])] };
+}
+
+/** Why these can't be added, without changing anything. Empty when they can. */
+export function checkChoices(agent, choices) {
+  return planChoices(agent, choices).refusals;
+}
+
+/** Writes the choices, after a backup. Asking the user first is the caller's job. */
+export function applyChoices(agent, choices) {
+  const { refusals, writes } = planChoices(agent, choices);
+  if (refusals.length > 0) return { refusals };
+  const backups = writes.map(([path, config]) => writeWithBackup(path, config)).filter(Boolean);
+  return { refusals: [], added: choices, backups };
 }

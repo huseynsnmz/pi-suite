@@ -199,6 +199,8 @@ export function classifyBash(input: string): BashVerdict {
   const { commands, error } = parse(input);
   if (error) return no(error);
   if (commands.length === 0) return no("empty command");
+  // Whether git is safe depends on the folder, and only the session's own folder gets checked.
+  if (commands.some(([name]) => name === "cd") && runsGit(input)) return no("git after cd runs in a folder that can't be checked");
 
   for (const [name, ...args] of commands) {
     if (name === undefined) return no("empty command");
@@ -208,4 +210,9 @@ export function classifyBash(input: string): BashVerdict {
     if (problem) return no(`${name}: ${problem}`);
   }
   return YES;
+}
+
+/** Whether a command that passed classifyBash runs git, which depends on the repository too. See git-safety.ts. */
+export function runsGit(input: string): boolean {
+  return parse(input).commands.some(([name]) => name === "git");
 }

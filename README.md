@@ -21,7 +21,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-modes@0.3.0
+   pi install npm:@huseynsnmz/pi-modes@0.4.0
    ```
 
 2. Move it above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
@@ -40,7 +40,7 @@ Requires Pi 1.5 or newer.
 
 4. Restart Pi. The footer shows `mode: normal`, and `Shift+Tab` changes the mode.
 
-To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.3.0`.
+To install from git instead, use `pi install git:github.com/huseynsnmz/pi-modes@v0.4.0`.
 
 ## Commands
 
@@ -90,7 +90,7 @@ The package includes a skill that turns repeated approvals into allowlist rules.
 /skill:review-permissions
 ```
 
-It reads the permission system's review log and your past chats, and groups what you approved and what ran. The agent rates each group and shows you the list, and only the rules you pick are added. The scripts refuse rules that are too broad, such as `git *`, or that cover `git push`, `rm`, `curl` or an interpreter like `python`. They back up the config first and place new rules so that your `deny` rules still win. What ran in `yolo` is ignored, and so are commands that look like they hold a secret.
+It reads the permission system's review log and your past chats, and groups what you approved and what ran. The agent rates each group and shows you the list, and only the rules you pick are added. You approve the exact list in a dialog, which the agent can't answer for you. It refuses rules that are too broad, such as `git *`, or that cover `git push`, `rm`, `curl` or an interpreter like `python`. They back up the config first and place new rules so that your `deny` rules still win. What ran in `yolo` is ignored, and so are commands that look like they hold a secret.
 
 With `pi-sandbox`, it also lists the paths and domains the sandbox blocked. What you pick goes in `~/.pi/agent/sandbox.json`. It refuses credential folders, whole home folders, and places where a written file runs later, such as shell profiles and git hooks.
 
@@ -129,7 +129,7 @@ Any other command asks you in `plan` and is blocked in `read-only`.
 These modes keep an honest agent on track. They are not a sandbox.
 
 - **Reads are not restricted by this extension.** A read-only command can still read secrets, so keep `deny` rules for them in your permission system.
-- **A repo can already be malicious.** Commands like `git status` can run code from an existing `.git/config`, such as `core.fsmonitor`. Use a container for repos you don't trust.
+- **A repo can already be malicious.** Git can run code from a repository's config and hooks, even for `git status`, and a plain clone can bring them. In `plan` and `read-only`, git commands stop counting as read-only where a repository sets anything unusual or has a hook that reading can fire, which covers what's known today. Other tools can have their own ways in, so use a container for repos you don't trust.
 - **Child agents started earlier keep running.** Switching mode doesn't stop a subagent that is already running.
 - **The classifier hook relies on an internal detail.** There is no public way to switch a registered judge on and off, so this extension wraps it when it registers. It uses the global key that `pi-permission-system` documents for its service map. If that breaks, you get a warning on your first prompt that the judge may auto-approve outside `auto`.
 

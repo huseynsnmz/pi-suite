@@ -238,17 +238,17 @@ try:
             term.send("\x1b")
             term.until(lambda: "FINISHED" in term.text[mark:], "result", 25)
         check("sandbox: a refused write stays out", not outside.exists())
-        collected = subprocess.run(["node", str(REPO / "skills/review-permissions/scripts/collect.mjs")], env=env, capture_output=True, text=True, timeout=30)
+        collected = subprocess.run(["node", str(REPO / "test/e2e/review-cli.mjs"), "collect"], env=env, capture_output=True, text=True, timeout=30)
         sandbox = json.loads(collected.stdout)["sandbox"]
         found = {(c["kind"], c["value"]) for c in sandbox["candidates"]}
         for kind, value in (("read", str(elsewhere)), ("write", str(outside)), ("domain", "blocked.example.test")):
             check(f"skill: sees the blocked {kind}", any(k == kind and (value in v or v in value) for k, v in found), str(sandbox))
         check("skill: counts what the OS stopped", sandbox["osBlocks"] >= 1 and "Operation not permitted" in sandbox["osExamples"][0], str(sandbox))
         folder = str(project / "sibling")
-        applied = subprocess.run(["node", str(REPO / "skills/review-permissions/scripts/apply.mjs"), "--sandbox-read", folder, "--sandbox-domain", "pkg.example.test"], env=env, capture_output=True, text=True, timeout=30)
+        applied = subprocess.run(["node", str(REPO / "test/e2e/review-cli.mjs"), "apply", "--sandbox-read", folder, "--sandbox-domain", "pkg.example.test"], env=env, capture_output=True, text=True, timeout=30)
         written = json.loads((agent / "sandbox.json").read_text())
         check("skill: allows choices in sandbox.json and keeps the defaults", applied.returncode == 0 and folder in written["filesystem"]["allowRead"] and "." in written["filesystem"]["allowRead"] and "github.com" in written["network"]["allowedDomains"], applied.stderr)
-        refused = subprocess.run(["node", str(REPO / "skills/review-permissions/scripts/apply.mjs"), "--sandbox-read", "~/.ssh"], env=env, capture_output=True, text=True, timeout=30)
+        refused = subprocess.run(["node", str(REPO / "test/e2e/review-cli.mjs"), "apply", "--sandbox-read", "~/.ssh"], env=env, capture_output=True, text=True, timeout=30)
         check("skill: refuses credentials", refused.returncode == 1 and "credentials" in refused.stderr)
         full_text = term.text
         raise SandboxRunDone
@@ -436,7 +436,7 @@ try:
 
     if not SOLO:
         collected = json.loads(subprocess.run(
-            ["node", str(REPO / "skills/review-permissions/scripts/collect.mjs")],
+            ["node", str(REPO / "test/e2e/review-cli.mjs"), "collect"],
             env=env, capture_output=True, text=True, check=True, timeout=20,
         ).stdout)
         examples = [e for c in collected["candidates"] for e in c.get("examples", [])]
@@ -446,7 +446,7 @@ try:
         check("skill: ignores what the judge's yolo link allowed", not any("denied.txt" in e for e in examples))
         config = agent / "extensions/pi-permission-system/config.json"
         applied = subprocess.run(
-            ["node", str(REPO / "skills/review-permissions/scripts/apply.mjs"), "--bash", "touch normal.txt*"],
+            ["node", str(REPO / "test/e2e/review-cli.mjs"), "apply", "--bash", "touch normal.txt*"],
             env=env, capture_output=True, text=True, timeout=20,
         )
         rules = json.loads(config.read_text())["permission"]["bash"]
@@ -456,6 +456,23 @@ try:
     term = Terminal()
     term.wait(r"mode: normal", 40)
     check("a new session starts in normal", True)
+
+    if SOLO:
+        config = agent / "extensions/pi-permission-system/config.json"
+        before = config.read_text()
+        term.prompt("APPLY:npm test*")
+        term.wait(r"Add these permission rules", 15)
+        check("skill: the tool asks, and shows the rule", "npm test*" in term.text)
+        term.send("\x1b")
+        term.until(lambda: "declined" in term.text or "FINISHED" in term.text, "the answer", 15)
+        term.pump(1)
+        check("skill: declining changes nothing", config.read_text() == before)
+        mark = len(term.text)
+        term.prompt("APPLY:npm test*")
+        term.until(lambda: "Add these permission rules" in term.text[mark:], "the second question", 15)
+        term.send("\r")
+        term.until(lambda: "FINISHED" in term.text[mark:], "the result", 15)
+        check("skill: agreeing adds the rule", "npm test*" in json.loads(config.read_text())["permission"]["bash"])
 except SandboxRunDone:
     pass
 finally:
