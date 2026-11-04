@@ -1,5 +1,5 @@
 // Another session's entries, built as pi's interactive mode builds a loaded session.
-import { messageRendererFor, resolveToolRenderers } from "@adeildo/pi-kit";
+import { messageRendererFor, resolveToolRenderers } from "../kit/index.ts";
 import {
 	AssistantMessageComponent,
 	BashExecutionComponent,

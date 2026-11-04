@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
 
-import type { AccountState, Board, PeerMark, RoomMark, WritingMark } from "@adeildo/pi-kit";
+import type { AccountState, Board, PeerMark, RoomMark, WritingMark } from "../kit/index.ts";
 import { VERSION, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import { plainText } from "../render/safe.ts";

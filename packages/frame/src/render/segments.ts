@@ -4,7 +4,7 @@ import {
 	formatClock,
 	type PeerMark,
 	type RoomMark,
-} from "@adeildo/pi-kit";
+} from "../kit/index.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 import { SANDBOX_STATUS, type Snapshot } from "../data/snapshot.ts";

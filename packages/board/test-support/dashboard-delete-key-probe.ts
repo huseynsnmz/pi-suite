@@ -89,8 +89,8 @@ async function waitFor(pred: () => boolean, ms = 2000): Promise<boolean> {
 type Snapshot = { mode: string; prompt: string | null; notice: string | null; archived: string[] };
 
 function snap(dash: DashboardComponent, env: ReturnType<typeof makeEnv>): Snapshot {
-	const d = dash as unknown as { mode: string; pending: { prompt: string } | null; flash: { text: string } | null };
-	return { mode: d.mode, prompt: d.pending?.prompt ?? null, notice: d.flash?.text ?? null, archived: [...env.archiveCalls] };
+	const d = dash as unknown as { mode: string; pending: { prompt: string } | null; inputNotice: { text: string } | null };
+	return { mode: d.mode, prompt: d.pending?.prompt ?? null, notice: d.inputNotice?.text ?? null, archived: [...env.archiveCalls] };
 }
 
 const report: Record<string, unknown> = {};
@@ -114,6 +114,31 @@ const report: Record<string, unknown> = {};
 	dash.handleInput("\x18");
 	await waitFor(() => env.archiveCalls.length > 0);
 	report.double = { ...snap(dash, env), armed };
+	dash.dispose();
+}
+
+// The cursor stays in the deleted row's group, and the notice sits on the frame's bottom edge.
+{
+	const env = makeEnv();
+	createView(env.root, { id: "v3", name: "three", cwd: env.root });
+	createView(env.root, { id: "v4", name: "four", cwd: env.root });
+	env.setRowPatch((r) => (r.meta.id === "v1" ? { ...r, state: { ...(r.state ?? {}), semanticState: "completed" } } : r));
+	const dash = makeDash(env);
+	const d = dash as unknown as { orderedIds: string[]; selectedId: string | null; refresh(): void };
+	const order = [...d.orderedIds];
+	const del = async (id: string) => {
+		d.selectedId = id;
+		dash.handleInput("\x18");
+		dash.handleInput("\x18");
+		await waitFor(() => !d.orderedIds.includes(id));
+	};
+	const live = order.filter((id) => id !== "v1");
+	await del(live[2]);
+	const afterLast = d.selectedId;
+	const screen = dash.render(80);
+	await del(live[0]);
+	const afterFirst = d.selectedId;
+	report.cursor = { order, live, afterLast, afterFirst, bottom: screen.at(-1), top: screen.slice(0, -1).some((line) => line.includes("Deleted")) };
 	dash.dispose();
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { totalsOf as totalsInKit } from "@adeildo/pi-kit";
+import { totalsOf as totalsInKit } from "../src/kit/index.ts";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import { readGit } from "../src/data/git.ts";

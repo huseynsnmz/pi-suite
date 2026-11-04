@@ -1,6 +1,6 @@
 import { sep } from "node:path";
 
-import { formatCost, formatTokens, tildify } from "@adeildo/pi-kit";
+import { formatCost, formatTokens, tildify } from "../kit/index.ts";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export const CELL = {

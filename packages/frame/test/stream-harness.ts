@@ -1,6 +1,6 @@
 // Drives pi's tool component and renderers through the frame in the order pi's interactive mode does.
-import { createApp } from "@adeildo/pi-kit";
-import { fakePi } from "@adeildo/pi-kit/testing";
+import { createApp } from "../src/kit/index.ts";
+import { fakePi } from "../src/kit/testing.ts";
 import { parseStreamingJson } from "@earendil-works/pi-ai";
 import {
 	createEditToolDefinition,

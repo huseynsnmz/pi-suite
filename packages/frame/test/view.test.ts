@@ -1,7 +1,7 @@
 import { keyLabel } from "../src/render/keys.ts";
 import { beforeAll, describe, expect, test } from "bun:test";
 
-import type { SessionSource, SourceItem } from "@adeildo/pi-kit";
+import type { SessionSource, SourceItem } from "../src/kit/index.ts";
 import { initTheme, type SessionEntry, type Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 

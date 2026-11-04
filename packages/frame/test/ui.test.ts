@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { type BoardOp, foldBoard } from "@adeildo/pi-kit";
+import { type BoardOp, foldBoard } from "../src/kit/index.ts";
 import {
 	type KeybindingsManager,
 	type ReadonlyFooterDataProvider,

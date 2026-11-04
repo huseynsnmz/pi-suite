@@ -17,7 +17,7 @@ import {
 	type SessionSource,
 	skillNames,
 	sourceFor,
-} from "@adeildo/pi-kit";
+} from "./kit/index.ts";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -28,7 +28,7 @@ import { Key, type KeyId, type TUI } from "@earendil-works/pi-tui";
 
 import { type GitState, readGit } from "./data/git.ts";
 import { cmdAsKey, SETTINGS_SHORTCUT, watchCmdKey } from "./render/keys.ts";
-import { frameColorOf } from "./data/mode.ts";
+import { frameColorOf, type Mode, modeOf, SENT_IN_ENTRY, sentInFromEntries } from "./data/mode.ts";
 import { type GithubState, readGithub } from "./data/github.ts";
 import { emptySnapshot, type LiveInputs, type Snapshot, SnapshotReader } from "./data/snapshot.ts";
 import type { LastVisit } from "./data/start-notes.ts";
@@ -126,6 +126,8 @@ export const frameFeature = defineFeature({
 		registerToolFrames(scope);
 		registerEffort(scope);
 		registerTodos(scope, () => glyphs().set);
+		const sentLive = new Map<string, Mode>();
+		let sentSaved = { length: -1, modes: new Map<string, Mode>() };
 		framePiEntries(() => {
 			if (live.ctx === undefined) return undefined;
 			return {
@@ -133,6 +135,12 @@ export const frameFeature = defineFeature({
 				set: glyphs().set,
 				you: userFrame.get(scope),
 				from: (text: string) => PROMPT_FROM.current(scope, text)?.name,
+				sentIn: (id: string | undefined, text: string) => {
+					if (id === undefined) return sentLive.get(text);
+					const entries = live.ctx?.sessionManager.getEntries() ?? [];
+					if (entries.length !== sentSaved.length) sentSaved = { length: entries.length, modes: sentInFromEntries(entries) };
+					return sentSaved.modes.get(id);
+				},
 			};
 		});
 		showTimings((message, width) => {
@@ -215,6 +223,7 @@ export const frameFeature = defineFeature({
 			live.ctx = ctx;
 			telemetry.reset();
 			telemetry.restore(ctx.sessionManager.getEntries());
+			sentLive.clear();
 			void probeGit(live);
 			if (ctx.mode !== "tui") return;
 
@@ -240,6 +249,17 @@ export const frameFeature = defineFeature({
 				void probeGithub(live, lastVisit?.at);
 			}
 			showHeader(ctx);
+		});
+
+		scope.on("message_start", (event) => {
+			if (event.message.role !== "user") return;
+			const mode = modeOf(live.footerData?.getExtensionStatuses() ?? new Map());
+			if (mode === undefined) return;
+			const { content, timestamp } = event.message;
+			const text = typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+			sentLive.set(text, mode);
+			// Normal draws as a plain message, so a resumed session needs nothing saved for it.
+			if (mode !== "normal") scope.appendEntry(SENT_IN_ENTRY, { at: timestamp, mode });
 		});
 
 		scope.onShutdown(() => {

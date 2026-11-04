@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { type CallRuling, createApp, RULING } from "@adeildo/pi-kit";
-import { fakePi } from "@adeildo/pi-kit/testing";
+import { type CallRuling, createApp, RULING } from "../src/kit/index.ts";
+import { fakePi } from "../src/kit/testing.ts";
 import type { AgentToolResult, Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { Container, stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 

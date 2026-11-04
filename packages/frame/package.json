@@ -47,10 +47,7 @@
 		"test": "bun test",
 		"e2e": "python3 test/e2e/run.py"
 	},
-	"dependencies": {
-		"@adeildo/pi-kit": "6.0.0",
-		"diff": "9.0.0"
-	},
+	"dependencies": {},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-coding-agent": "*",

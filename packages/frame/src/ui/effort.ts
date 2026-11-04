@@ -1,5 +1,5 @@
 // `/effort`: the thinking level by name, for when Shift+Tab belongs to another extension.
-import type { FeatureScope } from "@adeildo/pi-kit";
+import type { FeatureScope } from "../kit/index.ts";
 
 import { EFFORT_LEVELS } from "../render/paint.ts";
 

@@ -1,9 +1,8 @@
 // An edit's diff inside the frame, without pi's colored box behind it: the line numbers in a gutter,
 // the sign and the text in the diff colors, and only the changed words on a tinted background.
-import { GLYPH, isObject } from "@adeildo/pi-kit";
+import { GLYPH, isObject } from "../kit/index.ts";
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { type Component, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { diffWords } from "diff";
 
 import { printable } from "./streaming.ts";
 
@@ -101,4 +100,58 @@ function changedWords(
 		texts[index + 1] = theme.fg("toolDiffAdded", added);
 	}
 	return texts;
+}
+
+const TOKENS = /\s+|[\p{L}\p{N}_]+|./gsu;
+/** A pair of very long lines costs this much to compare, and a minified file isn't worth it. */
+const MOST_CELLS = 4_000_000;
+
+export interface WordChange {
+	value: string;
+	added?: boolean;
+	removed?: boolean;
+}
+
+/** What changed between two lines, word by word: the longest run of words they share stays. */
+export function diffWords(before: string, after: string): WordChange[] {
+	const a = before.match(TOKENS) ?? [];
+	const b = after.match(TOKENS) ?? [];
+	if ((a.length + 1) * (b.length + 1) > MOST_CELLS) {
+		return [
+			...(before === "" ? [] : [{ value: before, removed: true }]),
+			...(after === "" ? [] : [{ value: after, added: true }]),
+		];
+	}
+	const width = b.length + 1;
+	const shared = new Uint32Array((a.length + 1) * width);
+	for (let i = a.length - 1; i >= 0; i--) {
+		for (let j = b.length - 1; j >= 0; j--) {
+			shared[i * width + j] =
+				a[i] === b[j]
+					? (shared[(i + 1) * width + j + 1] ?? 0) + 1
+					: Math.max(shared[(i + 1) * width + j] ?? 0, shared[i * width + j + 1] ?? 0);
+		}
+	}
+	const parts: WordChange[] = [];
+	const push = (value: string, change: { added?: boolean; removed?: boolean }) => {
+		const last = parts.at(-1);
+		if (last !== undefined && last.added === change.added && last.removed === change.removed) last.value += value;
+		else parts.push({ value, ...change });
+	};
+	let i = 0;
+	let j = 0;
+	while (i < a.length || j < b.length) {
+		if (i < a.length && j < b.length && a[i] === b[j]) {
+			push(a[i] as string, {});
+			i++;
+			j++;
+		} else if (j >= b.length || (i < a.length && (shared[(i + 1) * width + j] ?? 0) >= (shared[i * width + j + 1] ?? 0))) {
+			push(a[i] as string, { removed: true });
+			i++;
+		} else {
+			push(b[j] as string, { added: true });
+			j++;
+		}
+	}
+	return parts;
 }

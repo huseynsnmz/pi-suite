@@ -288,11 +288,27 @@ export function groupRowsByDirectory(rows, now) {
  */
 export function nextVisibleIdAfterRemoval(rows, id, now) {
 	const ordered = groupRowsByFolder(rows, now).flatMap((g) => g.folders.flatMap((f) => f.rows.map((r) => r.id)));
-	const idx = ordered.indexOf(id);
-	if (idx === -1) return null;
-	if (idx + 1 < ordered.length) return ordered[idx + 1];
-	if (idx - 1 >= 0) return ordered[idx - 1];
-	return null;
+	const groups = new Map(groupRowsByFolder(rows, now).flatMap((g) => g.folders.flatMap((f) => f.rows.map((r) => [r.id, g.state]))));
+	return neighborAfterRemoval(ordered, groups, id, (other) => other !== id);
+}
+
+/**
+ * Where the cursor goes when its row is gone: one up in the same group, or the
+ * next one down if it was that group's first. An emptied group falls through to
+ * the nearest row above, then below.
+ * @param {readonly string[]} ordered
+ * @param {ReadonlyMap<string, string>} groups
+ * @param {string} id
+ * @param {(other: string) => boolean} survives
+ * @returns {string | null}
+ */
+export function neighborAfterRemoval(ordered, groups, id, survives) {
+	const at = ordered.indexOf(id);
+	if (at === -1) return null;
+	const above = ordered.slice(0, at).reverse().filter(survives);
+	const below = ordered.slice(at + 1).filter(survives);
+	const sameGroup = (other) => groups.get(other) === groups.get(id);
+	return above.find(sameGroup) ?? below.find(sameGroup) ?? above[0] ?? below[0] ?? null;
 }
 
 /**

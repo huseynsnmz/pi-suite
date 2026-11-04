@@ -2,7 +2,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { isObject } from "@adeildo/pi-kit";
+import { isObject } from "../kit/index.ts";
 
 import type { LastVisit } from "./start-notes.ts";
 

@@ -1,7 +1,7 @@
 /** Turns a response into plain Markdown, leaving out what a person wouldn't see: that's where attacks on a reader hide. */
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
-import TurndownService from "turndown";
+import { markdownOf } from "./markdown.ts";
 import { clean } from "./sanitize.ts";
 
 const NEVER_SHOWN = "script,style,noscript,template,iframe,object,embed,svg,canvas,form,input,textarea,select,button,img,picture,video,audio,meta,link,head";
@@ -49,7 +49,7 @@ function htmlToMarkdown(html: string, base: string): string {
   for (const node of document.querySelectorAll(`body ${NEVER_SHOWN.split(",").join(",body ")},${HIDDEN}`)) node.remove();
   const article = new Readability(document as unknown as Document).parse();
   const content = article?.content ?? document.querySelector("body")?.innerHTML ?? "";
-  const markdown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" }).turndown(content);
+  const markdown = markdownOf(content);
   return title ? `# ${title}\n\n${markdown}` : markdown;
 }
 

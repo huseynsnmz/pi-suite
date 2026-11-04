@@ -78,7 +78,7 @@ More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/
 - **`gh` and `glab` still run in their repositories,** and they call `git` for reads such as the remote list.
 - **`glab` needs a host with `gitlab` in its name.** It starts for that remote, and if a token is set in the environment (`GITLAB_TOKEN`), only for `gitlab.com` or `GITLAB_HOST`, because a repository picks its own remote.
 - **The `git status` protections cover the ways to run code that I know of.** New Git options could add others.
-- **`@adeildo/pi-kit` is still an upstream dependency,** pinned to exact version 6.0.0. Its settings stay in `~/.pi/agent/extensions/pi-harness/settings.json`.
+- **`@adeildo/pi-kit` 6.0.0 is copied into `src/kit`,** with its license, so upstream fixes have to be copied in by hand. Its settings stay in `~/.pi/agent/extensions/pi-harness/settings.json`.
 - **Another session's view isn't fully covered.** Opening one needs other pi-harness packages, and that view hasn't been tested.
 
 ## Development

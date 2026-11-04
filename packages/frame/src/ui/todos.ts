@@ -1,5 +1,5 @@
 // The agent's checklist: the `todo` tool, a panel above the editor and `/todos`.
-import { CUT, entryFrame, type FeatureScope } from "@adeildo/pi-kit";
+import { CUT, entryFrame, type FeatureScope } from "../kit/index.ts";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";

@@ -9,6 +9,7 @@ export const PARTS = {
   memory: "Memory the agent keeps between sessions",
   frame: "The start card, framed editor, tool boxes, footer and todo list",
   board: "The board of agent sessions",
+  commands: "/clear and /security-review",
 } as const;
 
 export type Part = keyof typeof PARTS;

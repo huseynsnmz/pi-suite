@@ -1,5 +1,5 @@
 // Under the folder and the model, only what changed or waits on you since the last session here.
-import { formatClock, GLYPH } from "@adeildo/pi-kit";
+import { formatClock, GLYPH } from "../kit/index.ts";
 
 import type { GithubState } from "./github.ts";
 import type { Snapshot } from "./snapshot.ts";

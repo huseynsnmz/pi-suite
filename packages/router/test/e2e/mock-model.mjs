@@ -35,7 +35,7 @@ createServer((req, res) => {
     const last = body.messages?.at(-1);
     const text = typeof last?.content === "string" ? last.content : (last?.content ?? []).map((part) => part.text ?? "").join("");
     const judge = tools.includes("report_verdict");
-    appendFileSync(log, `${JSON.stringify({ model: body.model, role: last?.role, text: text.slice(0, 60), judge, tools: tools.length, toolNames: tools })}\n`);
+    appendFileSync(log, `${JSON.stringify({ model: body.model, role: last?.role, text: text.slice(0, 60), tail: text.slice(-200), judge, tools: tools.length, toolNames: tools })}\n`);
     if (judge) return reply(res, "", { name: "report_verdict", args: { verdict: "allow" } });
     if (last?.role === "tool") return reply(res, "FINISHED");
     if (text === "OVERLOAD" && body.model !== "back") {

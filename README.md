@@ -10,6 +10,7 @@ One package for [Pi](https://pi.dev): modes and permissions, a framed screen, a 
 | `memory` | Memory the agent keeps between sessions | [README](packages/memory/README.md) |
 | `frame` | The start card, framed editor, tool boxes, footer and the agent's todo list | [README](packages/frame/README.md) |
 | `board` | A board for starting, watching and attaching to background sessions | [README](packages/board/README.md) |
+| `commands` | `/clear` and `/security-review` | [README](packages/commands/README.md) |
 
 ## Install
 

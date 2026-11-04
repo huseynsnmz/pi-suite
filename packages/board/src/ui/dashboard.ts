@@ -33,7 +33,7 @@ import {
 import { createPrewarmScheduler } from "../core/prewarm-schedule.mjs";
 import { planDashboardAttach, planPrewarm, replyNotice } from "./dashboard-decisions.mjs";
 import { ensureCwdStatsSeeded, rankedCwdCandidates, recordCwdLaunch } from "../core/cwd-stats.mjs";
-import { filterRows, groupRowsByFolder, groupRowsByDirectory, rowState, stateGlyph } from "../core/rows.mjs";
+import { filterRows, groupRowsByFolder, groupRowsByDirectory, neighborAfterRemoval, rowState, stateGlyph } from "../core/rows.mjs";
 import { loadSessionView } from "../core/session-view.mjs";
 import { GROUP_LABELS } from "../core/types.mjs";
 import { buildEvidencePanel } from "./dashboard-evidence.mjs";
@@ -90,9 +90,13 @@ type ReturnableMode = Exclude<Mode, "help">;
 type InputNoticeColor = "accent" | "success" | "warning" | "muted" | "dim";
 type FlashLevel = "info" | "warn" | "error";
 
+/** Long enough to read, and longer the more it matters. */
+const NOTICE_MS: Record<FlashLevel, number> = { info: 3_000, warn: 5_000, error: 8_000 };
+const NOTICE_COLOR: Record<FlashLevel, "accent" | "warning" | "error"> = { info: "accent", warn: "warning", error: "error" };
+
 interface InputNotice {
 	text: string;
-	color: InputNoticeColor;
+	color: InputNoticeColor | "error";
 	expiresAt: number;
 }
 
@@ -158,8 +162,9 @@ export class DashboardComponent implements Component {
 	private evidenceScrollTop = 0;
 	private prewarmedId: string | null = null;
 	private readonly prewarmScheduler = createPrewarmScheduler(() => this.prewarmSelected(), 200);
-	private flash: { text: string; level: FlashLevel } | null = null;
 	private inputNotice: InputNotice | null = null;
+	/** A changed filter starts over at the top. Anything else that takes the cursor's row keeps it nearby. */
+	private filterAtLastRefresh = "";
 	private launch: LaunchState | null = null;
 	private lastLaunchPrefs: { cwd: string | null; model: string | null; thinkingLevel: ThinkingLevel | null } | null = null;
 	/** First frame after mount must clear the screen: pi-tui's first render
@@ -208,6 +213,10 @@ export class DashboardComponent implements Component {
 
 	refresh(): void {
 		const previousSelected = this.selectedId;
+		const previousIds = this.orderedIds;
+		const previousGroups = new Map(this.groupOf);
+		const filterChanged = this.filterQuery !== this.filterAtLastRefresh;
+		this.filterAtLastRefresh = this.filterQuery;
 		const all = this.deps.service.rows();
 		this.rows = this.filterQuery ? filterRows(all, this.filterQuery) : all;
 		this.groupOf.clear();
@@ -230,7 +239,8 @@ export class DashboardComponent implements Component {
 			this.selectedId = null;
 			if (this.mode === "select") this.mode = "list";
 		} else if (!this.selectedId || !this.orderedIds.includes(this.selectedId)) {
-			this.selectedId = this.orderedIds[0];
+			const nearby = this.selectedId && !filterChanged ? neighborAfterRemoval(previousIds, previousGroups, this.selectedId, (id: string) => visibleIds.has(id)) : null;
+			this.selectedId = nearby ?? this.orderedIds[0];
 		}
 		if (this.selectedId && this.selectedId !== previousSelected) this.prewarmScheduler.schedule();
 	}
@@ -329,16 +339,25 @@ export class DashboardComponent implements Component {
 	}
 
 	private notice(text: string, level: FlashLevel = "info"): void {
-		this.flash = { text, level };
+		this.inputNotice = { text, color: NOTICE_COLOR[level], expiresAt: Date.now() + NOTICE_MS[level] };
 	}
 
-	private notifyInputState(text: string, color: InputNoticeColor): void {
-		this.inputNotice = { text, color, expiresAt: Date.now() + 3_000 };
+	/** `ms` keeps a "press again" notice from outlasting the time the second press still counts. */
+	private notifyInputState(text: string, color: InputNoticeColor, ms = NOTICE_MS.info): void {
+		this.inputNotice = { text, color, expiresAt: Date.now() + ms };
 	}
 
 	private currentInputNotice(): InputNotice | null {
 		if (this.inputNotice && this.inputNotice.expiresAt <= Date.now()) this.inputNotice = null;
 		return this.inputNotice;
+	}
+
+	private noticeText(): string | null {
+		const notice = this.currentInputNotice();
+		if (!notice) return null;
+		const icon = notice.color === "error" ? "×" : notice.color === "warning" ? "!" : "i";
+		const paint = (text: string) => this.theme.fg(notice.color as never, text);
+		return `${paint(this.theme.bold(icon))} ${paint(notice.text)}`;
 	}
 
 	// ---- input --------------------------------------------------------------
@@ -416,7 +435,7 @@ export class DashboardComponent implements Component {
 			if (matchesKey(data, Key.alt(String(n) as never))) return this.attachInFolder(n - 1);
 		}
 		if (matchesKey(data, Key.escape)) return this.done({ action: "exit" });
-		if (matchesKey(data, Key.ctrl("c"))) return this.notifyInputState("Press ctrl+c again to quit Pi", "accent");
+		if (matchesKey(data, Key.ctrl("c"))) return this.notifyInputState("Press ctrl+c again to quit Pi", "warning", QUIT_PRESS_MS);
 		if (isPrintable(data) || isBracketedPaste(data)) {
 			this.mode = "dispatch";
 			this.handleEditorInput(data);
@@ -1209,10 +1228,10 @@ export class DashboardComponent implements Component {
 		this.deleteArm = { id: row.meta.id, at: now };
 		if (row.alive || row.hostAlive) {
 			const res = this.deps.service.stop(row.meta.id);
-			this.notifyInputState(res.ok ? `Stopping "${row.meta.name}". Press ctrl+x again to delete it` : (res.error ?? "Stop failed"), "warning");
+			this.notifyInputState(res.ok ? `Stopping "${row.meta.name}". Press ctrl+x again to delete it` : (res.error ?? "Stop failed"), "warning", DELETE_DOUBLE_PRESS_MS);
 			return;
 		}
-		this.notifyInputState(`Press ctrl+x again quickly to delete "${row.meta.name}"${isAgentBusy(row) ? " (stops the active run)" : ""}`, "warning");
+		this.notifyInputState(`Press ctrl+x again quickly to delete "${row.meta.name}"${isAgentBusy(row) ? " (stops the active run)" : ""}`, "warning", DELETE_DOUBLE_PRESS_MS);
 	}
 
 	private confirmDeleteState(): void {
@@ -1382,7 +1401,6 @@ export class DashboardComponent implements Component {
 
 		lines.push(...this.renderOverview(width, { needs, working, completed, unread }, ptyHealth));
 		if (!ptyHealth.ok && ptyHealth.issue) lines.push(...renderPtyWarningBanner(this.theme, ptyHealth.issue, width));
-		if (this.flash) lines.push(...renderFlashBanner(this.flash, width, { bottomGap: true }));
 
 		if (this.mode === "help") return this.fitToHeight(this.renderHelp(width), width);
 		if (this.mode === "ptyHelp") return this.fitToHeight(this.renderPtyHelp(width, ptyHealth), width);
@@ -1410,13 +1428,16 @@ export class DashboardComponent implements Component {
 		for (let i = 0; i < spacer; i++) lines.push("");
 
 		lines.push(...footer);
-		return this.fitToHeight(lines, width);
+		return this.fitToHeight(lines, width, false);
 	}
 
-	private fitToHeight(lines: string[], width: number): string[] {
+	/** Views with no input frame show the notice on the bottom row. With one, it takes the frame's bottom edge. */
+	private fitToHeight(lines: string[], width: number, noticeOnLastRow = true): string[] {
 		const height = this.tui.terminal?.rows ?? 24;
 		const out = lines.slice(0, height).map((l) => clip(l, width));
 		while (out.length < height) out.push("");
+		const notice = noticeOnLastRow ? this.noticeText() : null;
+		if (notice) out[height - 1] = clip(` ${notice}`, width);
 		return out;
 	}
 
@@ -1444,7 +1465,7 @@ export class DashboardComponent implements Component {
 		const color = this.modeColor();
 		const inner = Math.max(1, width - 4);
 		if (this.mode === "confirm" && this.pending) {
-			return renderFrame(t, "warning", width, { title: t.fg("warning", "confirm"), hints: "" }, [t.fg("warning", this.pending.prompt)]);
+			return renderFrame(t, "warning", width, { title: t.fg("warning", "confirm"), hints: this.noticeText() ?? "" }, [t.fg("warning", this.pending.prompt)]);
 		}
 		// Enter starts it right there, so the folder has to be in view first.
 		let title = t.fg("muted", `new session in ${truncate(displayPath(this.newTaskCwd()), Math.max(10, inner - 20))}`);
@@ -1460,10 +1481,7 @@ export class DashboardComponent implements Component {
 		} else {
 			body = [];
 		}
-		const lines = renderFrame(t, color, width, { title, hints: t.fg("dim", hints.join("   ")) }, body);
-		const notice = this.currentInputNotice();
-		if (notice) lines.push(clip(` ${t.fg(notice.color, notice.text)}`, width));
-		return lines;
+		return renderFrame(t, color, width, { title, hints: this.noticeText() ?? t.fg("dim", hints.join("   ")) }, body);
 	}
 
 	private listHints(): string[] {
@@ -1669,8 +1687,6 @@ export class DashboardComponent implements Component {
 				}),
 			);
 			out.push(clip(this.hintLine("reply", "accent", ["enter send", "shift+enter newline", "esc back"]), width));
-			const notice = this.currentInputNotice();
-			if (notice) out.push(clip(t.fg(notice.color, `ⓘ ${notice.text}`), width));
 		} else {
 			out.push(clip(t.fg("dim", "type to reply   ↑↓ prev/next   ←/→ attach   ctrl+d done   ctrl+o transcript   ctrl+e evidence   esc back"), width));
 		}

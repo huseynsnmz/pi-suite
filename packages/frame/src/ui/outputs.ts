@@ -1,5 +1,5 @@
 // Alt+O: one tool call's whole output in a scrollable frame, newest first; the arrows move between calls.
-import { callTarget, CUT, frame, frameInner, FRAME_Y, GLYPH, type KeyHint } from "@adeildo/pi-kit";
+import { callTarget, CUT, frame, frameInner, FRAME_Y, GLYPH, type KeyHint } from "../kit/index.ts";
 import type { SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,

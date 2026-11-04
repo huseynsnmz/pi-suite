@@ -1,4 +1,4 @@
-import { type UsageLike } from "@adeildo/pi-kit";
+import { type UsageLike } from "../kit/index.ts";
 
 export {
 	emptyTotals,
@@ -7,7 +7,7 @@ export {
 	totalsOf,
 	type Totals,
 	usageTotals,
-} from "@adeildo/pi-kit";
+} from "../kit/index.ts";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export interface RequestRecord {

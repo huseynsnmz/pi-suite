@@ -2,7 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 // While the model writes an edit or a write, these show the lines arriving, with a cursor.
-import { GLYPH, isObject, tildify } from "@adeildo/pi-kit";
+import { GLYPH, isObject, tildify } from "../kit/index.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "@earendil-works/pi-coding-agent";
 
 import { tabs } from "./format.ts";

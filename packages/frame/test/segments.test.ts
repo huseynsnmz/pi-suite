@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { type BoardOp, emptyBoard, foldBoard } from "@adeildo/pi-kit";
+import { type BoardOp, emptyBoard, foldBoard } from "../src/kit/index.ts";
 import { stripTerminalSequences as plainText } from "@earendil-works/pi-tui";
 
 import { emptyTotals } from "../src/data/totals.ts";

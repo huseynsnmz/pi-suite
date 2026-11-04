@@ -23,6 +23,10 @@ test("typed x is text, not a delete", () => {
 
 test("ctrl+x twice on an inactive row deletes it with no confirm step", () => {
 	assert.match(report.double.armed, /Press ctrl\+x again/);
+	assert.equal(report.cursor.afterLast, report.cursor.live[1], "last in its group -> one up");
+	assert.equal(report.cursor.afterFirst, report.cursor.live[1], "first in its group -> the next one, not the group above");
+	assert.match(report.cursor.bottom, /^╰─ × |^╰─ i Deleted "/, "the notice is on the frame's bottom edge");
+	assert.equal(report.cursor.top, false, "and nowhere else");
 	assert.equal(report.double.mode, "list");
 	assert.deepEqual(report.double.archived, ["v1"]);
 });

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { filterRows, groupRows, groupRowsByFolder, nextVisibleIdAfterRemoval, parseFilter, rowState, rowView, stateColor, stateGlyph } from "../src/core/rows.mjs";
+import { filterRows, groupRows, groupRowsByFolder, neighborAfterRemoval, nextVisibleIdAfterRemoval, parseFilter, rowState, rowView, stateColor, stateGlyph } from "../src/core/rows.mjs";
 import { createView, listRows } from "../src/core/store.mjs";
 import { GROUP_LABELS, GROUP_ORDER } from "../src/core/types.mjs";
 
@@ -248,14 +248,26 @@ test("rowView does not mark staleHost for fresh heartbeats, terminal states, or 
 	assert.equal(rowView({ ...base, host: null, hostAlive: false }, now).staleHost, false);
 });
 
+test("neighborAfterRemoval stays in the group while it can", () => {
+	const ordered = ["a1", "a2", "b1", "b2", "c1"];
+	const groups = new Map([["a1", "a"], ["a2", "a"], ["b1", "b"], ["b2", "b"], ["c1", "c"]]);
+	const without = (...gone) => (id) => !gone.includes(id);
+	assert.equal(neighborAfterRemoval(ordered, groups, "b2", without("b2")), "b1", "one up in the group");
+	assert.equal(neighborAfterRemoval(ordered, groups, "b1", without("b1")), "b2", "the group's first goes down, not into the group above");
+	assert.equal(neighborAfterRemoval(ordered, groups, "c1", without("c1")), "b2", "an emptied group goes to the row above");
+	assert.equal(neighborAfterRemoval(ordered, groups, "a1", without("a1", "a2")), "b1", "an emptied top group goes down");
+	assert.equal(neighborAfterRemoval(ordered, groups, "b2", without("b1", "b2")), "a2", "a batch skips rows that also went");
+	assert.equal(neighborAfterRemoval(ordered, groups, "nope", () => true), null);
+});
+
 test("nextVisibleIdAfterRemoval: neighbor semantics (issue #147 A2)", () => {
 	const root = mkdtempSync(join(tmpdir(), "agentview-neighbor-"));
 	try {
 		for (const id of ["v1", "v2", "v3"]) createView(root, { id, name: id, cwd: root });
 		const now = Date.now();
 		const rows = listRows(root);
-		assert.equal(nextVisibleIdAfterRemoval(rows, "v2", now), "v3", "middle row -> next visible row");
-		assert.equal(nextVisibleIdAfterRemoval(rows, "v3", now), "v2", "last row -> previous row");
+		assert.equal(nextVisibleIdAfterRemoval(rows, "v2", now), "v1", "middle row -> one up");
+		assert.equal(nextVisibleIdAfterRemoval(rows, "v1", now), "v2", "first row -> next row");
 		const single = mkdtempSync(join(tmpdir(), "agentview-neighbor-single-"));
 		try {
 			createView(single, { id: "only", name: "only", cwd: single });

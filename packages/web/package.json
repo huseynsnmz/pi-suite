@@ -41,8 +41,7 @@
   },
   "dependencies": {
     "@mozilla/readability": "0.6.0",
-    "linkedom": "0.18.12",
-    "turndown": "7.2.2"
+    "linkedom": "0.18.12"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -53,7 +52,6 @@
     "@earendil-works/pi-ai": "1.5.0",
     "@earendil-works/pi-coding-agent": "1.5.0",
     "@types/node": "26.6.6",
-    "@types/turndown": "5.0.6",
     "typebox": "1.4.3",
     "typescript": "7.0.2"
   },

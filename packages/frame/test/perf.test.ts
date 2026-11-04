@@ -2,8 +2,8 @@
 // and a component that paints itself again on every one of those redraws is what makes typing lag.
 import { describe, expect, test } from "bun:test";
 
-import { createApp, RULING } from "@adeildo/pi-kit";
-import { fakePi } from "@adeildo/pi-kit/testing";
+import { createApp, RULING } from "../src/kit/index.ts";
+import { fakePi } from "../src/kit/testing.ts";
 import type { Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 

@@ -1,4 +1,4 @@
-import { CUT } from "@adeildo/pi-kit";
+import { CUT } from "../kit/index.ts";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export interface Piece {

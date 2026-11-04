@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 
-import { drawDiff, editBody } from "../src/render/diff.ts";
+import { drawDiff, editBody, diffWords } from "../src/render/diff.ts";
 
 /** Marks colors as tags, so a test reads which text wears which. */
 const theme = {
@@ -71,4 +71,16 @@ describe("pi's edit body in the frame", () => {
 		const lines = editBody(own({ error: "no match" }), "edit a.ts", theme).render(40);
 		expect(lines.at(-1)).toBe("<error>no match</>");
 	});
+});
+
+test("word changes keep what the lines share, and give up on lines too long to compare", () => {
+	expect(diffWords("const a = 1", "const b = 1")).toEqual([
+		{ value: "const " },
+		{ value: "a", removed: true },
+		{ value: "b", added: true },
+		{ value: " = 1" },
+	]);
+	expect(diffWords("", "x")).toEqual([{ value: "x", added: true }]);
+	const long = "a ".repeat(2000);
+	expect(diffWords(long, `${long}b`).map((part) => Boolean(part.removed))).toEqual([true, false]);
 });

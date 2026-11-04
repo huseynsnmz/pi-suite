@@ -1,6 +1,6 @@
 // Messages sent while the agent works, in a dashed frame above the editor. Pi has no hook for
 // drawing them, so this wraps its method.
-import { CUT, drawnByWidth, CHANGES_X, entryFrame } from "@adeildo/pi-kit";
+import { CUT, drawnByWidth, CHANGES_X, entryFrame } from "../kit/index.ts";
 import { InteractiveMode, type Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 

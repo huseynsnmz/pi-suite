@@ -50,6 +50,30 @@ describe("pi's entries in the transcript", () => {
 		expect(lines.join("")).not.toContain("\u001b[48;");
 	});
 
+	test("your message keeps the color and name of the mode it was sent in", () => {
+		const colors: string[] = [];
+		const theme = { fg: (color: string, text: string) => { colors.push(color); return text; }, bg: (_c: string, text: string) => text, bold: (text: string) => text } as never;
+		let live: "auto" | "normal" = "auto";
+		framePiEntries(() => ({ theme, set: "ascii", you: true, sentIn: (id, text) => (id === "saved" ? "yolo" : text === "live" ? live : undefined) }));
+		const top = (component: UserMessageComponent) => {
+			colors.length = 0;
+			return { line: visible(component.render(30))[0], colors: [...colors] };
+		};
+		const make = (text: string, id?: string) => new UserMessageComponent(text, getMarkdownTheme(), 1, [], id);
+		const saved = top(make("hi", "saved"));
+		expect(saved.line).toContain("you yolo");
+		expect(saved.colors).toContain("error");
+		const sent = make("live");
+		expect(top(sent).line).toContain("you auto");
+		// It stays what it was, even once the same words go out in another mode.
+		live = "normal";
+		expect(top(sent).line).toContain("you auto");
+		const next = top(make("live"));
+		expect(next.line).not.toContain("normal");
+		expect(next.colors).toContain("accent");
+		expect(top(make("other")).colors).not.toContain("warning");
+	});
+
 	test("a label like [skill] gives way to the top edge, alone or in front of the name", () => {
 		expect(
 			visible(

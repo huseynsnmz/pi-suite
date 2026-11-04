@@ -9,7 +9,7 @@ import {
 	type RulingTone,
 	GLYPH,
 	LINE,
-} from "@adeildo/pi-kit";
+} from "../kit/index.ts";
 import type { Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,

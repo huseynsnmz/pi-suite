@@ -1,5 +1,5 @@
 // The mark follows the icon set in the look's settings.
-import { GLYPH, SPIN } from "@adeildo/pi-kit";
+import { GLYPH, SPIN } from "../kit/index.ts";
 
 import type { IconSet } from "./glyphs.ts";
 

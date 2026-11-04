@@ -1,6 +1,6 @@
 // Another session over the whole screen. A read-only source has a line in place of the editor.
 import { keyLabel } from "../render/keys.ts";
-import { entryFrame, type SessionSummary, type SessionSource } from "@adeildo/pi-kit";
+import { entryFrame, type SessionSummary, type SessionSource } from "../kit/index.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,

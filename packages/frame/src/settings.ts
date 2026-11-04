@@ -1,4 +1,4 @@
-import { boolean, literal, setting } from "@adeildo/pi-kit";
+import { boolean, literal, setting } from "./kit/index.ts";
 
 import type { FrameStyle } from "./render/frame.ts";
 import type { IconMode } from "./render/glyphs.ts";

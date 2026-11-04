@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import { CUT, GLYPH } from "@adeildo/pi-kit";
+import { CUT, GLYPH } from "../kit/index.ts";
 import { keyText } from "@earendil-works/pi-coding-agent";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 

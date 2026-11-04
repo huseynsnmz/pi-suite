@@ -1,6 +1,6 @@
 // Pi's own transcript entries in the harness frame instead of a background. Pi has no hook for
 // drawing them, so this wraps each component's render.
-import { CHANGES_CUT, CHANGES_X, entryFrame, type EntryFrame, GLYPH } from "@adeildo/pi-kit";
+import { CHANGES_CUT, CHANGES_X, entryFrame, type EntryFrame, GLYPH } from "../kit/index.ts";
 import {
 	BashExecutionComponent,
 	BranchSummaryMessageComponent,
@@ -12,12 +12,20 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 
+import { type Mode, modeColor } from "../data/mode.ts";
 import type { IconSet } from "../render/glyphs.ts";
 import { isBlank } from "./tool-frame.ts";
 
 /** Undefined leaves pi's entries as they are. `from` names the client a prompt came from. */
 export type EntryPaint = () =>
-	| { theme: Theme; set: IconSet; you: boolean; from?: (text: string) => string | undefined }
+	| {
+			theme: Theme;
+			set: IconSet;
+			you: boolean;
+			from?: (text: string) => string | undefined;
+			/** The mode a message went out in. A live message has no id yet, so it goes by its text. */
+			sentIn?: (id: string | undefined, text: string) => Mode | undefined;
+	  }
 	| undefined;
 
 const YOU: Readonly<Record<IconSet, string>> = {
@@ -56,7 +64,7 @@ export function framePiEntries(source: EntryPaint): void {
 	if (installed) return;
 	installed = true;
 	wrap(UserMessageComponent, (self, look) =>
-		look.you ? youFrame(look, fromOf(self, look)) : undefined,
+		look.you ? youFrame(look, fromOf(self, look), sentInOf(self, look)) : undefined,
 	);
 	wrap(CompactionSummaryMessageComponent, (_self, look) => pi(look, "compacted"));
 	wrap(BranchSummaryMessageComponent, (_self, look) => pi(look, "branch summary"));
@@ -167,10 +175,24 @@ function fromOf(self: object, look: Paint): string | undefined {
 	return sentFrom.get(self);
 }
 
-function youFrame(look: Paint, from: string | undefined): Framing {
-	const you = `${look.theme.fg("accent", YOU[look.set])} ${look.theme.fg("muted", "you")}`;
+const sentModes = new WeakMap<object, Mode | undefined>();
+
+function sentInOf(self: object, look: Paint): Mode | undefined {
+	if (sentModes.has(self)) return sentModes.get(self);
+	const { messageId, text } = self as { messageId?: string; text?: string };
+	const mode = look.sentIn?.(messageId, text ?? "");
+	// A later message with the same text may go out in another mode, so a found mode sticks to this one.
+	if (mode !== undefined || messageId !== undefined) sentModes.set(self, mode);
+	return mode;
+}
+
+/** Plan is the same color as a plain message, so the name says it too. */
+function youFrame(look: Paint, from: string | undefined, mode: Mode | undefined): Framing {
+	const color = (mode && modeColor(mode)) ?? "accent";
+	const named = mode === undefined || mode === "normal" ? "" : ` ${look.theme.fg(color, mode)}`;
+	const you = `${look.theme.fg(color, YOU[look.set])} ${look.theme.fg("muted", "you")}${named}`;
 	const top = from === undefined ? you : `${you} ${look.theme.fg("dim", `from ${from}`)}`;
-	return { top, color: "accent" };
+	return { top, color };
 }
 
 function pi(look: Paint, what: string): Framing {

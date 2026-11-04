@@ -33,11 +33,11 @@ def check(name, ok, detail=""):
 
 
 class Terminal:
-    def __init__(self):
+    def __init__(self, *args):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(project)
-            os.execve(str(PI), [str(PI)], env)
+            os.execve(str(PI), [str(PI), *args], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 130, 0, 0))
         self.text = ""
 
@@ -92,7 +92,7 @@ try:
         tools, _ = tools_with([part])
         others = [other for name, other in PART_TOOLS.items() if name != part]
         check(f"turning off {part} removes {tool}, and only that", tool not in tools and all(other in tools for other in others), str(tools))
-    tools, child = tools_with(["modes", "router", "web", "memory", "frame", "board"])
+    tools, child = tools_with(["modes", "router", "web", "memory", "frame", "board", "commands"])
     check("with every part off, Pi still works", "OK" in child.stdout and not set(PART_TOOLS.values()) & set(tools), str(tools))
     (agent / "suite.json").write_text('{"off":["modes","wbe"]}')
     child = subprocess.run([str(PI), "-p", "hello"], env=env, cwd=project, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=90)
@@ -105,7 +105,7 @@ try:
     check("skills from parts that are on are listed", "review-permissions" in term.text)
     term.command("/suite list")
     term.pump(0.5)
-    check("/suite list shows every part", all(f"{part}: on" in term.text for part in ("modes", "router", "web", "memory", "frame", "board")), term.text[-400:])
+    check("/suite list shows every part", all(f"{part}: on" in term.text for part in ("modes", "router", "web", "memory", "frame", "board", "commands")), term.text[-400:])
     mark = len(term.text)
     term.command("/suite")
     check("/suite opens a list", term.wait("Enter turns a part on or off", mark, 8))
@@ -144,6 +144,64 @@ try:
     (agent / "suite.json").write_text("{oops")
     term = Terminal()
     check("a broken suite.json says so", term.wait("isn't valid JSON"))
+    term.close()
+    term = None
+    (agent / "suite.json").unlink()
+
+    def sessions():
+        return set((agent / "sessions").rglob("*.jsonl"))
+
+    def sent():
+        return [json.loads(line) for line in log.read_text().splitlines()]
+
+    term = Terminal()
+    term.wait("Mock")
+    term.pump(3)
+    term.command("/mode auto")
+    mark = len(term.text)
+    term.command("sent while in auto")
+    check("a message names the mode it was sent in", term.wait("you auto", mark, 15), term.text[-300:])
+    term.wait("OK", mark, 15)
+    term.pump(1)
+    term.command("/mode normal")
+    mark = len(term.text)
+    term.command("sent while in normal")
+    term.wait("OK", mark, 15)
+    term.pump(1)
+    check("a normal message doesn't", "you normal" not in term.text[mark:], term.text[mark:][-300:])
+    before = sessions()
+    mark = len(term.text)
+    term.command("/clear")
+    term.pump(2)
+    check("/clear redraws the start card after the old conversation", term.text.rfind("Nothing new") > term.text.rfind("sent while in normal"), term.text[mark:][-300:])
+    term.command("after clearing")
+    term.pump(3)
+    check("the new session goes to its own file, and the old one is kept", before < sessions(), str(sessions()))
+    check("the model doesn't see the cleared conversation", sent()[-1]["text"] == "after clearing", str(sent()[-1]))
+    term.close()
+    term = Terminal("--session", str(max(before, key=lambda path: path.stat().st_mtime)))
+    check("a resumed session still shows the mode", term.wait("you auto", 0, 15), term.text[-300:])
+    term.pump(1)
+    check("and only on the message sent in it", term.text.count("you auto") == 1 or "sent while in normal" in term.text)
+    term.close()
+
+    subprocess.run("git init -q -b main && git add . && git -c user.name=t -c user.email=t@t commit -qm first", shell=True, cwd=project, check=True)
+    term = Terminal()
+    term.wait("Mock")
+    term.pump(3)
+    mark = len(term.text)
+    term.command("/security-review")
+    check("/security-review with no changes says so", term.wait("No changes to review", mark, 8), term.text[mark:][-300:])
+    (project / "AGENTS.md").write_text("Be brief. LINE-UNDER-REVIEW\n")
+    mark = len(term.text)
+    count = len(sent())
+    term.command("/security-review focus on auth")
+    check("it shows one line", term.wait("Security review of 1 changed file against", mark, 8), term.text[mark:][-300:])
+    term.wait("OK", mark, 15)
+    term.pump(1)
+    request = sent()[count]
+    check("the model gets the instructions and the diff", "reviewing code changes" in request["text"] and "LINE-UNDER-REVIEW" in request["tail"], str(request))
+    check("the screen doesn't get the diff", "LINE-UNDER-REVIEW" not in term.text[mark:], term.text[mark:][-300:])
 except Exception as error:
     check(f"stopped early: {error}", False)
 finally:

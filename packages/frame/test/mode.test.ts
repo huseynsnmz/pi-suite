@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 
-import { fakePi } from "@adeildo/pi-kit/testing";
-import { createApp } from "@adeildo/pi-kit";
+import { fakePi } from "../src/kit/testing.ts";
+import { createApp } from "../src/kit/index.ts";
 
-import { frameColorOf, modeOf } from "../src/data/mode.ts";
+import { frameColorOf, modeOf, SENT_IN_ENTRY, sentInFromEntries } from "../src/data/mode.ts";
 import { frameFeature } from "../src/index.ts";
 import { hints } from "../src/ui/header.ts";
 
@@ -23,6 +23,22 @@ test.each([
 test("anything else leaves the frame alone", () => {
 	expect(frameColorOf(new Map())).toBeUndefined();
 	expect(frameColorOf(status("mode: sideways"))).toBeUndefined();
+});
+
+test("a saved session gives each message back its mode, and ignores anything else", () => {
+	const saved = (data: unknown) => ({ type: "custom", customType: SENT_IN_ENTRY, data });
+	const user = (id: string, timestamp: number) => ({ type: "message", id, message: { role: "user", timestamp } });
+	const sent = sentInFromEntries([
+		saved({ at: 1, mode: "auto" }),
+		user("first", 1),
+		user("plain", 2),
+		saved({ at: 3, mode: "sideways" }),
+		user("bad", 3),
+		saved(undefined),
+		{ type: "custom", customType: "other", data: { at: 4, mode: "yolo" } },
+		user("other", 4),
+	]);
+	expect([...sent]).toEqual([["first", "auto"]]);
 });
 
 test("the start card only promises what the keys do", () => {

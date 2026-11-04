@@ -1,5 +1,5 @@
 // What each look setting changes, drawn under the list in Alt+S.
-import { entryFrame, GLYPH, type Json } from "@adeildo/pi-kit";
+import { entryFrame, GLYPH, type Json } from "../kit/index.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 

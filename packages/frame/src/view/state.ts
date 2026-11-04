@@ -1,5 +1,5 @@
 // A viewed session's folded state and scroll position, kept apart from drawing so it tests without a terminal.
-import type { SessionSummary, SourceItem } from "@adeildo/pi-kit";
+import type { SessionSummary, SourceItem } from "../kit/index.ts";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export class ViewState {

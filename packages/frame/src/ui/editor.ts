@@ -1,4 +1,4 @@
-import { skillQueryAt } from "@adeildo/pi-kit";
+import { skillQueryAt } from "../kit/index.ts";
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import {
 	matchesKey,

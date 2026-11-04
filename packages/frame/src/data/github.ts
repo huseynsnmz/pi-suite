@@ -1,6 +1,6 @@
 // CI's last run on this branch and your open pull requests that wait on you, asked once per launch.
 // Shows nothing without the forge's tool, network or a remote it serves, and starts only that tool.
-import { isObject } from "@adeildo/pi-kit";
+import { isObject } from "../kit/index.ts";
 
 import { gitlabHosts, glabMayStart, readGitlab } from "./gitlab.ts";
 import { processRunner, type Runner } from "./runner.ts";
