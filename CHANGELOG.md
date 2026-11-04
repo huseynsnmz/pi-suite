@@ -5,6 +5,13 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.15.2] - 2026-11-04
+
+### Changes
+
+- **deps**: exact versions everywhere, with Pi 1.5.0, TypeScript 7 and @types/node 26 for development
+- **deps**: remove the postinstall script, since Pi 1.5.0 no longer ships the versions it patched
+
 ## [0.15.1] - 2026-11-04
 
 ### Features

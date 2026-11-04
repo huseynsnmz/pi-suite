@@ -14,8 +14,7 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
-    "verbatimModuleSyntax": false,
-    "baseUrl": "."
+    "verbatimModuleSyntax": false
   },
   "include": ["index.ts", "src/**/*.ts", "src/**/*.mjs", "runner/**/*.mjs"],
   "exclude": ["node_modules", "test", "test-support"]

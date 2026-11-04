@@ -1,6 +1,6 @@
 {
   "name": "@huseynsnmz/pi-board",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "A board for Pi's background sessions: start, watch, reply to and attach to them. A fork of @zhuxixi/pi-agent-board.",
   "type": "module",
   "main": "./index.ts",
@@ -51,7 +51,6 @@
     "image": "https://github.com/zhuxixi/pi-agent-board/raw/refs/heads/main/assets/banner.png"
   },
   "scripts": {
-    "postinstall": "node scripts/patch-vulns.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
     "test:coverage": "c8 node scripts/run-tests.mjs",
@@ -73,14 +72,20 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.1.0",
-    "@earendil-works/pi-tui": "1.1.0",
-    "@types/node": "^25.9.1",
-    "c8": "^12.0.0",
-    "typescript": "^5.9.3"
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "@types/node": "26.6.6",
+    "c8": "12.0.0",
+    "typescript": "7.0.2"
   },
   "dependencies": {
-    "@xterm/headless": "^6.0.0",
-    "node-pty": "^1.1.0"
+    "@xterm/headless": "6.0.0",
+    "node-pty": "1.1.0"
+  },
+  "overrides": {
+    "test-exclude": {
+      "glob": "14.0.3",
+      "minimatch": "11.0.4"
+    }
   }
 }
