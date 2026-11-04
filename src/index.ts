@@ -172,19 +172,7 @@ export const frameFeature = defineFeature({
 		let stopCmdKeys: (() => void) | undefined;
 		watchCmdKey(() => live.tui?.terminal.kittyProtocolActive === true);
 
-		scope.onSessionStart((ctx) => {
-			live.ctx = ctx;
-			telemetry.reset();
-			telemetry.restore(ctx.sessionManager.getEntries());
-			void probeGit(live);
-			if (ctx.mode !== "tui") return;
-
-			stopCmdKeys?.();
-			stopCmdKeys = ctx.ui.onTerminalInput((data) => {
-				const key = cmdAsKey(data);
-				return key === undefined ? undefined : { data: key };
-			});
-
+		const installFooter = (ctx: ExtensionContext) =>
 			ctx.ui.setFooter(
 				(tui, _theme, data) =>
 					new FooterComponent(tui, data, screen, {
@@ -202,6 +190,38 @@ export const frameFeature = defineFeature({
 						},
 					}),
 			);
+
+		const showHeader = (ctx: ExtensionContext) =>
+			installHeader(
+				ctx,
+				screen,
+				scope,
+				() => lastVisit,
+				() => live.github,
+			);
+
+		// A board blanks these while it's up, and Pi can only give back its own.
+		scope.events.on("agent-board:closed", () => {
+			const ctx = live.ctx;
+			if (ctx?.mode !== "tui") return;
+			installFooter(ctx);
+			showHeader(ctx);
+		});
+
+		scope.onSessionStart((ctx) => {
+			live.ctx = ctx;
+			telemetry.reset();
+			telemetry.restore(ctx.sessionManager.getEntries());
+			void probeGit(live);
+			if (ctx.mode !== "tui") return;
+
+			stopCmdKeys?.();
+			stopCmdKeys = ctx.ui.onTerminalInput((data) => {
+				const key = cmdAsKey(data);
+				return key === undefined ? undefined : { data: key };
+			});
+
+			installFooter(ctx);
 			ctx.ui.setWidget(STRIP_WIDGET, () => new StripComponent(screen), {
 				placement: "aboveEditor",
 			});
@@ -216,13 +236,7 @@ export const frameFeature = defineFeature({
 				probedGithub = true;
 				void probeGithub(live, lastVisit?.at);
 			}
-			installHeader(
-				ctx,
-				screen,
-				scope,
-				() => lastVisit,
-				() => live.github,
-			);
+			showHeader(ctx);
 		});
 
 		scope.onShutdown(() => {

@@ -52,7 +52,9 @@ More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/
 
 **`pi-modes`:** it takes over `Shift+Tab`, so the start card says `shift+tab mode`. To keep a key for effort, set `app.thinking.cycle` in `~/.pi/agent/keybindings.json`, or use `/effort`.
 
-**`pi-sandbox`:** the start card shows `/sandbox-disable` or `/sandbox-enable`, and the bottom line shows `sandbox: on` or `sandbox: off` after the mode. Its longer status moves to `/sandbox`.
+**`pi-sandbox`:** the bottom line shows `sandbox: on` or `sandbox: off` after the mode. Its longer status moves to `/sandbox`.
+
+**`pi-board`:** use `@huseynsnmz/pi-board`. The frame comes back when its board closes.
 
 **`pi-cloak`:** no changes are needed. Tool boxes, `Alt+O` and the session file all show the masked text, and the automated run covers it.
 

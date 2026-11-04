@@ -22,6 +22,14 @@ const message = { timestamp: at };
 const line = (timing: Timing | undefined, width = 200, stopReason?: string) =>
 	timingLine(timing, { ...message, stopReason }, width);
 
+test("the model follows the clock, without its path", () => {
+	const named = (width: number) => timingLine(done, { ...message, model: "@cf/moonshotai/kimi-k2.6" }, width);
+	expect(named(200)).toStartWith(`${CLOCK}  kimi-k2.6  ttft 812ms`);
+	expect(timingLine(undefined, { ...message, model: "m" }, 200)).toBe(`${CLOCK}  m`);
+	expect(named(20)).toBe(`${CLOCK}  total 4.218s`);
+	expect(named(37)).toBe(`${CLOCK}  kimi-k2.6  total 4.218s`);
+});
+
 test("clock times and durations keep their milliseconds", () => {
 	expect(clockTime(at)).toBe(CLOCK);
 	expect(exactly(812)).toBe("812ms");

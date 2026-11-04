@@ -25,6 +25,7 @@ export function exactly(ms: number): string {
 export interface AnsweredMessage {
 	timestamp: number;
 	stopReason?: string;
+	model?: string;
 }
 
 /** Each with its rank: the highest goes first when the line runs out of room. */
@@ -63,13 +64,20 @@ function partsOf(timing: Timing | undefined, message: AnsweredMessage): Part[] {
 	];
 }
 
+/** Without the provider's path, as `kimi-k2.6` for `@cf/moonshotai/kimi-k2.6`. */
+function modelPart(message: AnsweredMessage): Part[] {
+	const name = message.model?.split("/").at(-1);
+	return name ? [[name, 1]] : [];
+}
+
 /** What's known of a call to the model, as much of it as fits. */
 export function timingLine(
 	timing: Timing | undefined,
 	message: AnsweredMessage,
 	width: number,
 ): string {
-	let parts = partsOf(timing, message);
+	const [clock, ...rest] = partsOf(timing, message) as [Part, ...Part[]];
+	let parts: Part[] = [clock, ...modelPart(message), ...rest];
 	const text = () => parts.map(([part]) => part).join("  ");
 	while (visibleWidth(text()) > width) {
 		const highest = Math.max(...parts.map(([, drop]) => drop));

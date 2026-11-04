@@ -57,6 +57,7 @@ if any("pi-permission-system" in p for p in EXTRA):
 
 (project / "AGENTS.md").write_text("Be brief.\n")
 CLOAK = any("pi-cloak" in p for p in [*EXTRA, *AFTER])
+BOARD = any("pi-board" in p for p in [*EXTRA, *AFTER])
 SECRET = "sk-e2e-hunter2-secret"
 if CLOAK:
     (agent / "cloak.json").write_text(json.dumps({"patterns": [{"filePattern": ["**/.env", "**/.env.*"], "cloakPattern": {"pattern": "^([A-Z0-9_]+)=(.+)$", "replace": "$1="}}]}))
@@ -304,7 +305,7 @@ try:
     check("no shortcut conflict warnings", "shortcut conflict" not in plain.lower() and "conflicts with" not in plain.lower())
     if SANDBOX:
         check("the card gives an extension's version", "pi-sandbox@0.7.3" in plain)
-    check("the sandbox command is on the card only with pi-sandbox", ("/sandbox-disable" in plain) == SANDBOX)
+    check("the card names no sandbox command", "/sandbox-" not in plain)
     before = len(term.plain())
     os.write(term.fd, b"\x13")
     check("ctrl+s opens the settings", term.wait("Frame", 8) and "Frame" in term.plain()[before:])
@@ -353,7 +354,7 @@ try:
     term.wait("slowlast", 10)
     term.pump(1)
     final = term.plain()[before:]
-    check("the final line has the clock, total and stall", bool(re.search(CLOCK + r"  ttft \S+  server \S+  total \d\.\d{3}s  stall", final)), final[-400:])
+    check("the final line has the clock, model, total and stall", bool(re.search(CLOCK + r"  m  ttft \S+  server \S+  total \d\.\d{3}s  stall", final)), final[-400:])
     term.prompt("TOUCH")
     term.pump(1)
     check("a tool box has the clock and the time in ms", bool(re.search(CLOCK + r"  took \d+(?:ms|\.\d{3}s)", term.plain())))
@@ -399,7 +400,41 @@ try:
     term = Terminal(args=["--continue"])
     term.wait("Mock", 40)
     term.pump(3)
-    check("a resumed session keeps a response's timings", bool(re.search(CLOCK + r"  ttft \S+  server \S+  total \d\.\d{3}s  stall", term.plain())), term.plain()[-500:])
+    check("a resumed session keeps a response's timings", bool(re.search(CLOCK + r"  m  ttft \S+  server \S+  total \d\.\d{3}s  stall", term.plain())), term.plain()[-500:])
+    if BOARD:
+        term.close()
+        term = Terminal()
+        term.wait("Mock", 40)
+        term.pump(3)
+        LEFT = "\x1b[D"
+        check("the card is up before the board", "ready when you are" in term.plain())
+        term.send(LEFT)
+        term.send(LEFT)
+        check("left twice on an empty prompt opens the board", term.wait("AgentBoard", 10))
+        term.pump(1)
+        term.send("i")
+        term.pump(0.4)
+        term.send("hello")
+        term.pump(0.4)
+        before = len(term.plain())
+        term.send("\r")
+        check("enter starts the task with no dialog", term.wait("Dispatched", 8) and "Start session" not in term.plain()[before:])
+        term.pump(1)
+        before = len(term.plain())
+        term.send("\x1b")
+        term.pump(2)
+        after = term.plain()[before:]
+        check("the frame's card comes back when the board closes", "ctrl+s settings" in after or "π-frame" in after)
+        check("the frame's footer comes back", "ctx " in after and "(auto)" not in after)
+        term.send("draft")
+        term.pump(0.4)
+        before = len(term.plain())
+        term.send(LEFT)
+        term.send(LEFT)
+        term.pump(2)
+        check("left twice with text only moves the cursor", "AgentBoard" not in term.plain()[before:])
+        term.send("\x7f" * 5)
+        term.pump(0.4)
 finally:
     term.close()
     model.terminate()

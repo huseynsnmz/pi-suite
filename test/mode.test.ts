@@ -26,11 +26,7 @@ test("anything else leaves the frame alone", () => {
 });
 
 test("the start card only promises what the keys do", () => {
-	const shown = (modes: boolean, sandbox: "on" | "off" | undefined) =>
-		hints(modes, sandbox).map((hint) => hint.key);
-	expect(shown(true, "on")).toContain("/sandbox-disable");
-	expect(shown(true, "off")).toContain("/sandbox-enable");
-	const plain = hints(false, undefined).map((hint) => hint.does);
+	const plain = hints(false).map((hint) => hint.does);
 	expect(plain).toEqual(["commands", "model", "settings"]);
 });
 
