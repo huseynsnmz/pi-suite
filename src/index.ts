@@ -19,6 +19,7 @@ import { registerBgCommand } from "./commands/bg.js";
 import { registerBoardModelCommand } from "./commands/board-model.ts";
 import { announceBoardClosedOn } from "./ui/chrome.ts";
 import { watchDoubleLeft } from "./ui/double-left.ts";
+import { watchWaiting } from "./ui/waiting.ts";
 
 const RUNNER_SCRIPT = fileURLToPath(new URL("../runner/job-runner.mjs", import.meta.url));
 const PTY_RUNNER_SCRIPT = fileURLToPath(new URL("../runner/pty-runner.mjs", import.meta.url));
@@ -42,6 +43,7 @@ let hostedSessionEpoch = 0;
 export default function piAgentBoard(pi: ExtensionAPI): void {
 	announceBoardClosedOn(pi.events);
 	let stopDoubleLeft: (() => void) | null = null;
+	let stopWaiting: (() => void) | null = null;
 	const root = defaultRoot();
 	const { piCommand, piArgsPrefix } = resolvePiInvocation();
 
@@ -200,6 +202,10 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 		if (!isHostedChild && ctx.mode === "tui") {
 			stopDoubleLeft?.();
 			stopDoubleLeft = watchDoubleLeft(ctx);
+		}
+		if (ctx.mode === "tui") {
+			stopWaiting?.();
+			stopWaiting = watchWaiting(ctx, (waiting) => syncForeground({ type: "agent_board_waiting", waiting }, ctx));
 		}
 		if (isHostedChild && !hostedEditorReporter && typeof ctx.ui?.getEditorText === "function" && hostedViewId) {
 			const { createEditorStateReporter } = await import("./core/editor-state-reporter.mjs");

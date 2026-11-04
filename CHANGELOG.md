@@ -5,6 +5,13 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.15.1] - 2026-11-04
+
+### Features
+
+- **keys**: `Ctrl+S` groups by directory, `Shift+Up` and `Shift+Down` reorder, `Ctrl+G` opens your editor
+- **state**: a session waiting on a permission prompt or other dialog shows as `Needs answer`
+
 ## [0.15.0] - 2026-11-04
 
 ### Features

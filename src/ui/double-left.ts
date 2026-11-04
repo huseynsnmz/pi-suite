@@ -2,25 +2,15 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, Key, matchesKey } from "@earendil-works/pi-tui";
 import { createDoublePress } from "../core/double-press.mjs";
-
-const WIDGET = "agent-board-double-left";
-
-type Editorish = { getExpandedText?: () => string };
+import { watchFocus } from "./focus.ts";
 
 export function watchDoubleLeft(ctx: ExtensionContext): () => void {
-	// Only a widget is handed the TUI, and only the TUI knows what has focus: without this check,
-	// the Enter below could answer a dialog that's on screen.
-	let focused: () => unknown = () => null;
-	ctx.ui.setWidget(WIDGET, (tui) => {
-		// Newer than some versions of Pi this may load in. Without it, double left does nothing.
-		focused = () => (tui as unknown as { getFocusedComponent?: () => unknown }).getFocusedComponent?.();
-		return { render: () => [], invalidate() {} };
-	});
+	const focus = watchFocus(ctx, "agent-board-double-left");
 	const presses = createDoublePress();
 	const stop = ctx.ui.onTerminalInput((data) => {
 		if (isKeyRelease(data)) return undefined;
-		const editor = focused() as Editorish | null | undefined;
-		if (!matchesKey(data, Key.left) || editor?.getExpandedText?.() !== "") {
+		// Checked first: the Enter below could otherwise answer a dialog that's on screen.
+		if (!matchesKey(data, Key.left) || focus.promptText() !== "") {
 			presses.reset();
 			return undefined;
 		}
@@ -31,6 +21,6 @@ export function watchDoubleLeft(ctx: ExtensionContext): () => void {
 	});
 	return () => {
 		stop();
-		ctx.ui.setWidget(WIDGET, undefined);
+		focus.stop();
 	};
 }

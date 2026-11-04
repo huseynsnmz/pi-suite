@@ -1810,6 +1810,16 @@ export function createService(opts) {
 			appendDiagnostic(root, row.meta.id, { source: "evidence", level: "warn", code: "evidence_reduce_failed", message: "Could not reduce hosted evidence", details: { error: err instanceof Error ? err.message : String(err) } });
 		}
 
+		if (event.type === "agent_board_waiting") {
+			status.semanticState = event.waiting ? "needs_input" : "working";
+			status.processState = "alive";
+			status.question = event.waiting ? "Waiting on a prompt. Attach to answer it." : null;
+			status.summary = event.waiting ? "Waiting on a prompt" : "Running…";
+			status.lastActivityAt = now;
+			void writeForegroundState(row, status);
+			return true;
+		}
+
 		if (event.type === "input" || event.type === "before_agent_start" || event.type === "agent_start") {
 			status.semanticState = "working";
 			status.processState = "alive";
@@ -2291,6 +2301,22 @@ export function createService(opts) {
 			if (!meta) return { ok: false, error: "Unknown session" };
 			meta.pinned = pinned;
 			writeMeta(root, meta);
+			return { ok: true };
+		},
+
+		/**
+		 * Gives these rows this order, numbered from the lowest they had: rows created in the same
+		 * millisecond have no order between them to swap.
+		 * @param {string[]} viewIds
+		 */
+		setRowOrder(viewIds) {
+			const metas = viewIds.map((id) => loadRow(root, id)?.meta);
+			if (metas.some((meta) => !meta)) return { ok: false, error: "Unknown session" };
+			const base = Math.min(...metas.map((meta) => meta.order ?? meta.createdAt ?? 0));
+			metas.forEach((meta, index) => {
+				meta.order = base + index;
+				writeMeta(root, meta);
+			});
 			return { ok: true };
 		},
 

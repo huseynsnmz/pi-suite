@@ -62,3 +62,31 @@ test("it's drawn in frames, with the keys on the bottom edge", () => {
 test("the session on screen is never prewarmed", () => {
 	assert.equal(out.prewarmedCurrent, false);
 });
+
+test("ctrl+s switches between state and directory groups", () => {
+	assert.equal(out.grouping.before, false);
+	assert.equal(out.grouping.after, true);
+	assert.equal(out.grouping.summaryNamesState, true);
+	assert.equal(out.groupingBack, true);
+});
+
+test("shift+arrows swap neighbors, and it survives reopening", () => {
+	const { before, after, lasting } = out.reorder;
+	assert.deepEqual(after, [before[1], before[0], before[2]]);
+	assert.equal(out.reorder.selected, before[0]);
+	assert.deepEqual(lasting, after);
+	assert.deepEqual(out.reorderBack, before);
+});
+
+test("a dialog during a run shows as waiting, and closing it clears that", () => {
+	assert.equal(out.waiting.state, "needs_input");
+	assert.match(out.waiting.question, /Attach to answer/);
+	assert.equal(out.waiting.resumed, "working");
+	assert.equal(out.waiting.cleared, null);
+});
+
+test("ctrl+g edits the task in the external editor", () => {
+	assert.equal(out.editor.input, "draft edited");
+	assert.equal(out.editor.mode, "dispatch");
+	assert.deepEqual(out.editor.stops, ["stop", "start"]);
+});

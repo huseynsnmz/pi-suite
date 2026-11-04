@@ -142,6 +142,9 @@ Typing goes straight into the input, as in Claude Code's agent view, so there's 
 | `Alt+1`..`Alt+9` | Attach to that row. |
 | `Space` | Open or close Peek. |
 | `/` / `Ctrl+F` | Filter the list. |
+| `Ctrl+S` | Group by state or by directory. |
+| `Shift+Up` / `Shift+Down` | Move the row up or down its group. |
+| `Ctrl+G` | Write the task in `$VISUAL` or `$EDITOR`. |
 | `Ctrl+T` | Pin or unpin. |
 | `Ctrl+R` | Rename. |
 | `Ctrl+X` | Stop the session; press again within 2 seconds to delete it. |
@@ -348,6 +351,7 @@ Run `/board-model` inside Pi to pick a model or turn it off. It's saved to the f
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `model` | off | Helper model, as `provider/id`. |
+| `groupBy` | `state` | `state` or `directory`. `Ctrl+S` changes it. |
 | `root` | `~/.pi/agent/agent-board/` | Where the board stores its state. |
 | `titleThinking` | `low` | Thinking level for titles. |
 | `autoDone` | `false` | Let the helper model mark sessions Done. |

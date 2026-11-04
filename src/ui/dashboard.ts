@@ -10,6 +10,8 @@ import { readFileSync } from "node:fs";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { readConfig, writeConfig } from "../core/config.mjs";
+import { editExternally } from "./external-editor.ts";
 import { requestDashboardRender } from "../core/dashboard-render.mjs";
 import { normalizeGenericStatusText } from "../core/derive.mjs";
 import { firstSentence, truncate } from "../core/heuristics.mjs";
@@ -28,7 +30,7 @@ import {
 import { createPrewarmScheduler } from "../core/prewarm-schedule.mjs";
 import { planDashboardAttach, planPrewarm, replyNotice } from "./dashboard-decisions.mjs";
 import { ensureCwdStatsSeeded, rankedCwdCandidates, recordCwdLaunch } from "../core/cwd-stats.mjs";
-import { filterRows, groupRowsByFolder, rowState, stateGlyph } from "../core/rows.mjs";
+import { filterRows, groupRowsByFolder, groupRowsByDirectory, rowState, stateGlyph } from "../core/rows.mjs";
 import { loadSessionView } from "../core/session-view.mjs";
 import { GROUP_LABELS } from "../core/types.mjs";
 import { buildEvidencePanel } from "./dashboard-evidence.mjs";
@@ -136,6 +138,9 @@ export class DashboardComponent implements Component {
 	private pending: PendingConfirm | null = null;
 	private deleteArm: { id: string; at: number } | null = null;
 	private exitArmedAt: number | null = null;
+	private groupBy: "state" | "directory" = readConfig().groupBy === "directory" ? "directory" : "state";
+	private readonly groupOf = new Map<string, string>();
+	private readonly neighborsOf = new Map<string, string>();
 	private helpReturnMode: ReturnableMode = "list";
 	private ptyHelpReturnMode: ReturnableMode = "list";
 	private peekId: string | null = null;
@@ -195,8 +200,18 @@ export class DashboardComponent implements Component {
 		const previousSelected = this.selectedId;
 		const all = this.deps.service.rows();
 		this.rows = this.filterQuery ? filterRows(all, this.filterQuery) : all;
-		const groups = groupRowsByFolder(this.rows, Date.now());
-		this.orderedIds = groups.flatMap((g) => g.folders.flatMap((f) => f.rows.map((r) => r.id)));
+		this.groupOf.clear();
+		this.neighborsOf.clear();
+		const place = (group: string, leaf: string, ids: string[]) => {
+			for (const id of ids) {
+				this.groupOf.set(id, group);
+				this.neighborsOf.set(id, `${group}\0${leaf}`);
+			}
+			return ids;
+		};
+		this.orderedIds = this.groupBy === "directory"
+			? groupRowsByDirectory(this.rows, Date.now()).flatMap((f) => place(f.key, "", f.rows.map((r) => r.id)))
+			: groupRowsByFolder(this.rows, Date.now()).flatMap((g) => g.folders.flatMap((f) => place(g.state, f.key, f.rows.map((r) => r.id))));
 		const visibleIds = new Set(this.orderedIds);
 		this.selectedIds = new Set([...this.selectedIds].filter((id) => visibleIds.has(id)));
 		if (this.orderedIds.length === 0) {
@@ -373,6 +388,10 @@ export class DashboardComponent implements Component {
 		if (matchesKey(data, Key.ctrl("r"))) return this.startRename();
 		if (matchesKey(data, Key.ctrl("t"))) return this.togglePin();
 		if (matchesKey(data, Key.ctrl("x"))) return this.handleDeleteKey();
+		if (matchesKey(data, Key.ctrl("s"))) return this.toggleGrouping();
+		if (matchesKey(data, Key.ctrl("g"))) return void this.openExternalEditor();
+		if (matchesKey(data, Key.shift("up"))) return this.moveRow(-1);
+		if (matchesKey(data, Key.shift("down"))) return this.moveRow(1);
 		if (matchesKey(data, Key.ctrl("a"))) return this.startSelectionMode();
 		if (matchesKey(data, Key.ctrl("o"))) return this.openSessionView();
 		if (matchesKey(data, Key.ctrl("e"))) return this.openEvidenceView();
@@ -420,9 +439,50 @@ export class DashboardComponent implements Component {
 		this.prewarmScheduler.schedule();
 	}
 
-	/** To the first row of the next state's group, or of this one's when going back. */
+	private toggleGrouping(): void {
+		this.groupBy = this.groupBy === "state" ? "directory" : "state";
+		try {
+			writeConfig({ groupBy: this.groupBy });
+		} catch {
+			/* best effort: it still applies until the board closes */
+		}
+		this.refresh();
+	}
+
+	/** Swaps it with the row next to it, within the same group. */
+	private moveRow(direction: 1 | -1): void {
+		const id = this.selectedId;
+		if (!id) return;
+		const neighbor = this.orderedIds[this.orderedIds.indexOf(id) + direction];
+		if (!neighbor || this.neighborsOf.get(neighbor) !== this.neighborsOf.get(id)) return;
+		const group = this.orderedIds.filter((other) => this.neighborsOf.get(other) === this.neighborsOf.get(id));
+		const at = group.indexOf(id);
+		[group[at], group[at + direction]] = [group[at + direction]!, group[at]!];
+		this.deps.service.setRowOrder?.(group);
+		this.refresh();
+	}
+
+	private async openExternalEditor(): Promise<void> {
+		const terminal = this.tui as unknown as { stop?: () => void; start?: () => void };
+		terminal.stop?.();
+		let edited: string | undefined;
+		try {
+			edited = await editExternally(this.input);
+		} finally {
+			terminal.start?.();
+			this.tui.requestRender(true);
+		}
+		if (edited === undefined) {
+			this.notifyInputState("Set $VISUAL or $EDITOR to write the task in your editor", "warning");
+			return;
+		}
+		this.setInput(edited);
+		this.mode = edited ? "dispatch" : "list";
+	}
+
+	/** To the first row of the next group, or of this one when going back. */
 	private jumpGroup(direction: 1 | -1): void {
-		const stateAt = (index: number) => this.deps.service.row(this.orderedIds[index])?.state?.semanticState;
+		const stateAt = (index: number) => this.groupOf.get(this.orderedIds[index]);
 		let index = this.selectedId ? this.orderedIds.indexOf(this.selectedId) : 0;
 		const start = stateAt(index);
 		if (direction === 1) {
@@ -444,6 +504,7 @@ export class DashboardComponent implements Component {
 
 	private handleDispatchKey(data: string): void {
 		if (matchesKey(data, Key.ctrl("n"))) return this.openLaunchDialog();
+		if (matchesKey(data, Key.ctrl("g"))) return void this.openExternalEditor();
 		if (matchesKey(data, Key.ctrl("enter"))) return this.startNow(true);
 		if (matchesKey(data, Key.enter)) return this.startNow();
 		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
@@ -1429,6 +1490,7 @@ export class DashboardComponent implements Component {
 			return [t.fg("muted", this.filterQuery ? "  No sessions match the filter." : "  No background sessions yet. Type below and press Enter.")];
 		}
 		const now = Date.now();
+		if (this.groupBy === "directory") return this.renderDirectories(width, now);
 		const groups = groupRowsByFolder(this.rows, now);
 		const out: string[] = [];
 		for (const g of groups) {
@@ -1440,6 +1502,23 @@ export class DashboardComponent implements Component {
 				for (const rv of folder.rows) {
 					out.push(this.renderRow(rv, width, { showFolder: !showFolderHeaders, indent: showFolderHeaders ? 4 : 2 }));
 				}
+			}
+		}
+		return out;
+	}
+
+	private renderDirectories(width: number, now: number): string[] {
+		const t = this.theme;
+		const out: string[] = [];
+		for (const folder of groupRowsByDirectory(this.rows, now)) {
+			if (out.length > 0) out.push("");
+			const title = t.fg("accent", t.bold(`▾ ${folder.name}`));
+			const count = t.fg("dim", ` ${folder.rows.length}`);
+			const rule = Math.max(0, width - visibleWidth(`▾ ${folder.name} ${folder.rows.length}`) - 2);
+			out.push(clip(`${title}${count} ${t.fg("borderMuted", "─".repeat(rule))}`, width));
+			for (const rv of folder.rows) {
+				const summary = `${GROUP_LABELS[rv.state]} · ${rv.summary}`;
+				out.push(this.renderRow({ ...rv, summary }, width, { showFolder: false, indent: 2 }));
 			}
 		}
 		return out;
@@ -1722,6 +1801,9 @@ export class DashboardComponent implements Component {
 			["alt+1..9", "Attach to that row"],
 			["space", "Open or close the peek panel"],
 			["/ or ctrl+f", "Filter the list"],
+			["ctrl+s", "Group by state or by directory"],
+			["shift+↑ / ↓", "Move the row up or down its group"],
+			["ctrl+g", "Write the task in $VISUAL or $EDITOR"],
 			["ctrl+t", "Pin or unpin"],
 			["ctrl+r", "Rename"],
 			["ctrl+x", "Stop the session; press again within 2s to delete it"],

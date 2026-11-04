@@ -154,6 +154,7 @@ export function rowView(row, now) {
 		folderName,
 		folderPath,
 		pinned: Boolean(row.meta.pinned),
+		order: row.meta.order ?? row.meta.createdAt ?? 0,
 		state,
 		alive: Boolean(row.alive),
 		hostAlive: Boolean(row.hostAlive),
@@ -258,6 +259,24 @@ export function groupRowsByFolder(rows, now) {
 }
 
 /**
+ * The other way to see the list: one group per directory, whatever state its rows are in.
+ * @param {Row[]} rows
+ * @param {number} now
+ * @returns {Array<{ key: string, name: string, path: string, rows: RowView[] }>}
+ */
+export function groupRowsByDirectory(rows, now) {
+	const byFolder = new Map();
+	for (const view of rows.map((r) => rowView(r, now))) {
+		const existing = byFolder.get(view.folderKey);
+		if (existing) existing.rows.push(view);
+		else byFolder.set(view.folderKey, { key: view.folderKey, name: view.folderName, path: view.folderPath, rows: [view] });
+	}
+	const folders = [...byFolder.values()];
+	for (const folder of folders) folder.rows = sortRowViews(folder.rows);
+	return folders.sort((a, b) => Math.min(...a.rows.map((r) => r.createdAt)) - Math.min(...b.rows.map((r) => r.createdAt)) || a.name.localeCompare(b.name));
+}
+
+/**
  * Issue #147: the row the board should select after `id` is removed — the
  * next visible row in dashboard order, else the previous one, else null
  * (caller falls back to the existing orderedIds[0] clamp). Uses the same
@@ -286,6 +305,7 @@ function sortRowViews(views) {
 	return views.sort(
 		(a, b) =>
 			Number(b.pinned) - Number(a.pinned) ||
+			a.order - b.order ||
 			a.createdAt - b.createdAt ||
 			a.id.localeCompare(b.id),
 	);

@@ -1,6 +1,6 @@
 // Drives the board's keys through handleInput() and reports what they did, as JSON.
 // Run via `node --experimental-transform-types`. Not typechecked.
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createService } from "../src/runtime/service.mjs";
@@ -8,6 +8,11 @@ import { createView } from "../src/core/store.mjs";
 import { DashboardComponent } from "../src/ui/dashboard.ts";
 
 const root = mkdtempSync(join(tmpdir(), "board-keys-"));
+process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+const fakeEditor = join(root, "edit.sh");
+writeFileSync(fakeEditor, '#!/bin/sh\necho " edited" >> "$1"\n', { mode: 0o755 });
+process.env.VISUAL = fakeEditor;
+delete process.env.EDITOR;
 for (const [id, name] of [["v1", "one"], ["v2", "two"], ["v3", "three"]]) createView(root, { id, name, cwd: root });
 const dispatched = [];
 const real = createService({
@@ -120,6 +125,54 @@ const out = {};
 	dash.selectedId = row.meta.id;
 	dash.prewarmSelected();
 	out.prewarmedCurrent = prewarmed.includes(row.meta.id);
+	dash.dispose();
+}
+{
+	// Ctrl+S groups by directory, and back; the choice is saved in the config.
+	const dash = make();
+	const header = () => dash.render(120).join("\n");
+	const before = header();
+	press(dash, "\x13");
+	out.grouping = { before: before.includes("▾"), after: header().includes("▾"), summaryNamesState: /Needs|Queued|Working|Running/i.test(header()) };
+	press(dash, "\x13");
+	out.groupingBack = !header().includes("▾ ");
+	dash.dispose();
+}
+{
+	// Shift+arrows swap neighbors in a group, and it lasts.
+	const dash = make();
+	dash.refresh();
+	const before = [...dash.orderedIds];
+	dash.selectedId = before[0];
+	press(dash, "\x1b[1;2B");
+	const after = [...dash.orderedIds];
+	const reopened = make();
+	out.reorder = { before, after, selected: dash.selectedId, lasting: [...reopened.orderedIds] };
+	press(dash, "\x1b[1;2A");
+	out.reorderBack = [...dash.orderedIds];
+	dash.dispose();
+	reopened.dispose();
+}
+{
+	// A dialog during a run puts the row in Needs answer, and closing it takes it back.
+	const id = real.rows()[0].meta.id;
+	await real.syncHostedEvent(id, { type: "agent_board_waiting", waiting: true });
+	await new Promise((r) => setTimeout(r, 300));
+	const waiting = real.row(id).state;
+	await real.syncHostedEvent(id, { type: "agent_board_waiting", waiting: false });
+	await new Promise((r) => setTimeout(r, 300));
+	const resumed = real.row(id).state;
+	out.waiting = { state: waiting.semanticState, question: waiting.question, resumed: resumed.semanticState, cleared: resumed.question };
+}
+{
+	// Ctrl+G hands the text to the editor, and takes back what it wrote.
+	const dash = make();
+	const stops = [];
+	dash.tui.stop = () => stops.push("stop");
+	dash.tui.start = () => stops.push("start");
+	press(dash, "draft", "\x07");
+	await new Promise((r) => setTimeout(r, 700));
+	out.editor = { input: dash.input, mode: dash.mode, stops };
 	dash.dispose();
 }
 console.log(JSON.stringify(out));
