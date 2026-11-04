@@ -2907,7 +2907,7 @@ test("step 19 mainscreen: REAL TuiMainScreen cursor tail follows sync CLOSE with
 		assert.deepEqual(result.evidence.frameInverseCells, [], "no inverse cell anywhere in the literal frame");
 		assert.equal(result.evidence.noExtraCursor, true, "noExtraCursor is the inverse-cell check (never a row-text comparison)");
 		assert.equal(result.evidence.cursorTailFollowsClose, true, "the cursor parking + hide tail must follow the sync CLOSE");
-		assert.equal(result.evidence.outerCursorMatches, true, "the outer cursor must park at (11,4) hidden");
+		assert.equal(result.evidence.outerCursorMatches, true, "the outer cursor must park at (11,4)");
 		assert.equal(result.evidence.frameCompletePresent, true, "the child's independent frameComplete fixture truth must be present");
 		assert.equal(result.evidence.frameComplete.frameId, "MAIN");
 		assert.equal(result.childExit.exitCode, 0, "the fixture child must exit cleanly");

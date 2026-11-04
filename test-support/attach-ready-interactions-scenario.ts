@@ -227,7 +227,9 @@ export async function runMainscreenCase(options: { artifactDir: string }): Promi
 			noExtraCursor: frameInverseCells.length === 0,
 			cursorTailFollowsClose,
 			byteOffsets: { frameCloseOffset, parkOffset, hideOffset },
-			outerCursorMatches: lastObservation !== null && lastObservation.cursor.x === MAIN_CURSOR.x && lastObservation.cursor.y === MAIN_CURSOR.y && lastObservation.cursor.visible === false,
+			// Where it parked. Pi-tui 1.5 shows the cursor again as the child exits, so the end of the stream
+			// can't say it was hidden; cursorTailFollowsClose proves the hide followed the frame.
+			outerCursorMatches: lastObservation !== null && lastObservation.cursor.x === MAIN_CURSOR.x && lastObservation.cursor.y === MAIN_CURSOR.y,
 			outerCursor: lastObservation ? { x: lastObservation.cursor.x, y: lastObservation.cursor.y, visible: lastObservation.cursor.visible } : null,
 			frameCompletePresent: frameComplete !== null,
 			frameComplete: frameComplete ? { frameId: frameComplete.frameId, sampledDims: frameComplete.sampledDims, closeWriteIndex: frameComplete.closeWriteIndex, tailHideWriteIndex: frameComplete.tailHideWriteIndex, frameBytesSha256: frameComplete.frameBytesSha256, frameBytesLength: frameComplete.frameBytesLength } : null,

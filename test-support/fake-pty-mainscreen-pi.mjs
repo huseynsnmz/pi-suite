@@ -66,8 +66,6 @@ const component = {
 
 const terminal = new ProcessTerminal();
 const tui = new TuiMainScreen(terminal, false);
-// Newer pi-tui shows the hardware cursor unless told otherwise; this fixture proves the hidden tail.
-tui.setShowHardwareCursor(false);
 tui.addChild(component);
 tui.setFocus(component);
 
