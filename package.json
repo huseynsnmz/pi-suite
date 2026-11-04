@@ -1,0 +1,57 @@
+{
+  "name": "@huseynsnmz/pi-memory",
+  "version": "0.1.0",
+  "description": "Long-term memory for Pi: review past conversations, keep what lasts in SQLite, and recall it in later sessions",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "memory",
+    "sqlite"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huseynsnmz/pi-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/huseynsnmz/pi-memory/issues"
+  },
+  "homepage": "https://github.com/huseynsnmz/pi-memory#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "skills",
+    "README.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "26.6.6",
+    "typebox": "1.4.3",
+    "typescript": "7.0.2"
+  }
+}
