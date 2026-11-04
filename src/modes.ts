@@ -23,6 +23,11 @@ export function resumedMode(saved: Mode): Mode {
   return saved === "yolo" ? "normal" : saved;
 }
 
+/** What a new session starts in. Yolo can't be one, because it has to be asked for each time. */
+export function startingMode(configured: unknown): Mode {
+  return isMode(configured) && configured !== "yolo" ? configured : "normal";
+}
+
 export type ToolDecision =
   | { action: "allow" }
   | { action: "ask"; reason: string }

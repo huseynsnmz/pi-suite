@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { withAliases, withoutAliases } from "../src/deny-off.ts";
-import { decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
+import { decideToolCall, displayCommand, loadsAfterPermissionSystem, type Mode, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "../src/modes.ts";
 import { borrowStatusReader, loadsFirst, sandboxInstalled, sandboxIsOn } from "../src/sandbox.ts";
 
 const bash = (command: string) => ({ command });
@@ -111,4 +111,11 @@ test("reading the statuses leaves the footer as it found it, and needs to load f
   assert.deepEqual(calls, ["set", "restored"]);
   for (const first of ["npm:@huseynsnmz/pi-modes@0.2.2", "/work/pi-modes", { source: "npm:@huseynsnmz/pi-modes" }]) assert.equal(loadsFirst([first, "x"]), true);
   for (const packages of [["npm:pi-sandbox", "npm:@huseynsnmz/pi-modes"], [], undefined]) assert.equal(loadsFirst(packages), false);
+});
+
+test("a new session starts in the configured mode, but never in yolo", () => {
+  assert.equal(startingMode("plan"), "plan");
+  assert.equal(startingMode("yolo"), "normal");
+  assert.equal(startingMode("nonsense"), "normal");
+  assert.equal(startingMode(undefined), "normal");
 });

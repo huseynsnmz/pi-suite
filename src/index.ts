@@ -1,17 +1,18 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { borrowStatusReader, loadsFirst, sandboxInstalled, sandboxIsOn, type StatusReader } from "./sandbox.ts";
 import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
 import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "./judge-gate.ts";
-import { decideToolCall, displayCommand, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
+import { decideToolCall, displayCommand, isMode, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
 const DENY_STATUS_KEY = "pi-modes-deny";
 const ENTRY_TYPE = "pi-modes";
 const CYCLE_KEY = "shift+tab";
+const DEFAULTABLE: string[] = MODES.filter((name) => name !== "yolo");
 
 const STATUS_COLOR = { normal: "dim", auto: "warning", plan: "accent", "read-only": "success", yolo: "error" } as const;
 
@@ -82,14 +83,30 @@ function packagesLoadThisFirst(): boolean {
   }
 }
 
+const configPath = () => join(getAgentDir(), "extensions", "pi-modes", "config.json");
+
+function readConfig(): Record<string, unknown> {
+  try {
+    const config: unknown = JSON.parse(readFileSync(configPath(), "utf8"));
+    return typeof config === "object" && config !== null ? (config as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDefaultMode(mode: Mode): void {
+  mkdirSync(dirname(configPath()), { recursive: true });
+  writeFileSync(configPath(), `${JSON.stringify({ ...readConfig(), defaultMode: mode }, null, 2)}\n`);
+}
+
 function restoredMode(ctx: ExtensionContext): Mode {
-  let mode: Mode = "normal";
+  let mode: Mode | undefined;
   for (const entry of ctx.sessionManager.getBranch()) {
     if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE) continue;
     const saved: unknown = (entry.data as { mode?: unknown } | undefined)?.mode;
     if (isMode(saved)) mode = saved;
   }
-  return resumedMode(mode);
+  return mode === undefined ? startingMode(readConfig().defaultMode) : resumedMode(mode);
 }
 
 export default function piModes(pi: ExtensionAPI): void {
@@ -253,13 +270,38 @@ export default function piModes(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("mode", {
-    description: `Show or set the mode: ${MODES.join(", ")}`,
+    description: `Show or set the mode: ${MODES.join(", ")}. "default" sets what new sessions start in`,
     getArgumentCompletions: (prefix) => {
-      const items = MODES.filter((name) => name.startsWith(prefix.trim())).map((value) => ({ value, label: value }));
+      const wanted = prefix.trim();
+      if (wanted.startsWith("default ")) {
+        const name = wanted.slice("default ".length);
+        const items = DEFAULTABLE.filter((value) => value.startsWith(name)).map((value) => ({ value: `default ${value}`, label: value }));
+        return items.length > 0 ? items : null;
+      }
+      const items = [...MODES, "default"].filter((name) => name.startsWith(wanted)).map((value) => ({ value, label: value }));
       return items.length > 0 ? items : null;
     },
     handler: async (args, ctx) => {
       const requested = args.trim();
+      if (requested === "default" || requested.startsWith("default ")) {
+        const now = startingMode(readConfig().defaultMode);
+        const wanted = requested === "default"
+          ? ctx.hasUI ? await ctx.ui.select(`Mode new sessions start in (now ${now})`, DEFAULTABLE) : undefined
+          : requested.slice("default ".length).trim();
+        if (wanted === undefined) return;
+        if (!DEFAULTABLE.includes(wanted)) {
+          const why = wanted === "yolo" ? "Yolo can't be the default, because it has to be asked for each time." : `Unknown mode ${wanted}.`;
+          ctx.ui.notify(`${why} Use one of: ${DEFAULTABLE.join(", ")}.`, "error");
+          return;
+        }
+        try {
+          saveDefaultMode(wanted as Mode);
+          ctx.ui.notify(`New sessions start in ${wanted}. This session stays in ${mode}.`, "info");
+        } catch (error) {
+          ctx.ui.notify(`Couldn't save the default mode: ${String(error)}`, "error");
+        }
+        return;
+      }
       if (requested === "") {
         const picked = ctx.hasUI ? await ctx.ui.select(`Mode (now ${mode})`, [...MODES]) : undefined;
         if (isMode(picked)) await pick(picked, ctx);

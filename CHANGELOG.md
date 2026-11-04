@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.0]
+
+### Added
+
+- `/mode default` sets the mode new sessions start in, saved as `defaultMode` in the extension's `config.json`. Resumed sessions keep their own mode, and `yolo` can't be the default.
+
 ## [0.2.2]
 
 ### Changed
