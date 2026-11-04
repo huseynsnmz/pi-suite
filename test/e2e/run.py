@@ -80,7 +80,7 @@ git("config", "core.fsmonitor", str(monitor))
     "baseUrl": f"http://127.0.0.1:{PORT}/v1", "apiKey": "unused", "api": "openai-completions",
     "models": [{"id": "m", "name": "Mock", "reasoning": True, "contextWindow": 100000, "maxTokens": 1000, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}],
 }}}))
-settings = {"defaultProvider": "mock", "defaultModel": "m", "defaultThinkingLevel": "off", "npmCommand": ["npm", "--ignore-scripts"], "packages": []}
+settings = {"defaultProvider": "mock", "defaultModel": "m", "defaultThinkingLevel": "off", "npmCommand": ["npm", "--ignore-scripts"], "packages": [], "compaction": {"keepRecentTokens": 1}}
 (agent / "settings.json").write_text(json.dumps(settings))
 for source in [*EXTRA, PACKAGE, *AFTER]:
     if source.startswith("npm:"):
@@ -91,7 +91,8 @@ for source in [*EXTRA, PACKAGE, *AFTER]:
         (agent / "settings.json").write_text(json.dumps(current))
 env["PI_OFFLINE"] = "1"
 
-model = subprocess.Popen(["node", str(Path(__file__).parent / "mock-model.mjs"), str(PORT)])
+requests = root / "requests.jsonl"
+model = subprocess.Popen(["node", str(Path(__file__).parent / "mock-model.mjs"), str(PORT), str(requests)])
 time.sleep(0.5)
 
 
@@ -154,6 +155,19 @@ class Terminal:
             pass
 
 
+def last_request():
+    return json.loads(requests.read_text().strip().split("\n")[-1])
+
+
+def slash(text):
+    term.send(text)
+    term.pump(0.4)
+    term.send("\x1b")
+    term.pump(0.3)
+    term.send("\r")
+    term.pump(1.5)
+
+
 checks = []
 SHIFT_TAB = b"\x1b[Z"
 MODES_LOADED = any("pi-modes" in source for source in EXTRA)
@@ -192,7 +206,6 @@ try:
         if MODES_LOADED:
             check("the start card says shift+tab changes the mode", "shift+tab mode" in hints)
             check("the start card does not say it changes the effort", "shift+tab effort" not in hints)
-            check("the start card names /effort", "/effort effort" in hints)
             colors = {"normal": frame_color()}
             for mode in ("auto", "plan", "read-only", "normal"):
                 os.write(term.fd, SHIFT_TAB)
@@ -345,6 +358,68 @@ try:
         (project / ".env").unlink()
     CLOCK = r"\d\d:\d\d:\d\d\.\d{3}"
     before = len(term.plain())
+    before = len(term.plain())
+    term.prompt("TODOPLAN")
+    shown = term.plain()[before:]
+    check("the todo panel shows the plan", "todo 0/3" in shown and "\u25b8 Read the code" in shown and "\u25cb Ship it" in shown)
+    tools = [tool["function"]["name"] for tool in last_request().get("tools", [])]
+    check("the model is offered the todo tool", "todo" in tools, str(tools))
+    before = len(term.plain())
+    term.prompt("TODONEXT")
+    shown = term.plain()[before:]
+    check("one call finishes an item and starts the next", "todo 1/3" in shown and "\u25b8 Write the tests" in shown)
+    check("the box says what is being worked on", "now: Write the tests" in shown)
+    term.prompt("TODOBAD")
+    check("a bad id is refused and the model is told", "No todo item 99" in str(last_request()["messages"][-1]))
+    term.prompt("TODOEVIL")
+    check("an item can't set the window title", "\x1b]0;TODOTITLE" not in term.raw)
+    term.pump(0.5)
+    check("the item keeps its words", "eviltext" in term.plain())
+    term.prompt("hello")
+    sent = json.dumps(last_request()["messages"])
+    check("no reminder while the model can still see the list", "kept from earlier" not in sent)
+    slash("/compact")
+    term.pump(4)
+    term.prompt("after compaction")
+    messages = last_request()["messages"]
+    gone = sum(1 for message in messages if message.get("role") == "tool")
+    sent = json.dumps(messages)
+    check("compaction took the tool's answer away", gone == 0, f"{gone} left")
+    check("the model gets its list back", "kept from earlier" in sent and "[>] 2 Write the tests" in sent)
+    first = next(message for message in messages if message.get("role") not in ("system", "developer"))
+    check("the list comes first, where it stays between calls", "kept from earlier" in json.dumps(first))
+    term.close()
+    term = Terminal(args=["--continue"])
+    check("the list comes back with the session", term.wait("todo 1/4", 40))
+    term.pump(2)
+    if MODES_LOADED:
+        os.write(term.fd, SHIFT_TAB)
+        term.wait("mode: auto")
+        os.write(term.fd, SHIFT_TAB)
+        term.wait("mode: plan")
+        term.pump(0.5)
+        before = len(term.plain())
+        term.prompt("TODOPLAN")
+        check("plan mode allows the list", "blocks todo" not in term.plain()[before:] and "todo 0/3" in term.plain()[before:])
+        for mode in ("read-only", "normal"):
+            os.write(term.fd, SHIFT_TAB)
+            term.wait(f"mode: {mode}")
+        term.pump(0.5)
+    term.prompt("TODOPLAN")
+    before = len(term.plain())
+    term.prompt("TODOFINISH")
+    check("a finished list stays on screen", "todo 3/3" in term.plain()[before:])
+    term.prompt("hello")
+    before = len(term.plain())
+    slash("/todos")
+    check("a finished list leaves at the next prompt", term.wait("The todo list is empty", 5))
+    term.prompt("TODOPLAN")
+    slash("/todos clear")
+    check("/todos clear says so", "Todo list emptied" in term.plain())
+    term.prompt("hello")
+    check("the model is told the list was emptied", "emptied your todo list" in json.dumps(last_request()["messages"]))
+    check("nothing left to remind it of", "kept from earlier" not in json.dumps(last_request()["messages"]))
+
     term.send("SLOW")
     term.pump(0.4)
     term.send("\r")

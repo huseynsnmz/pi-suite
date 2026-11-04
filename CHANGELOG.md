@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- A checklist the agent keeps while it works, in a frame above the editor, using a new `todo` tool. One call finishes a step and starts the next, and it survives `/reload`, resuming and moving around the session tree.
+- After compaction, the agent gets its unfinished list back.
+- `/todos` shows the list, and `/todos clear` empties it.
+
 ## 0.4.1
 
 ### Changed

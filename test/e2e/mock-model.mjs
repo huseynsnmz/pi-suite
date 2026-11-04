@@ -1,7 +1,8 @@
 // A fake OpenAI-compatible model. The prompt's text scripts its tool calls.
+import { appendFileSync } from "node:fs";
 import { createServer } from "node:http";
 
-const [port] = process.argv.slice(2);
+const [port, requests] = process.argv.slice(2);
 
 function chunk(res, delta, finish = null) {
 	const body = { id: "x", object: "chat.completion.chunk", created: 0, model: "m", choices: [{ index: 0, delta, finish_reason: finish }] };
@@ -29,12 +30,18 @@ const SCRIPT = {
 	SLEEP: { name: "bash", args: { command: "sleep 20" } },
 	CATENV: { name: "bash", args: { command: "cat .env" } },
 	READENV: { name: "read", args: { path: ".env" } },
+	TODOPLAN: { name: "todo", args: { plan: ["Read the code", "Write the tests", "Ship it"], start: 1 } },
+	TODONEXT: { name: "todo", args: { done: [1], start: 2 } },
+	TODOBAD: { name: "todo", args: { done: [99] } },
+	TODOEVIL: { name: "todo", args: { add: ["evil\u001b]0;TODOTITLE\u0007text"] } },
+	TODOFINISH: { name: "todo", args: { done: [1, 2, 3] } },
 };
 
 createServer((req, res) => {
 	let raw = "";
 	req.on("data", (data) => (raw += data));
 	req.on("end", () => {
+		if (requests) appendFileSync(requests, `${raw}\n`);
 		const body = JSON.parse(raw || "{}");
 		const last = body.messages?.at(-1);
 		if (last?.role === "tool") return reply(res, "FINISHED");

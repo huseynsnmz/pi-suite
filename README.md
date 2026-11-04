@@ -17,7 +17,7 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-frame@0.4.1
+   pi install npm:@huseynsnmz/pi-frame@0.5.0
    ```
 
 3. Restart Pi. The start card says `π-frame`.
@@ -31,6 +31,7 @@ On a Mac, `Alt` means the Option key, which needs Left Option set to `Esc+` in i
 - **Start card:** the folder, branch and model, then only what changed or waits on you since your last session in that folder: conflicts, a branch behind its remote, a failed CI run, a pull or merge request waiting on you. On a quiet day it says nothing is new. Below that, a row each for the context, skills, prompts and extensions Pi loaded, with `+N` for what doesn't fit. `Ctrl+O` shows them in full. CI and request lines use `gh` for a GitHub remote and `glab` for a GitLab one, and stay out without the tool or a network.
 - **Tool boxes:** each call shows the command, who allowed it and why, the output, when it started and how long it took.
 - **Timings:** a line under each response shows when the call started, the wait for the first token, server latency, thinking time, total time, any stall and the speed. It updates as the response is written. Turn it off under **Timings** in the Frame tab. An edit shows the diff, with only the changed words highlighted.
+- **Todo list:** for work with several steps, the agent keeps a checklist in a frame above the editor, with what it's doing now highlighted. Finished items make way first when the list is long, and `Ctrl+O` shows all of it. A finished list leaves at your next prompt. The list stays with its branch of the session, and the agent gets it back after compaction.
 - **Above the editor:** a stopwatch, the number of model calls, and how the last call went. Messages you send while the agent works wait here in a dashed frame.
 - **Editor frame:** the branch, folder, model, effort and how full the context is. With [pi-modes](https://github.com/huseynsnmz/pi-modes), its color follows the mode: yellow for `auto`, the accent color for `plan`, green for `read-only`, red for `yolo`, using your theme's versions of those colors. In `normal` it stays Pi's own color.
 - **Footer:** first the `mode:` from [pi-modes](https://github.com/huseynsnmz/pi-modes), then a divider and what other extensions report, then cost, tokens, cache and speeds.
@@ -43,6 +44,7 @@ Some pieces, such as rooms, boards, peers and the remote page, appear only with 
 | `Ctrl+R` | Search what you've typed, here and in this folder's other sessions. `Ctrl+R` again goes further back, `Enter` sends, `Esc` cancels, any other key keeps the match to edit. It replaces Pi's Rename on this key; `/name` still renames |
 | `Alt+O` | Scroll through the session's tool output, one call at a time |
 | `Ctrl+O` | Expand every call in the transcript |
+| `/todos` | Show the agent's todo list. `/todos clear` empties it and tells the agent |
 | `Ctrl+S` | Settings: icons, editor frame style, framed messages. With the editor frame off, use `/harness` |
 | `/effort` | Pick how hard the model thinks |
 | `/effort high` | Set it directly: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. If the model can't use that level, Pi picks the closest one and you're told |
@@ -51,7 +53,9 @@ More detail is in [How it works](docs/how-it-works.md) and the [reference](docs/
 
 ## Using it with other extensions
 
-**`pi-modes`:** it takes over `Shift+Tab`, so the start card says `shift+tab mode`. To keep a key for effort, set `app.thinking.cycle` in `~/.pi/agent/keybindings.json`, or use `/effort`.
+**`rpiv-todo`:** remove it if you have it, because both add a tool named `todo`.
+
+**`pi-modes`:** version 0.6.0 or newer lets the agent use its todo list in `plan` and `read-only`. It takes over `Shift+Tab`, so the start card says `shift+tab mode`. To keep a key for effort, set `app.thinking.cycle` in `~/.pi/agent/keybindings.json`, or use `/effort`.
 
 **`pi-sandbox`:** the bottom line shows `sandbox: on` or `sandbox: off` after the mode. Its longer status moves to `/sandbox`.
 

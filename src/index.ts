@@ -66,6 +66,7 @@ import { showTimings } from "./ui/timings.ts";
 import { timingLine } from "./render/timing.ts";
 import { frameQueue } from "./ui/queue.ts";
 import type { Screen, SlotName } from "./ui/screen.ts";
+import { registerTodos } from "./ui/todos.ts";
 import { registerToolFrames } from "./ui/tool-frame.ts";
 import { type Activity, describe, draftedTool } from "./ui/working.ts";
 import { SessionView } from "./view/view.ts";
@@ -124,6 +125,7 @@ export const frameFeature = defineFeature({
 		const screen = createScreen(scope, live, reader, telemetry, glyphs);
 		registerToolFrames(scope);
 		registerEffort(scope);
+		registerTodos(scope, () => glyphs().set);
 		framePiEntries(() => {
 			if (live.ctx === undefined) return undefined;
 			return {
