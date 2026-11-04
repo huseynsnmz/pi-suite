@@ -1,0 +1,32 @@
+name: Bug report
+description: Something in pi-memory doesn't work as documented
+body:
+  - type: markdown
+    attributes:
+      value: "Don't report security problems here. See SECURITY.md. Remove tokens, keys and private paths from anything you paste."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the command or tool involved, and your Pi and Node versions.
+    validations:
+      required: true
+  - type: input
+    id: pi
+    attributes:
+      label: Output of pi --version
+    validations:
+      required: true
+  - type: textarea
+    id: packages
+    attributes:
+      label: Output of pi list
+      render: text
+    validations:
+      required: true
