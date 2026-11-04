@@ -24,7 +24,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-board@0.18.0
+   pi install npm:@huseynsnmz/pi-board@0.18.1
    ```
 
 2. Restart Pi, and press `Left` twice on an empty prompt, or run `/agent-board`.
@@ -51,6 +51,7 @@ Installing it runs `node-pty`'s install script, which sets up its terminal suppo
 | `?` | All the keys |
 | `Esc` | Clear the input, or leave the board |
 | `Ctrl+C` twice | Quit Pi, from the board or a session. Sessions keep running |
+| `Ctrl+Z` | Put Pi in the background, from the board or a session, and `fg` brings it back. Sessions keep running |
 
 The full list is in the [reference](docs/reference.md).
 

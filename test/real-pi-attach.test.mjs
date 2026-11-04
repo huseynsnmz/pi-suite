@@ -45,7 +45,7 @@ async function startModel() {
 	return server;
 }
 
-function startPi(root, port) {
+function startPi(root, port, { shell = false } = {}) {
 	const home = join(root, "h");
 	const agent = join(home, ".pi/agent");
 	const project = join(root, "p");
@@ -58,12 +58,14 @@ function startPi(root, port) {
 	writeFileSync(join(agent, "models.json"), JSON.stringify({ providers: { mock: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "unused", api: "openai-completions", models: [{ id: "m", name: "Mock", contextWindow: 100000, maxTokens: 1000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
 	writeFileSync(join(agent, "settings.json"), JSON.stringify({ defaultProvider: "mock", defaultModel: "m", defaultThinkingLevel: "off", packages: [REPO], extensions: [taker] }));
 	const term = new Terminal({ cols: 120, rows: 45, allowProposedApi: true });
-	const child = pty.spawn(join(REPO, "node_modules/.bin/pi"), [], {
+	// Only a shell with job control can stop and resume what it runs.
+	const [file, args] = shell ? ["/bin/bash", ["--norc", "--noprofile", "-i"]] : [join(REPO, "node_modules/.bin/pi"), []];
+	const child = pty.spawn(file, args, {
 		name: "xterm-256color",
 		cols: 120,
 		rows: 45,
 		cwd: project,
-		env: { PATH: process.env.PATH, HOME: home, TERM: "xterm-256color", LANG: "en_US.UTF-8", PI_CODING_AGENT_DIR: agent, PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1", TMPDIR: tmpdir(), AGENT_BOARD_ROOT: board },
+		env: { PATH: `${join(REPO, "node_modules/.bin")}:${process.env.PATH}`, PS1: "SHELL$ ", BASH_SILENCE_DEPRECATION_WARNING: "1", HOME: home, TERM: "xterm-256color", LANG: "en_US.UTF-8", PI_CODING_AGENT_DIR: agent, PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1", TMPDIR: tmpdir(), AGENT_BOARD_ROOT: board },
 	});
 	child.onData((data) => term.write(data));
 	const screen = () => {
@@ -140,4 +142,49 @@ test("an attached session gets every key, and redraws at a new size each time it
 	pi.child.write("\x1b");
 	await pi.waitFor("taken:0");
 	assert.equal((statSync(pi.board).mode & 0o777).toString(8), "700");
+});
+
+test("ctrl+z stops only this Pi, from the board and attached, and fg brings the view back", { timeout: 120000 }, async (t) => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rp-")));
+	const model = await startModel();
+	const pi = startPi(root, model.address().port, { shell: true });
+	t.after(() => {
+		pi.child.kill();
+		model.close();
+		rmSync(pi.taker, { force: true });
+		try {
+			execSync(`pkill -f ${root}`);
+		} catch {
+			/* Nothing left running. */
+		}
+		rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+	});
+	await pi.waitFor("SHELL$");
+	pi.child.write("pi\r");
+	await pi.waitFor("taken:0", 60000);
+	pi.child.write("/agent-board\r");
+	await pi.waitFor("π-board");
+	await sleep(500);
+	pi.child.write("\x1a");
+	await pi.waitFor("Stopped");
+	pi.child.write("fg\r");
+	await pi.waitFor("π-board");
+
+	pi.child.write("hello");
+	await sleep(300);
+	pi.child.write("\r");
+	await pi.waitFor("hosts:1");
+	await sleep(3000);
+	pi.child.write("\x1b[C");
+	await pi.waitFor("detach");
+	await pi.waitFor("taken:0");
+	pi.child.write("\x1a");
+	await pi.waitFor("Stopped");
+	await sleep(300);
+	pi.child.write("fg\r");
+	await pi.waitFor("detach");
+	await pi.waitFor("taken:0");
+	// The session itself was never stopped, so it still takes what's typed.
+	pi.child.write("typed-after-resume");
+	await pi.waitFor("typed-after-resume");
 });

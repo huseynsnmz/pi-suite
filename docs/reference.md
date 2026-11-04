@@ -11,6 +11,7 @@ Typing goes straight into the input, as in Claude Code's agent view, so there's 
 | `Ctrl+Enter` | Start the task and attach to it. |
 | `Shift+Enter` / `Ctrl+J` | New line in the task. |
 | `Ctrl+N` | While typing, choose the folder, model and thinking level first. |
+| `Ctrl+Z` | Put Pi in the background, and `fg` brings it back. Sessions keep running. Works in an attached session too. |
 | `Left` / `Right` | Attach to the selected session. |
 | `Left` twice | From an empty Pi prompt, put this session on the board and open it. |
 | `Up` / `Down` | Move between rows. |

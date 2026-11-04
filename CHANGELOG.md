@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.18.1] - 2026-11-04
+
+### Fixes
+
+- **keys**: `Ctrl+Z` puts Pi in the background from the board and from an attached session. It did nothing on the board, and in an attached session it stopped that session's screen, so it no longer took input
+
 ## [0.18.0] - 2026-11-04
 
 ### Features

@@ -9,6 +9,7 @@ import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
 import { createDoublePress, QUIT_PRESS_MS } from "../core/double-press.mjs";
 import { isOpenableLink, findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { holdInputListeners } from "../core/hold-input.mjs";
+import { suspendToShell } from "../core/suspend.mjs";
 import { canPublishAttachView, createAttachOutputRenderScheduler, decideAttachPresentation, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
@@ -466,7 +467,7 @@ export class PtyAttachComponent implements Component {
 	constructor(
 		private readonly tui: TUI,
 		private readonly theme: ThemeLike,
-		_keybindings: KeybindingsManager,
+		private readonly keybindings: KeybindingsManager,
 		private readonly done: (result: PtyAttachResult) => void,
 		private readonly opts: PtyAttachOptions,
 	) {
@@ -546,6 +547,17 @@ export class PtyAttachComponent implements Component {
 	 * intent (focus events, query replies). */
 	private handleKeyInput(data: string): void {
 		this.lastUserInputAt = this.nowFn();
+		if (this.keybindings?.matches?.(data, "app.suspend")) {
+			suspendToShell(this.tui, {
+				// This view's mouse reporting isn't Pi's to turn off, and the shell mustn't get it.
+				beforeStop: () => this.disableMouseScroll(),
+				afterResume: () => {
+					this.enableMouseScroll();
+					this.assertFullscreenMouseMode();
+				},
+			});
+			return;
+		}
 		// Issue #147: in-place delete gesture. The resolver is pure and never
 		// reads connection state, so the gesture works even while the host is
 		// down. cancel falls through so input is never swallowed.

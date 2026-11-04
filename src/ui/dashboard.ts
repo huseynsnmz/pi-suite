@@ -6,6 +6,7 @@
  * closes — attaching to a session (tears down the current session) or quitting. Everything
  * else (dispatch, reply, stop, pin, rename, archive) is handled in-place against the store.
  */
+import { suspendToShell } from "../core/suspend.mjs";
 import { readFileSync } from "node:fs";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
@@ -175,7 +176,7 @@ export class DashboardComponent implements Component {
 	constructor(
 		private readonly tui: TUI,
 		private readonly theme: ThemeLike,
-		keybindings: KeybindingsManager,
+		private readonly keybindings: KeybindingsManager,
 		private readonly done: (result: DashboardResult) => void,
 		private readonly deps: DashboardDeps,
 	) {
@@ -343,6 +344,7 @@ export class DashboardComponent implements Component {
 	// ---- input --------------------------------------------------------------
 
 	handleInput(data: string): void {
+		if (this.keybindings?.matches?.(data, "app.suspend")) return suspendToShell(this.tui);
 		if (!matchesKey(data, Key.ctrl("c"))) this.quitPresses.reset();
 		else if (this.quitPresses.press()) return this.done({ action: "quit" });
 		switch (this.mode) {
