@@ -1,0 +1,3184 @@
+/** Live PTY attach surface for hosted agent-board rows. */
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { createConnection, type Socket } from "node:net";
+import { StringDecoder } from "node:string_decoder";
+import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
+import { createDoublePress, QUIT_PRESS_MS } from "../core/double-press.mjs";
+import { isOpenableLink, findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
+import { holdInputListeners } from "../core/hold-input.mjs";
+import { suspendToShell } from "../core/suspend.mjs";
+import { canPublishAttachView, createAttachOutputRenderScheduler, decideAttachPresentation, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
+import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
+import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
+import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
+import { MAX_VIEW_PROOF_RECORDS } from "../core/terminal-attach-protocol.mjs";
+import { createSafeTrailingClassifier } from "../core/attach-view-proof.mjs";
+import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
+import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
+import { clampInt, encodeWheelReport, fullscreenMouseEnableSequence, historyFloorAfterHydrate, isFullscreenSelectionEnd, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
+
+export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null } | { action: "delete" } | { action: "quit" };
+
+type ThemeLike = {
+	fg(color: string, text: string): string;
+	bold(text: string): string;
+};
+
+/** The pi-tui members the attach view reads without a public typing contract:
+ * getActiveSelectionText / clearTextSelection are private in TuiAltScreen's d.ts
+ * (runtime-reachable plain methods), getCopyOnSelect is public. Every access is
+ * feature-detected so an older or newer pi-tui degrades instead of throwing. */
+interface FullscreenSelectionHost {
+	getActiveSelectionText?: () => string | undefined;
+	getCopyOnSelect?: () => boolean;
+	clearTextSelection?: () => void;
+}
+
+/** Diagnostic patch emitted at attach settle (DiagnosticEvent-compatible; built by buildSettleSchemePatch). */
+export interface AttachSettleDiagnosticPatch {
+	source: string;
+	level: "info" | "warn";
+	code: string;
+	message: string;
+	details: { probeApi?: string; outcome: string; report?: string; late?: boolean };
+}
+
+export interface PtyAttachOptions {
+	socketPath: string;
+	screenLogPath?: string;
+	title: string;
+	/** Issue #161: receives settle-scheme diagnostic patches. Default: no-op. */
+	onDiagnostic?: (event: AttachSettleDiagnosticPatch) => void;
+}
+
+const require = createRequire(import.meta.url);
+const { Terminal } = require("@xterm/headless") as { Terminal: new (opts: Record<string, unknown>) => XtermLike };
+
+
+const MOUSE_ENABLE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_DISABLE = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+const XTSHIFTESCAPE_SELECT = "\x1b[>0s";
+const DOUBLE_CLICK_MS = 260;
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const LOADING_TICK_MS = 120;
+/** How long to keep the loading banner after the last resize-jiggle during attach. */
+const ATTACH_SETTLE_MS = 250;
+/** Hard cap on the attach transition so a silent session can't stall the banner. */
+const ATTACH_HARD_TIMEOUT_MS = 2500;
+/** A session can redraw for a resize without proving it, and then idles, so nothing would ever
+ * finish the attach. It's resized away and back to draw again, a few times at most. */
+const GEOMETRY_NUDGE_LIMIT = 3;
+const GEOMETRY_NUDGE_SETTLE_MS = 100;
+const GEOMETRY_NUDGE_WAIT_MS = 1000;
+/** Protocol-race guard for legacy jiggle arming (issue #91 phase 4): the
+ * undecided window must not pulse the child before the snapshot probe
+ * resolves — a resize-free attach is the protocol-mode contract. Invisible
+ * for legacy (the probe timeout decides at 1500ms ≫ 100ms) and the protocol
+ * answer (~ms) reliably beats it; a pathologically late snapshot merely costs
+ * one harmless shrink pulse that the protocol mode event unwinds. */
+const LEGACY_JIGGLE_ARM_DELAY_MS = 100;
+/** Give ordered detach packets time to flush before using destroy as a fallback. */
+const GRACEFUL_SOCKET_CLOSE_MS = 1000;
+/** Desync detection window: how long output must stay silent before a
+ * misaligned cursor counts as desync (issue #11). Streaming keeps the cursor
+ * on plain output cells legitimately; a healthy idle child re-parks it on the
+ * inverse fake-cursor cell on its last rendered frame. */
+const DESYNC_QUIET_MS = 1500;
+/** How often the post-settle probe runs checkDesync() (issue #11). */
+const DESYNC_PROBE_INTERVAL_MS = 2000;
+/** Minimum spacing between two runtime heals (issue #11). */
+const HEAL_RATELIMIT_MS = 10000;
+/** Issue #148: probe budget for asking the REAL terminal for its background
+ * color. Deliberately ONE probe: every timed-out probe leaves a settled entry in
+ * the LOCAL pi-tui's pending-query queue (its timeout path neither dequeues nor
+ * decrements) and that stale entry eats the next reply, so a retry loop cannot
+ * converge — it would only add another stale entry per attempt and degrade the
+ * host's own background detection. One probe keeps the clean-queue case working
+ * and the leaked case degrading silently. */
+const REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS = 500;
+/** How many tail bytes of the screen log to replay on attach. Read from the file tail
+ * (not the whole file) so multi-MB logs don't block startup; ~60KB covers the last
+ * handful of screens, which is all a fresh attach needs. */
+const ATTACH_REPLAY_BYTES = 60_000;
+/** A frame the session draws this soon after a key or wheel event is the answer to it, so it paints
+ * as soon as it's whole rather than waiting out the output throttle. */
+const INTERACTIVE_RENDER_WINDOW_MS = 250;
+const OSC52_PREFIX = "\x1b]52;";
+const OSC52_MAX_BYTES = 1_000_000;
+const OSC52_CARRY_MAX_BYTES = OSC52_MAX_BYTES + 4096;
+const TERMINAL_PASSTHROUGH_MAX_BYTES = 5_000_000;
+const TERMINAL_PASSTHROUGH_CARRY_MAX_BYTES = TERMINAL_PASSTHROUGH_MAX_BYTES + 4096;
+const KITTY_IMAGE_PREFIX = "\x1b_G";
+const ITERM2_FILE_PREFIX = "\x1b]1337;File=";
+
+interface XtermParserLike {
+	registerCsiHandler(opts: { prefix: string; final: string }, cb: (params: (number | number[])[]) => boolean): { dispose(): void };
+}
+
+interface XtermLike {
+	write(data: string, cb?: () => void): void;
+	resize(cols: number, rows: number): void;
+	parser?: XtermParserLike;
+	dispose?(): void;
+	// Full buffer wipe (@xterm/headless Terminal.reset): the attach client's
+	// "empty/resnapshot → UI resets its buffer" contract (phase 4, F3).
+	reset(): void;
+	buffer: {
+		active: {
+			baseY: number;
+			// "normal" | "alternate" (@xterm/headless IBuffer.type): an alternate
+			// buffer keeps no scrollback, which is what routes the fullscreen wheel
+			// to the child instead of the attach's own viewport (issue #185).
+			type: string;
+			cursorX?: number;
+			cursorY?: number;
+			length: number;
+			getLine(index: number): BufferLineLike | undefined;
+			getNullCell(): BufferCellLike;
+		};
+	};
+	_core?: {
+		coreService?: { isCursorHidden?: boolean };
+		_oscLinkService?: {
+			getLinkData?: (id: number) => { uri?: string } | undefined;
+			_dataByLinkId?: Map<number, { data?: { uri?: string } }>;
+		};
+	};
+}
+
+interface BufferLineLike {
+	length: number;
+	getCell(x: number, cell?: BufferCellLike): BufferCellLike | undefined;
+	translateToString(trimRight?: boolean): string;
+}
+
+interface BufferCellLike {
+	getWidth(): number;
+	getChars(): string;
+	hasExtendedAttrs(): number;
+	extended?: { urlId?: number; _urlId?: number };
+	getFgColor(): number;
+	getBgColor(): number;
+	isFgRGB(): boolean;
+	isBgRGB(): boolean;
+	isFgPalette(): boolean;
+	isBgPalette(): boolean;
+	isFgDefault(): boolean;
+	isBgDefault(): boolean;
+	isBold(): number;
+	isItalic(): number;
+	isDim(): number;
+	isUnderline(): number;
+	isBlink(): number;
+	isInverse(): number;
+	isInvisible(): number;
+	isStrikethrough(): number;
+	isOverline(): number;
+}
+
+interface CommittedRow { cells: SnapshotLine; }
+
+interface CommittedView {
+	identity: {
+		connectionToken: number;
+		baselineToken: number;
+		generation: string;
+		parser: XtermLike;
+		geometryRevision: number;
+		targetCols: number;
+		targetRows: number;
+		closed: boolean;
+	};
+	start: number;
+	end: number;
+	rows: CommittedRow[];
+	cursor: { row: number; col: number } | null;
+	cursorHidden: boolean;
+	viewportTop: number | null;
+	proofSeq: number | null;
+}
+
+/** Primitive cell snapshot used by committed rendering and interactions. */
+class SnapshotCell implements BufferCellLike {
+	private constructor(
+		private readonly charsValue: string,
+		private readonly widthValue: number,
+		private readonly attrs: {
+			bold: number; dim: number; italic: number; underline: number; blink: number; inverse: number;
+			invisible: number; strikethrough: number; overline: number;
+			fgRGB: boolean; fgPalette: boolean; fg: number;
+			bgRGB: boolean; bgPalette: boolean; bg: number;
+		},
+		private readonly uriValue: string,
+	) {
+		this.extended = this.uriValue ? { urlId: 1, _urlId: 1 } : undefined;
+	}
+	static empty(): SnapshotCell {
+		return new SnapshotCell("", 0, {
+			bold: 0, dim: 0, italic: 0, underline: 0, blink: 0, inverse: 0,
+			invisible: 0, strikethrough: 0, overline: 0,
+			fgRGB: false, fgPalette: false, fg: -1, bgRGB: false, bgPalette: false, bg: -1,
+		}, "");
+	}
+	static fromBufferCell(cell: BufferCellLike, uri: string): SnapshotCell {
+		return new SnapshotCell(cell.getChars(), cell.getWidth(), {
+			bold: cell.isBold(), dim: cell.isDim(), italic: cell.isItalic(), underline: cell.isUnderline(),
+			blink: cell.isBlink(), inverse: cell.isInverse(), invisible: cell.isInvisible(),
+			strikethrough: cell.isStrikethrough(), overline: cell.isOverline(),
+			fgRGB: cell.isFgRGB(), fgPalette: cell.isFgPalette(), fg: cell.getFgColor(),
+			bgRGB: cell.isBgRGB(), bgPalette: cell.isBgPalette(), bg: cell.getBgColor(),
+		}, uri);
+	}
+	getWidth(): number { return this.widthValue; }
+	getChars(): string { return this.charsValue; }
+	hasExtendedAttrs(): number { return this.uriValue ? 1 : 0; }
+	extended?: { urlId?: number; _urlId?: number };
+	getFgColor(): number { return this.attrs.fg; }
+	getBgColor(): number { return this.attrs.bg; }
+	isFgRGB(): boolean { return this.attrs.fgRGB; }
+	isBgRGB(): boolean { return this.attrs.bgRGB; }
+	isFgPalette(): boolean { return this.attrs.fgPalette; }
+	isBgPalette(): boolean { return this.attrs.bgPalette; }
+	isFgDefault(): boolean { return !this.attrs.fgRGB && !this.attrs.fgPalette; }
+	isBgDefault(): boolean { return !this.attrs.bgRGB && !this.attrs.bgPalette; }
+	isBold(): number { return this.attrs.bold; }
+	isItalic(): number { return this.attrs.italic; }
+	isDim(): number { return this.attrs.dim; }
+	isUnderline(): number { return this.attrs.underline; }
+	isBlink(): number { return this.attrs.blink; }
+	isInverse(): number { return this.attrs.inverse; }
+	isInvisible(): number { return this.attrs.invisible; }
+	isStrikethrough(): number { return this.attrs.strikethrough; }
+	isOverline(): number { return this.attrs.overline; }
+	osc8Uri(): string { return this.uriValue; }
+}
+
+class SnapshotLine implements BufferLineLike {
+	constructor(readonly cells: SnapshotCell[]) {}
+	get length(): number { return this.cells.length; }
+	getCell(x: number): BufferCellLike | undefined { return this.cells[x]; }
+	translateToString(trimRight = false): string {
+		const text = this.cells.map((cell) => cell.getChars() || " ").join("");
+		return trimRight ? text.replace(/\s+$/u, "") : text;
+	}
+}
+
+type MousePoint = { line: number; col: number };
+type ScreenCell = { row: number; col: number };
+/** Issue #187: `screenAnchor` is the RAW reported cell of the press; the drag/click
+ * decision compares it against the release cell, because buffer coordinates drift
+ * while the session streams. Absent on word selections (they are created on release). */
+type MouseSelection = { anchor: MousePoint; focus: MousePoint; screenAnchor?: ScreenCell };
+type NormalizedSelection = { start: MousePoint; end: MousePoint };
+
+export class PtyAttachComponent implements Component {
+	private socket: Socket | null = null;
+	private connected = false;
+	private closed = false;
+	private status = "connecting";
+	/** Issue #147: in-place delete confirm is armed (first ctrl+x). */
+	private confirmArmed = false;
+	private parserBuffer = "";
+	private retryTimer: ReturnType<typeof setTimeout> | null = null;
+	private loadingTimer: ReturnType<typeof setInterval> | null = null;
+	private mouseRefreshTimers: Array<ReturnType<typeof setTimeout>> = [];
+	// Shrink-and-hold jiggle protocol (issue #25): on attach we resize the child to
+	// (cols-1, rows-1) and hold it there until the child emits a full clear
+	// (\x1b[2J) — any render the child makes while held sees a width delta and
+	// must fullRender, so boot-storm coalescing of ±1 pulses can no longer
+	// produce a net-zero change. The controller restores the original size on
+	// clear / first TUI frame (re-arm) / no-frame 6s guard / budget exhaustion /
+	// close / external resize (guards G1-G5, see controller module).
+	private readonly jiggleRetry = createJiggleRetryController({
+		sendResize: (cols, rows) => this.sendResize(cols, rows),
+		setTimeoutFn: (fn, ms) => {
+			const t = setTimeout(fn, ms);
+			t.unref?.();
+			return t;
+		},
+		clearTimeoutFn: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+	});
+	// Snapshot+subscribe attach client (issue #91 phase 4, D2). Created ONCE —
+	// reconnects re-point send at the CURRENT socket (this.send routes through
+	// this.socket) and resume from the applied cursor; wiring shape per the
+	// verified reference in test/terminal-snapshot.integration.test.mjs
+	// (wireClient). AGENT_BOARD_TERMINAL_SNAPSHOT=0 forces the legacy path
+	// (escape hatch + deterministic legacy tests).
+	private readonly attachClient = createTerminalAttachClient({
+		send: (msg) => this.send(msg),
+		emit: (event, payload) => this.handleAttachEvent(event, payload),
+	});
+	/** Decided attach path: "undecided" until the probe resolves (snapshot
+	 * begin → protocol; probe timeout / version mismatch → legacy). Gates
+	 * jiggle arming and probe-vs-cursor reconnects. */
+	private attachMode: "undecided" | "protocol" | "legacy" = "undecided";
+	private jiggleStartTimer: ReturnType<typeof setTimeout> | null = null;
+	private osc52Carry = "";
+	private passthroughCarry = "";
+	private oscQueryCarry = "";
+	// Issue #170: inbound reply fragments (device attributes, kitty flags, cell
+	// size, DCS) are swallowed, and color replies are forwarded as one whole
+	// sequence instead of leaking into the child as garbage. Null when
+	// AGENT_BOARD_REPLY_GUARD=0 — the pre-#170 passthrough is the escape hatch.
+	private readonly replyGuard: ReturnType<typeof createReplyGuard> | null;
+	private replyGuardTimer: ReturnType<typeof setTimeout> | null = null;
+	private readonly connectStartedAt = Date.now();
+	// Set once the first socket connect succeeds; drives the reconnect give-up
+	// policy (short window after a live session dies, long window during cold
+	// host start — see pty-attach-reconnect.mjs).
+	private everConnected = false;
+	// Timestamp of the first disconnect that started the current reconnect
+	// cycle; reset on every successful (re)connect.
+	private disconnectedAt: number | null = null;
+	// Lines scrolled per mouse-wheel notch on the legacy (regular-mode) raw-SGR path,
+	// configurable via $AGENT_BOARD_WHEEL_LINES. The fullscreen handleMouse path uses
+	// the TUI's wheelDelta instead, which is already accelerated and line-quantified.
+	private readonly mouseWheelLines = resolveWheelLines();
+	/** Current local parser. Replaced atomically at an accepted snapshotReady. */
+	private term: XtermLike;
+	/** Monotonic identity axes: one per accepted socket / authoritative baseline / parser. */
+	private connectionToken = 0;
+	private baselineToken = 0;
+	private parserEpoch = 1;
+	private parserObservers: Array<{ dispose(): void }> = [];
+	private parserObservationSupported = true;
+	private replacementFailureCount = 0;
+	private parserSyncOpen = false;
+	private parserObserverEvents = 0;
+	private collectingConnectionToken = 0;
+	private collectingBaselineToken = 0;
+	private collectingParserEpoch = 0;
+	/** Distinct facts; none of these is presentation truth in this stage. */
+	private protocolBaselineState: "unverified" | "valid-empty" | "valid-content" = "unverified";
+	private localHydrationState: "idle" | "hydrating" | "complete" | "failed" = "idle";
+	private publishabilityState: "wait" | "unknown" | "ready" = "wait";
+	private firstAttachSideEffectsApplied = false;
+	private latestViewProof: unknown = null;
+	private viewProofRecords: unknown[] = [];
+	private viewProofRecordCount = 0;
+	/** Identity captured when the current proof/coverage was received. */
+	private viewProofIdentity: ReturnType<PtyAttachComponent["currentViewIdentity"]> | null = null;
+	/** Local geometry revision: incremented once per real differing-size transition. */
+	private geometryRevision = 0;
+	private resizeIntentRequired = false;
+	private resizeIntentSatisfied = false;
+	private resizeIntentId = 0;
+	// What the runner calls this resize. Its count spans every attach to the session and ours starts
+	// again at each attach, so a frame's proof can only be matched against the runner's own numbers.
+	private geometryNudges = 0;
+	private proofGeometryRevision = 0;
+	private lastProofMetadata: { geometryRevision?: unknown; intentId?: unknown } | undefined;
+	private proofIntentId = 0;
+	private pendingEarlySyncTarget: string | null = null;
+	/** Protocol transition facts; timers may mark expiry but never publish. */
+	private deadlineState: "pending" | "expired" = "pending";
+	private notReadyReason: string | null = null;
+	private parserWritesInFlight = 0;
+	private readonly attachStartedAt = Date.now();
+	private readonly viewProofTrailing = createSafeTrailingClassifier();
+	private recentProtocolOutput: Array<{ seq: number; data: string }> = [];
+	private proofResyncRequested = false;
+	/** Runner-reported reporter capability. Without it the attach keeps the
+	 *  accepted legacy deadline path (old/no-reporter hosts are not stranded). */
+	private frameWitnessAvailable = false;
+	/** Last complete modern projection installed at a real ?2026l boundary. */
+	private committedView: CommittedView | null = null;
+	/** Display-only same-generation/geometry recovery view; never readiness. */
+	private recoveryView: CommittedView | null = null;
+	private recoveryGeneration: string | null = null;
+	private currentWireGeneration: string | null = null;
+	private emptyResetPending = false;
+	private attachWaitToken = 0;
+	private cols = 120;
+	private rows = 24;
+	// Absolute buffer line shown at the top of the viewport. null means follow bottom.
+	private viewportTop: number | null = null;
+	// Issue #205: buffer line below which every row is pseudo scrollback that
+	// hydrating a snapshot frame into this (smaller) terminal manufactured. Only
+	// rows above it may answer a local wheel notch; the rest is forwarded.
+	private historyFloor = 0;
+	// Runtime desync backstop state (issue #11): last socket-output timestamp,
+	// last heal timestamp, the probe timer, and an injectable clock for tests.
+	private lastOutputAt = 0;
+	private lastHealAt = 0;
+	private desyncProbeTimer: ReturnType<typeof setInterval> | null = null;
+	/** Injectable clock for desync gating (tests override this). */
+	private nowFn: () => number = () => Date.now();
+	private selection: MouseSelection | null = null;
+	/** Issue #172: bumped on every left press so a settle still queued for the previous
+	 * gesture cannot read or clear a selection the next press has already started. */
+	private selectionGestureSerial = 0;
+	private selectionDragging = false;
+	private selectionAutoScrollTimer: ReturnType<typeof setInterval> | null = null;
+	private selectionAutoScrollLines = 0;
+	private selectionAutoScrollMouse: { row: number; col: number } | null = null;
+	private pendingClickTimer: ReturnType<typeof setTimeout> | null = null;
+	private readonly quitPresses = createDoublePress(Date.now, QUIT_PRESS_MS);
+	private lastClickPoint: MousePoint | null = null;
+	private lastClickAt = 0;
+	/** Authoritative editor emptiness pushed by the child Pi extension via the
+	 * control socket (issue #68). null = unknown — forward conservatively
+	 * (spec §D1); only true detaches. */
+	private editorEmpty: boolean | null = null;
+	// Whether any PTY output (live or replayed) has been shown yet. Until then we paint a
+	// loading banner instead of an empty buffer so a slow (cold) host start doesn't leave
+	// the previous screen visible.
+	private receivedOutput = false;
+	// Attach transition: hold the loading banner until the screen-log replay and the
+	// initial resize-jiggle redraws settle, so attach never visibly scrolls/flashes the
+	// buffer. `receivedOutput` tracks buffer content; `attaching` gates whether we paint it.
+	private attaching = true;
+	private attachSettleTimer: ReturnType<typeof setTimeout> | null = null;
+	private attachHardTimeout: ReturnType<typeof setTimeout> | null = null;
+	// Last scheme delivered to the child at settle (issue #161). Starts null:
+	// null never matches the duplicate check, so a timeout-then-late sequence
+	// still delivers. Single-shot per attach — settle runs at most once.
+	private sentScheme: TerminalColorScheme | null = null;
+	// Pi enables bracketed paste AFTER entering raw mode and disables it at
+	// shutdown. Only current runner output/snapshots may establish readiness;
+	// the screen.log warm-start can belong to a previous child incarnation.
+	private childInputReady = false;
+	private childInputModeCarry = "";
+	private pendingSchemeReport: { scheme: TerminalColorScheme; api?: "colors" | "background" | "none"; late?: boolean } | null = null;
+	// Issue #128 D2: unsubscriber for the color-scheme bridge registered at
+	// attach settle; nulled on every terminal path so the TUI never keeps a
+	// listener pointing at a dead attach surface.
+	private colorSchemeBridgeUnsubscribe: (() => void) | null = null;
+	private gracefulSocketCloseTimer: ReturnType<typeof setTimeout> | null = null;
+	// Force a single full-clear on the first paint so the prior session/dashboard can't
+	// ghost behind this overlay; every later paint uses the TUI's coalesced, throttled,
+	// differential renderer so wheel/output bursts don't each trigger a full repaint.
+	private firstPaint = true;
+	// Coalesce live PTY output repaints to ~25fps. node-pty splits one child-TUI update
+	// into many small chunks; painting after each chunk would drive the outer TUI to its
+	// frame cap and expose intermediate frames (visible as flicker on a busy session).
+	private readonly outputRenderScheduler = createAttachOutputRenderScheduler(() => this.scheduleRender());
+	// Fold pi-tui's post-frame cursor-park writes back into the frame's sync block so the
+	// terminal reports one stable IME cursor rect per frame instead of two (issue #28).
+	// Never active when AGENT_BOARD_IME_FIX=0; no-op passthrough if pi-tui changes shape.
+	private readonly imeCoalesceUninstall: (() => void) | null;
+	private readonly releaseInput: () => void;
+	private lastUserInputAt = Number.NEGATIVE_INFINITY;
+
+	constructor(
+		private readonly tui: TUI,
+		private readonly theme: ThemeLike,
+		private readonly keybindings: KeybindingsManager,
+		private readonly done: (result: PtyAttachResult) => void,
+		private readonly opts: PtyAttachOptions,
+	) {
+		const size = this.currentSize();
+		this.cols = size.cols;
+		this.rows = size.rows;
+		// Assigned in the body (not as a field initializer) so it runs after the `tui`
+		// parameter property is set regardless of the TS loader's field-init semantics.
+		this.imeCoalesceUninstall = installImeCursorCoalesce(this.tui);
+		this.releaseInput = holdInputListeners(this.tui);
+		this.term = new Terminal({ cols: this.cols, rows: this.rows, scrollback: 2000, allowProposedApi: true });
+		this.parserObservers = this.installParserObservers(this.term, this.parserEpoch);
+		this.parserObservationSupported = this.parserObservers.length > 0;
+		if (!this.parserObservationSupported) this.attachClient.forceLegacy("parser_observation_unavailable");
+		// Keep mouse reporting enabled by default so wheel scrolling and local drag-to-copy
+		// selection can coexist inside the attach surface. Set AGENT_BOARD_ATTACH_MOUSE=0
+		// to fall back to terminal-native selection only.
+		this.disableMouseScroll();
+		this.enableMouseScroll();
+		this.refreshMouseScrollMode();
+		this.assertFullscreenMouseMode();
+		this.replayScreenLog();
+		this.replyGuard = isReplyGuardEnabled(process.env.AGENT_BOARD_REPLY_GUARD) ? createReplyGuard() : null;
+		this.connect();
+		this.startLoadingTicker();
+		// Paint immediately (forced once) so the loading banner replaces the previous
+		// surface the instant we attach, rather than after the first reconnect tick.
+		this.scheduleRender();
+	}
+
+	handleInput(data: string): void {
+		// Issue #189: dispatch per segment instead of all-or-nothing. A read that mixes mouse
+		// reports with other bytes used to fall through to the keyboard branch as a whole: the
+		// gesture was dropped, an in-progress selection cleared, the viewport reset, and the raw
+		// mouse bytes forwarded into the hosted session as typed input.
+		//
+		// Issue #170/#194 composition: the inbound reply guard runs per non-mouse segment, so a
+		// recognized report segment can never absorb keys that arrived in the same read — the
+		// coalescing case #189 exists for (a still-fragmented head keeps the bounded #194
+		// absorption: 64 bytes / 250ms, kill-switchable). The guard's decision wins for complete
+		// protocol replies (dropped) and colour replies (forwarded as one whole sequence);
+		// whatever it passes falls through to the kind-based dispatch below.
+		for (const segment of splitAttachInput(data)) {
+			if (segment.kind === "mouse") {
+				// Issue #147: a mouse gesture on either channel cancels the armed
+				// delete confirm — it is real user intent, unlike a terminal report.
+				this.clearConfirmArmed();
+				this.handleMouseInputChunk(segment.events);
+			} else if (!this.consumeByReplyGuard(segment.data)) {
+				if (segment.kind === "report") this.send({ type: "input", data: segment.data });
+				else this.handleKeyInput(segment.data);
+			}
+			// A detach/close inside a segment must stop the rest of this read.
+			if (this.closed) return;
+		}
+	}
+
+	/** Issue #170/#194: feed one non-mouse segment through the inbound reply guard. Returns true
+	 * when the guard took the segment — a complete protocol reply is dropped, a colour reply is
+	 * forwarded as one whole sequence — and false when the caller should handle it. */
+	private consumeByReplyGuard(data: string): boolean {
+		const guard = this.replyGuard;
+		if (!guard) return false;
+		const decision = guard.feed(data, this.nowFn());
+		if (guard.pendingSince() !== null) this.armReplyGuardTimer();
+		if (decision.action === "forward") {
+			// Color replies only work for the child's parsers as one sequence.
+			this.send({ type: "input", data: decision.data });
+			return true;
+		}
+		return decision.action === "swallow";
+	}
+
+	/** Keyboard branch of `handleInput` (issue #189: one segment of the read at a time). Terminal
+	 * *reports* never reach the key branches: a report the reply guard does not own is forwarded
+	 * by `handleInput` without touching the selection or the viewport, because it carries no user
+	 * intent (focus events, query replies). */
+	private handleKeyInput(data: string): void {
+		this.lastUserInputAt = this.nowFn();
+		if (this.keybindings?.matches?.(data, "app.suspend")) {
+			suspendToShell(this.tui, {
+				// This view's mouse reporting isn't Pi's to turn off, and the shell mustn't get it.
+				beforeStop: () => this.disableMouseScroll(),
+				afterResume: () => {
+					this.enableMouseScroll();
+					this.assertFullscreenMouseMode();
+				},
+			});
+			return;
+		}
+		// Issue #147: in-place delete gesture. The resolver is pure and never
+		// reads connection state, so the gesture works even while the host is
+		// down. cancel falls through so input is never swallowed.
+		const deleteKey = resolveAttachDeleteKey({ confirmArmed: this.confirmArmed }, data);
+		this.confirmArmed = deleteKey.confirmArmed;
+		if (deleteKey.action === "arm") {
+			this.scheduleRender();
+			return;
+		}
+		if (deleteKey.action === "confirm") {
+			// Teardown first — same shape as detach() minus the control frame:
+			// close(true) restores a held PTY (G3, issue #42) and gracefully
+			// ends the socket; the consumer archives and the host is terminated,
+			// so no detach packet is sent. done() before archive so the host's
+			// death is never rendered here.
+			this.close(true);
+			this.done({ action: "delete" });
+			return;
+		}
+		if (deleteKey.action === "cancel-swallow") {
+			this.scheduleRender();
+			return;
+		}
+		if (deleteKey.action === "cancel") this.scheduleRender();
+		if (matchesKey(data, Key.pageUp)) {
+			this.clearPendingClick();
+			this.clearSelection();
+			if (this.tryScrollBy(this.pageSize())) return;
+			this.send({ type: "input", data });
+			return;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			this.clearPendingClick();
+			this.clearSelection();
+			if (this.tryScrollBy(-this.pageSize())) return;
+			this.send({ type: "input", data });
+			return;
+		}
+		if (matchesKey(data, Key.home)) {
+			this.clearPendingClick();
+			this.clearSelection();
+			if (this.tryScrollToTop()) return;
+			this.send({ type: "input", data });
+			return;
+		}
+		if (matchesKey(data, Key.end)) {
+			this.clearPendingClick();
+			this.clearSelection();
+			if (this.tryScrollToBottom()) return;
+			this.send({ type: "input", data });
+			return;
+		}
+		// The first goes to the session as usual. The second never does, so the session lives on.
+		if (!matchesKey(data, Key.ctrl("c"))) this.quitPresses.reset();
+		else if (this.quitPresses.press()) return this.detach({ action: "quit" });
+		if (matchesKey(data, "ctrl+\\")) {
+			// Unconditional, terminal-independent escape (issue #126): 0x1c is a
+			// single raw ASCII byte every terminal forwards unchanged in raw
+			// mode — no modifier-encoding dependency like Ctrl+Left (macOS
+			// Terminal.app never emits it, WezTerm consumes it for tab
+			// switching). Only caveat (documented in README): layouts where
+			// `\` sits on AltGr may never produce this byte; the escape ladder
+			// still covers those. matchesKey also covers the kitty CSI-u and
+			// modifyOtherKeys encodings of the same chord.
+			this.detach();
+			return;
+		}
+		if (matchesKey(data, Key.ctrl("left"))) {
+			// Explicit detach chord (issue #89): single ← is gated on editor state
+			// (it doubles as cursor-left inside a non-empty draft), so a user with
+			// a draft had no way out short of Ctrl+C/D, which kills the child Pi.
+			// Ctrl+← is unambiguous intent — detach unconditionally, regardless of
+			// editor state or socket liveness (same always-exitable guarantee as
+			// the disconnected-← escape, issue #48).
+			this.detach();
+			return;
+		}
+		if (matchesKey(data, Key.left)) {
+			// While the socket is down the key can never reach the child, so
+			// escape unconditionally — the view must always be exitable, even
+			// after the host crashes mid-output (issue #48). Note: ctrl+] is NOT
+			// a detach key — it passes through to Pi (tui.editor.jumpForward).
+			// Issue #91 Phase 6 (spec §D1): the gate reads ONLY the pushed
+			// editorEmpty side channel — true detaches; false and null (child
+			// extension missing, hello not yet arrived, old runner) forward via
+			// the explicit conservative policy. The old terminal-buffer
+			// heuristics are deleted for good: rendered bytes carry no
+			// input-buffer semantics, so that chain guessed at a fact it
+			// could not know (issues #42/#66/#69/#103). Escape without a pushed
+			// state is Ctrl+← (issue #89), never a buffer guess.
+			if (shouldEscapeAttach(this.connected, this.editorEmpty === true)) {
+				this.detach();
+				return;
+			}
+			this.clearPendingClick();
+			this.clearSelection();
+			this.scrollToBottom();
+			this.send({ type: "input", data });
+			return;
+		}
+		this.clearPendingClick();
+		this.clearSelection();
+		this.scrollToBottom();
+		this.send({ type: "input", data });
+	}
+
+	/** Issue #167: fullscreen TUI (pi ≥1.0) consumes raw SGR mouse sequences in
+	 * TuiAltScreen and delivers normalized events to overlays here instead — the
+	 * legacy handleInput mouse path never runs in that mode. This handler owns the
+	 * wheel and the middle-click paste; every other event returns undefined so pi's
+	 * own fullscreen selection keeps working. */
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		// Issue #147: clear the armed delete confirm on the fullscreen mouse
+		// channel BEFORE any routing — wheel consumed locally, wheel forwarded to
+		// the child (#185), selection mirror, and paste all count as "any other
+		// key cancels", whether or not the event ends up consumed.
+		this.clearConfirmArmed();
+		// Issue #173 follow-up: the renderer's routeWheel() fallback only scrolls real
+		// ScrollView components, while the attach viewport paints its own xterm
+		// scrollback — so a wheel event returned unconsumed scrolls nothing and the
+		// fullscreen wheel goes dead (regular mode is unaffected: it arrives as a raw
+		// SGR sequence through handleInput instead). Consume it locally, honoring the
+		// same kill switches as the legacy path, and fall through when scrolling is
+		// disabled or the viewport cannot actually move.
+		//
+		// Issue #185: an alternate-screen child leaves that scrollback inert (an
+		// alternate buffer keeps no history), so "local" routing can never move
+		// there. Forward one synthesized SGR wheel report instead and let the child
+		// scroll its own viewport — the same fallback PageUp/PageDown already use
+		// when the local viewport cannot move.
+		//
+		// Issue #198: the buffer type alone cannot decide this. A real fullscreen
+		// child sends `\x1b[?1049h` once at startup, so for any session older than
+		// the 100 KB screen-log replay window (and with no alternate-screen state
+		// in the snapshot DTO) this buffer reads `normal` while holding no
+		// scrollback at all. The wheel must therefore forward whenever the local
+		// viewport cannot actually move, not only when the type is known.
+		const wheelLinesUp = wheelScrollLinesUp(event);
+		if (wheelLinesUp !== 0) {
+			const route = resolveAttachWheelRoute({
+				bufferType: this.term.buffer.active.type,
+				wheelLinesUp,
+				mouseEnabled: this.mouseScrollEnabled(),
+			});
+			if (route === "none") return undefined;
+			if (route === "local" && this.tryScrollBy(wheelLinesUp)) return { handled: true, render: false };
+			// "child", or "local" with a viewport that cannot move. Consume only on
+			// effect: when the runner socket is down the forward would be a silent
+			// no-op (send() drops it), so hand the event back to pi instead of
+			// swallowing it pointlessly.
+			if (!this.socket || !this.connected) return undefined;
+			this.clearPendingClick();
+			this.clearSelection();
+			this.forwardWheelToChild(wheelLinesUp, event);
+			return { handled: true, render: false };
+		}
+		const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";
+		// Issue #172: a press starts a new gesture. Two reports can share one stdin chunk
+		// (pi-tui emits them synchronously in a loop), so the settle queued by the previous
+		// release must not consume the selection this press just started.
+		if (event.type === "press" && event.button === "left") this.selectionGestureSerial += 1;
+		if (isFullscreenSelectionEnd(event)) {
+			// Observe only — pi's fullscreen selection keeps the event. Overlays are
+			// dispatched before TuiAltScreen finalizes (and copies) the selection for this
+			// event, so settling must run deferred (issue #174).
+			const serial = this.selectionGestureSerial;
+			process.nextTick(() => {
+				if (serial !== this.selectionGestureSerial) return;
+				this.settleFullscreenSelection(nativePasteEnabled);
+			});
+			return undefined;
+		}
+		const action = resolveAttachMouseAction(event, { nativePasteEnabled });
+		if (action !== "paste-primary") return undefined;
+		this.clearPendingClick();
+		this.clearSelection();
+		this.pastePrimarySelection();
+		return { handled: true, render: false };
+	}
+
+	render(width: number): string[] {
+		if (this.closed) return [];
+		this.resizeIfNeeded(width);
+		const height = this.tui.terminal?.rows ?? 24;
+		const bodyHeight = Math.max(1, height - 2);
+		let body: string[];
+		if (this.modernCommittedMode() && this.emptyResetPending) {
+			body = Array.from({ length: bodyHeight }, () => "");
+		} else if (!this.attaching && this.receivedOutput) {
+			const projected = this.project(bodyHeight);
+			body = projected.lines;
+			while (body.length < bodyHeight) body.unshift("");
+		} else {
+			body = this.renderLoading(bodyHeight, width);
+		}
+		const header = this.confirmArmed
+			? this.theme.fg("accent", this.theme.bold(` Delete "${truncateToWidth(this.opts.title, 24, "")}"? `)) +
+			  this.theme.fg("muted", "y confirms · any other key cancels")
+			: this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
+			  this.theme.fg("muted", `${this.status} · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach`);
+		return [clip(header, width), ...body.map((l) => clipTerminalLine(l, width)), this.theme.fg("dim", "─".repeat(width))];
+	}
+
+	/** Centered "loading" surface shown until the first PTY output paints the session. */
+	private renderLoading(height: number, width: number): string[] {
+		const elapsedMs = Date.now() - this.connectStartedAt;
+		const spinner = this.closed ? "·" : SPINNER[Math.floor(elapsedMs / LOADING_TICK_MS) % SPINNER.length];
+		const title = `${spinner} Loading "${this.opts.title}"…`;
+		const detail = this.loadingDetail(Math.max(0, Math.round(elapsedMs / 1000)));
+		const out: string[] = [];
+		const top = Math.max(0, Math.floor((height - 3) / 2));
+		for (let i = 0; i < top; i++) out.push("");
+		out.push(center(this.theme.fg("accent", this.theme.bold(title)), width));
+		out.push(center(this.theme.fg("muted", detail), width));
+		out.push("");
+		out.push(center(this.theme.fg("dim", "Ctrl+←/Ctrl+\\ to detach"), width));
+		while (out.length < height) out.push("");
+		return out.slice(0, height);
+	}
+
+	private loadingDetail(elapsedSeconds: number): string {
+		if (this.status === "attached") return "Attached · waiting for the session to render…";
+		if (this.status.startsWith("error") || this.status === "host exited" || this.status === "host not reachable") return this.status;
+		if (this.status === "disconnected") return `Reconnecting to the session host… ${elapsedSeconds}s`;
+		return `Starting the session host… ${elapsedSeconds}s`;
+	}
+
+	invalidate(): void {}
+
+	dispose(): void {
+		this.close();
+	}
+
+	private clearConfirmArmed(): void {
+		if (!this.confirmArmed) return;
+		this.confirmArmed = false;
+		this.scheduleRender();
+	}
+
+	private detach(result: PtyAttachResult = { action: "detached" }): void {
+		// Restore a held PTY before ending the control socket. The runner closes
+		// the socket immediately after receiving detach, so sending detach first
+		// can drop the G3 restore resize (issue #42).
+		this.jiggleRetry.restoreAndStop();
+		// Phase 5 (D4): enveloped detach (correlated applied ack) with legacy
+		// fallback; both reach the same runner detach handler.
+		if (!this.attachClient.sendControl("detach")) {
+			this.send({ type: "detach" });
+		}
+		this.close(true);
+		this.done(result);
+	}
+
+		/** Install the component's public ?2026 observers; false return keeps xterm defaults. */
+	private installParserObservers(term: XtermLike, epoch: number): Array<{ dispose(): void }> {
+		try {
+			const parser = term.parser;
+			if (!parser || typeof parser.registerCsiHandler !== "function") return [];
+			const has2026 = (params: readonly (number | number[])[]) => params.some((p) => p === 2026 || (Array.isArray(p) && p.includes(2026)));
+			return [
+				parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+					if (this.closed || this.term !== term || this.parserEpoch !== epoch) return false;
+					if (has2026(params)) {
+						this.parserSyncOpen = true;
+						this.parserObserverEvents += 1;
+					}
+					return false;
+				}),
+				parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
+					if (this.closed || this.term !== term || this.parserEpoch !== epoch) return false;
+					if (has2026(params)) {
+						this.parserSyncOpen = false;
+						this.parserObserverEvents += 1;
+						this.commitCommittedView(term, epoch);
+					}
+					return false;
+				}),
+			];
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Replace the local parser exactly at an accepted authoritative snapshotReady:
+	 * same constructor options, observers installed before the first frame write.
+	 * Creation/observer failure is fail-closed (old parser retained, no write).
+	 */
+	private replaceParser(): boolean {
+		// Preserve the last complete same-generation view before a nonempty
+		// resnapshot replaces the parser. An empty baseline clears it later in
+		// the same snapshotReady event.
+		this.captureRecoveryView();
+		let next: XtermLike;
+		try {
+			next = new Terminal({ cols: this.cols, rows: this.rows, scrollback: 2000, allowProposedApi: true });
+		} catch {
+			return false;
+		}
+		const nextEpoch = this.parserEpoch + 1;
+		const observers = this.installParserObservers(next, nextEpoch);
+		if (observers.length === 0) {
+			try { next.dispose?.(); } catch { /* best effort */ }
+			return false;
+		}
+		const previous = this.term;
+		const previousObservers = this.parserObservers;
+		this.term = next;
+		this.parserObservers = observers;
+		this.parserEpoch = nextEpoch;
+		this.baselineToken += 1;
+		this.replacementFailureCount = 0;
+		this.parserObservationSupported = true;
+		this.parserSyncOpen = false;
+		this.parserWritesInFlight = 0;
+		this.committedView = null;
+		this.historyFloor = 0;
+		this.viewportTop = null;
+		this.selection = null;
+		this.selectionDragging = false;
+		this.localHydrationState = "idle";
+		for (const observer of previousObservers) {
+			try { observer.dispose(); } catch { /* best effort */ }
+		}
+		try { previous.dispose?.(); } catch { /* best effort */ }
+		return true;
+	}
+
+	private disposeCurrentParser(): void {
+		for (const observer of this.parserObservers) {
+			try { observer.dispose(); } catch { /* best effort */ }
+		}
+		this.parserObservers = [];
+		try { this.term.dispose?.(); } catch { /* best effort */ }
+	}
+
+	/** Bounded fail-closed policy for a failed authoritative parser replacement. */
+	private handleParserReplacementFailure(): void {
+		this.protocolBaselineState = "unverified";
+		this.localHydrationState = "failed";
+		this.publishabilityState = "wait";
+		this.latestViewProof = null;
+		this.viewProofRecords = [];
+		this.viewProofRecordCount = 0;
+		this.replacementFailureCount += 1;
+		if (this.replacementFailureCount <= 3) this.attachClient.requestResync("parser_replacement_failed");
+		else this.attachClient.forceLegacy("parser_replacement_failed");
+	}
+
+	private connect(): void {
+		if (this.closed || this.connected || this.socket) return;
+		// On Windows the control socket is a named pipe — it never exists as a
+		// filesystem entry, so existsSync can't gate the connect; a missing pipe
+		// surfaces as an error event on the socket and retries via scheduleReconnect.
+		if (process.platform !== "win32" && !existsSync(this.opts.socketPath)) {
+			this.status = `starting host… ${Math.ceil((Date.now() - this.connectStartedAt) / 1000)}s`;
+			this.scheduleReconnect();
+			return;
+		}
+		const socket = createConnection(this.opts.socketPath);
+		this.socket = socket;
+		// A partial protocol line left over from a failed socket would prefix the
+		// replacement connection's first line; start each socket with a clean buffer.
+		this.parserBuffer = "";
+		socket.on("connect", () => {
+			if (this.socket !== socket) {
+				try { socket.destroy(); } catch { /* best-effort stale-socket cleanup */ }
+				return;
+			}
+			this.clearRetry();
+			this.outputRenderScheduler.cancel();
+			this.captureRecoveryView();
+			this.connected = true;
+			this.everConnected = true;
+			this.connectionToken += 1;
+			this.committedView = null;
+			this.currentWireGeneration = null;
+			// Do not paint the previous generation between reconnect and its
+			// confirming hello/status; same-generation status clears this gate.
+			this.emptyResetPending = true;
+			this.disconnectedAt = null;
+			this.status = this.recoveryView !== null ? "reconnecting…" : "attached";
+			this.send({ type: "hello", clientId: `ui-${Date.now()}`, wantOutput: true });
+			// Snapshot+subscribe attach (issue #91 phase 4): the first connect
+			// probes with subscribe_terminal (old runners stay silent → probe
+			// timeout → legacy); protocol reconnects resume from the applied
+			// cursor over the SAME client instance (ring replay is seamless;
+			// eviction/restart answers a fresh snapshot). hello stays UI-owned
+			// and precedes the client's subscribe (established ordering).
+			if (this.attachMode === "undecided") this.attachClient.start();
+			else if (this.attachMode === "protocol") this.attachClient.reconnect(this.attachClient.getLastSeq());
+			// The shrink-and-hold redraw protocol is a LEGACY-path correctness
+			// tool: snapshot mode owns screen correctness via canonical frames,
+			// so the jiggle never runs there (armLegacyJiggle guards the race).
+			this.armLegacyJiggle();
+			this.enableMouseScroll();
+			if (!this.emptyResetPending) this.scheduleRender();
+			this.startAttachSettle();
+		});
+		// One read can end halfway through a character, and big frames always cross reads.
+		const decoder = new StringDecoder("utf8");
+		socket.on("data", (chunk) => {
+			if (this.socket !== socket) return;
+			this.onSocketData(decoder.write(chunk));
+		});
+		socket.on("close", () => {
+			// A failed socket can close after a replacement connection has already
+			// succeeded. Never let that stale event clear the replacement state.
+			if (this.socket !== socket) return;
+			this.captureRecoveryView();
+			this.socket = null;
+			this.connected = false;
+			this.disconnectedAt ??= Date.now();
+			// A drop inside the probe window must not leave the absolute 1500ms
+			// deadline armed: firing during the dead window would permanently
+			// downgrade a protocol-capable runner to legacy (CR R1 advisory). The
+			// reconnect's start()/reconnect() re-arms on the new socket.
+			this.attachClient.onDisconnect();
+			if (!this.closed && this.status !== "host exited") {
+				this.status = "disconnected";
+				this.scheduleReconnect();
+			}
+			if (!this.closed) this.scheduleRender();
+		});
+		socket.on("error", (err) => {
+			// The error may belong to an old socket after reconnect. Dispose that
+			// socket, but do not alter the state of the current connection.
+			if (this.socket !== socket) {
+				try { socket.destroy(); } catch { /* best-effort stale-socket cleanup */ }
+				return;
+			}
+			this.captureRecoveryView();
+			this.socket = null;
+			this.connected = false;
+			// Notify before nulling: the close event that follows will hit the
+			// stale-socket guard (this.socket no longer matches) and must not be
+			// the only path that cancels the probe deadline (CR R1 advisory).
+			this.attachClient.onDisconnect();
+			try { socket.destroy(); } catch { /* already handling socket failure */ }
+			this.disconnectedAt ??= Date.now();
+			if (this.closed) return;
+			this.status = `waiting for host… ${err.message}`;
+			this.scheduleReconnect();
+			this.scheduleRender();
+		});
+	}
+
+	/**
+	 * Request a repaint. The first paint is forced (clears any prior screen so the previous
+	 * session can't ghost behind us); all later paints are coalesced + throttled + differential
+	 * by the TUI, so bursts of wheel/output events don't each clear-and-repaint the whole screen.
+	 */
+	private scheduleRender(force = false): void {
+		const next = nextAttachRender(this.firstPaint, force);
+		this.firstPaint = next.firstPaint;
+		this.tui.requestRender(next.force);
+	}
+
+	private scheduleReconnect(): void {
+		if (this.closed || this.retryTimer) return;
+		const verdict = evaluateAttachReconnect({
+			everConnected: this.everConnected,
+			disconnectedAt: this.disconnectedAt,
+			connectStartedAt: this.connectStartedAt,
+			now: Date.now(),
+		});
+		if (verdict.giveUp) {
+			this.status = verdict.status ?? "host exited";
+			this.scheduleRender();
+			return;
+		}
+		this.retryTimer = setTimeout(() => {
+			this.retryTimer = null;
+			this.connect();
+			this.scheduleRender();
+		}, 150);
+	}
+
+	/** Animate the loading banner until the first PTY output arrives (or we close). */
+	private startLoadingTicker(): void {
+		if (this.loadingTimer || !this.attaching || this.closed) return;
+		this.loadingTimer = setInterval(() => {
+			if (this.closed || !this.attaching) return this.stopLoadingTicker();
+			this.tui.requestRender();
+		}, LOADING_TICK_MS);
+		this.loadingTimer.unref?.();
+	}
+
+	private stopLoadingTicker(): void {
+		if (!this.loadingTimer) return;
+		clearInterval(this.loadingTimer);
+		this.loadingTimer = null;
+	}
+
+	/**
+	 * Attach transition lifecycle. Keep the loading banner up while the screen-log replay
+	 * and the initial resize-jiggle redraws settle, so the buffer doesn't visibly scroll or
+	 * flash through the viewport on attach. Each output chunk defers the settle
+	 * window; a hard timeout guards against a session that never produces output.
+	 */
+	private startAttachSettle(): void {
+		if (!this.attaching) return;
+		this.attachWaitToken += 1;
+		const waitToken = this.attachWaitToken;
+		this.deferAttachSettle();
+		if (this.attachHardTimeout) clearTimeout(this.attachHardTimeout);
+		const remainingHard = Math.max(0, ATTACH_HARD_TIMEOUT_MS - (Date.now() - this.attachStartedAt));
+		this.attachHardTimeout = setTimeout(() => this.handleAttachHardTimeout(waitToken), remainingHard);
+		this.attachHardTimeout.unref?.();
+	}
+
+	private deferAttachSettle(): void {
+		if (!this.attaching || (this.attachMode === "protocol" && this.frameWitnessAvailable)) return;
+		if (this.attachSettleTimer) clearTimeout(this.attachSettleTimer);
+		const waitToken = this.attachWaitToken;
+		this.attachSettleTimer = setTimeout(() => this.handleAttachSettleTimeout(waitToken), ATTACH_SETTLE_MS);
+		this.attachSettleTimer.unref?.();
+	}
+
+	/** Legacy settle callback. In protocol mode the timer is cancelled; an
+	 *  undecided timer may not consume the first transition either. */
+	private handleAttachSettleTimeout(waitToken = this.attachWaitToken): void {
+		if (waitToken !== this.attachWaitToken) return;
+		this.attachSettleTimer = null;
+		if (!this.attaching || this.closed) return;
+		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.frameWitnessAvailable);
+		if (legacyCompatible) this.finishAttachTransition();
+	}
+
+	/** The 2500 ms cap never forces a modern publish of an UNFINISHED frame. It
+	 * records an explicit expired/degraded wait; legacy keeps its old reveal.
+	 * Idle-session downgrade (post-#261 regression): when the cap fires with a
+	 * COMPLETE committed snapshot already hydrated, no pending geometry intent,
+	 * and the proof channel never covered this baseline (e.g. the child emitted
+	 * S and went idle, so viewProof stays unavailable/candidate-open forever),
+	 * reveal that complete runner-synthesized frame through the standard legacy
+	 * transition instead of waiting for a proof that cannot arrive. Empty
+	 * baselines and geometry-gated waits keep the original never-publish wait. */
+	private handleAttachHardTimeout(waitToken = this.attachWaitToken): void {
+		if (waitToken !== this.attachWaitToken) return;
+		this.attachHardTimeout = null;
+		if (!this.attaching || this.closed) return;
+		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.frameWitnessAvailable);
+		if (legacyCompatible) {
+			this.finishAttachTransition();
+			return;
+		}
+		if (this.attachMode === "protocol" && this.resizeIntentRequired && this.connected && this.geometryNudges < GEOMETRY_NUDGE_LIMIT) {
+			this.nudgeGeometry(waitToken);
+			return;
+		}
+		this.deadlineState = "expired";
+		this.notReadyReason = this.attachMode === "protocol" ? "deadline-expired:waiting-for-complete-frame" : "deadline-expired:mode-undecided";
+		this.publishabilityState = "unknown";
+		const proof = this.latestViewProof as { status?: string } | null;
+		const nudgedInVain = this.resizeIntentRequired && this.geometryNudges >= GEOMETRY_NUDGE_LIMIT;
+		if (
+			this.committedView !== null &&
+			(!this.resizeIntentRequired || nudgedInVain) &&
+			(proof === null || proof.status !== "covered" || nudgedInVain)
+		) {
+			this.finishAttachTransition();
+			return;
+		}
+		this.scheduleRender();
+	}
+
+	/** A late legacy decision restores the ORIGINAL deadlines (remaining time),
+	 *  not a fresh extended window. */
+	private restoreLegacyDeadlines(): void {
+		if (!this.attaching || this.closed) return;
+		const now = Date.now();
+		if (now - this.attachStartedAt >= ATTACH_HARD_TIMEOUT_MS) {
+			this.finishAttachTransition();
+			return;
+		}
+		const settleBase = this.lastOutputAt > 0 ? this.lastOutputAt : this.attachStartedAt;
+		const remaining = Math.max(0, ATTACH_SETTLE_MS - (now - settleBase));
+		if (this.attachSettleTimer) clearTimeout(this.attachSettleTimer);
+		const waitToken = this.attachWaitToken;
+		this.attachSettleTimer = setTimeout(() => this.handleAttachSettleTimeout(waitToken), remaining);
+		this.attachSettleTimer.unref?.();
+		if (!this.attachHardTimeout) {
+			this.attachHardTimeout = setTimeout(() => this.handleAttachHardTimeout(waitToken), Math.max(0, ATTACH_HARD_TIMEOUT_MS - (now - this.attachStartedAt)));
+			this.attachHardTimeout.unref?.();
+		}
+	}
+
+	private currentViewIdentity() {
+		return {
+			connectionToken: this.connectionToken,
+			baselineToken: this.baselineToken,
+			generation: this.attachClient.getIdentity().generation ?? "local",
+			parser: this.term,
+			geometryRevision: this.geometryRevision,
+			targetCols: this.cols,
+			targetRows: this.rows,
+			closed: this.closed,
+		};
+	}
+
+	/** Snapshot the visible complete grid at a real close boundary. Only
+	 *  primitives are copied; no xterm BufferLine/Cell survives this call. */
+	private commitCommittedView(term: XtermLike, epoch: number): void {
+		if (this.closed || this.term !== term || this.parserEpoch !== epoch) return;
+		if (!this.modernCommittedMode() || this.localHydrationState === "hydrating") return;
+		const height = this.bodyHeight();
+		const buf = term.buffer.active;
+		const start = Math.max(0, Math.min(this.viewportTop ?? this.liveBottomViewportTop(height), Math.max(0, buf.length - height)));
+		const end = Math.min(buf.length, start + height);
+		const rows: CommittedRow[] = [];
+		for (let lineIndex = start; lineIndex < end; lineIndex += 1) {
+			const line = buf.getLine(lineIndex);
+			const cells: SnapshotCell[] = [];
+			if (line) {
+				for (let x = 0; x < line.length; x += 1) {
+					const cell = line.getCell(x);
+					if (!cell || cell.getWidth() === 0) {
+						cells.push(SnapshotCell.empty());
+						continue;
+					}
+					cells.push(SnapshotCell.fromBufferCell(cell, osc8UriForCell(term, cell)));
+				}
+			}
+			rows.push({ cells: new SnapshotLine(cells) });
+		}
+		const cursor = projectPtyCursor(buf, start, height);
+		this.committedView = {
+			identity: this.currentViewIdentity(),
+			start,
+			end,
+			rows,
+			cursor,
+			cursorHidden: isPtyCursorHidden(term),
+			viewportTop: this.viewportTop,
+			proofSeq: null,
+		};
+		this.recoveryView = null;
+		this.recoveryGeneration = null;
+		this.emptyResetPending = false;
+		if (this.connected) this.status = "attached";
+	}
+
+	private captureRecoveryView(): void {
+		if (!this.modernCommittedMode() || this.committedView === null || this.closed) return;
+		if (!canPublishAttachView(this.committedView.identity, this.currentViewIdentity())) return;
+		this.recoveryView = this.committedView;
+		this.recoveryGeneration = this.committedView.identity.generation;
+	}
+
+	private invalidateRecoveryView(): void {
+		this.recoveryView = null;
+		this.recoveryGeneration = null;
+	}
+
+	private recoveryViewValid(): boolean {
+		if (!this.modernCommittedMode() || this.recoveryView === null || this.closed) return false;
+		if (this.recoveryView.identity.closed === true) return false;
+		if (this.recoveryView.identity.targetCols !== this.cols || this.recoveryView.identity.targetRows !== this.rows) return false;
+		if (this.recoveryView.identity.geometryRevision !== this.geometryRevision) return false;
+		if (typeof this.currentWireGeneration !== "string" || this.currentWireGeneration.length === 0) return false;
+		if (this.currentWireGeneration !== this.recoveryGeneration) return false;
+		return true;
+	}
+
+	private activeCommittedView(): CommittedView | null {
+		if (this.committedViewValid()) return this.committedView;
+		if (this.recoveryViewValid()) return this.recoveryView;
+		return null;
+	}
+
+	private modernCommittedMode(): boolean {
+		return this.attachMode === "protocol" && this.frameWitnessAvailable;
+	}
+
+	private committedViewValid(): boolean {
+		if (this.committedView === null) return false;
+		return canPublishAttachView(this.committedView.identity, this.currentViewIdentity());
+	}
+
+	private liveBottomViewportTop(height: number): number {
+		const buf = this.term.buffer.active;
+		const bottom = Math.min(buf.length, buf.baseY + this.rows);
+		return Math.max(0, bottom - height);
+	}
+
+	private committedLineAt(lineIndex: number): BufferLineLike | null {
+		if (!this.modernCommittedMode()) return null;
+		const view = this.activeCommittedView();
+		if (view === null || lineIndex < view.start || lineIndex >= view.end) return null;
+		return view.rows[lineIndex - view.start]?.cells ?? null;
+	}
+
+	private captureViewProofIdentity(): void {
+		this.viewProofIdentity = this.currentViewIdentity();
+	}
+
+	private invalidateViewProof(reason: string): void {
+		this.latestViewProof = { status: "unknown", reason, proof: null, throughSeq: null, cursorVisible: null };
+		this.viewProofIdentity = null;
+		this.viewProofTrailing.reset();
+		this.resizeIntentSatisfied = false;
+	}
+
+	/** Feed ordinary output after the last F proof through the safe-trailing
+	 *  classifier. Only a completely safe window may extend coverage. */
+	private noteViewProofOutput(data: string): void {
+		const coverage = this.latestViewProof as { status?: string; proof?: unknown } | null;
+		if (this.attachMode !== "protocol" || coverage === null || coverage.status !== "covered" || coverage.proof === null) return;
+		const localSeq = this.attachClient.getLastSeq();
+		const state = this.viewProofTrailing.push(data);
+		if (state.status === "safe") {
+			this.latestViewProof = {
+				status: "covered",
+				reason: "safe-trailing",
+				proof: (coverage as { proof: unknown }).proof,
+				throughSeq: localSeq,
+				cursorVisible: state.cursorVisible,
+			};
+			this.captureViewProofIdentity();
+		} else {
+			this.invalidateViewProof(state.status === "pending" ? "view-proof-trailing-pending" : `view-proof-trailing-${state.reason ?? "unsafe"}`);
+		}
+	}
+
+	private noteViewProofRecord(record: Record<string, unknown>): void {
+		if (record.marker === "S") {
+			this.viewProofRecords.push(record);
+			if (this.viewProofRecords.length > MAX_VIEW_PROOF_RECORDS) this.viewProofRecords.shift();
+			this.viewProofRecordCount += 1;
+			this.invalidateViewProof("candidate-open");
+			return;
+		}
+		if (record.marker === "A") {
+			this.viewProofRecords.push(record);
+			if (this.viewProofRecords.length > MAX_VIEW_PROOF_RECORDS) this.viewProofRecords.shift();
+			this.viewProofRecordCount += 1;
+			this.invalidateViewProof("candidate-aborted");
+			return;
+		}
+		if (record.marker !== "F") return;
+		this.viewProofRecords.push(record);
+		if (this.viewProofRecords.length > MAX_VIEW_PROOF_RECORDS) this.viewProofRecords.shift();
+		this.viewProofRecordCount += 1;
+		this.latestViewProof = {
+			status: "covered",
+			reason: "safe-trailing",
+			proof: record,
+			throughSeq: record.seq,
+			cursorVisible: typeof record.cursorVisible === "boolean" ? record.cursorVisible : null,
+		};
+		this.captureViewProofIdentity();
+		this.viewProofTrailing.reset(typeof record.cursorVisible === "boolean" ? { cursorVisible: record.cursorVisible } : {});
+		const proofSeq = Number(record.seq);
+		const following = this.recentProtocolOutput.filter((chunk) => chunk.seq > proofSeq).sort((a, b) => a.seq - b.seq);
+		let expectedSeq = proofSeq + 1;
+		for (const chunk of following) {
+			if (chunk.seq !== expectedSeq) {
+				this.invalidateViewProof("view-proof-replay-gap");
+				return;
+			}
+			expectedSeq = chunk.seq + 1;
+			const state = this.viewProofTrailing.push(chunk.data);
+			if (state.status !== "safe") {
+				this.invalidateViewProof(state.status === "pending" ? "view-proof-trailing-pending" : `view-proof-trailing-${state.reason ?? "unsafe"}`);
+				return;
+			}
+			this.latestViewProof = {
+				status: "covered",
+				reason: "safe-trailing",
+				proof: record,
+				throughSeq: chunk.seq,
+				cursorVisible: state.cursorVisible,
+			};
+			this.captureViewProofIdentity();
+		}
+		if (this.attachClient.getLastSeq() >= expectedSeq) {
+			this.invalidateViewProof("view-proof-replay-gap");
+		}
+	}
+
+	/** Pure fact assembly for the accepted decideAttachPresentation gate. */
+	private evaluateAttachReady(): void {
+		if (!this.attaching || this.closed || this.attachMode !== "protocol" || !this.frameWitnessAvailable) return;
+		if (this.parserWritesInFlight > 0) return;
+		if (this.committedView === null) {
+			this.notReadyReason = "committed-view-missing";
+			return;
+		}
+		const coverage = this.latestViewProof as { status?: string; proof?: { metadata?: unknown } | null } | null;
+		const proof = coverage?.status === "covered" && coverage.proof !== null ? coverage.proof : null;
+		const localSeq = this.attachClient.getLastSeq();
+		const baselineState =
+			this.protocolBaselineState === "valid-empty" || this.protocolBaselineState === "valid-content"
+				? this.protocolBaselineState
+				: this.localHydrationState === "hydrating"
+					? "hydrating"
+					: this.protocolBaselineState;
+		const decision = decideAttachPresentation({
+			closed: this.closed,
+			mode: this.attachMode,
+			baselineState,
+			localParseComplete: this.parserWritesInFlight === 0 && this.localHydrationState !== "hydrating",
+			frameState: this.parserSyncOpen ? "open" : this.parserWritesInFlight > 0 ? "unknown" : "complete",
+			contentAvailable: this.receivedOutput === true && proof !== null,
+			contentKind: proof === null ? "unknown" : "complete",
+			localSeq,
+			viewProof: coverage,
+			viewIdentity: this.viewProofIdentity,
+			currentIdentity: this.currentViewIdentity(),
+			targetCols: this.cols,
+			targetRows: this.rows,
+			geometryRevision: this.geometryRevision,
+			requiredGeometryRevision: this.resizeIntentRequired ? this.proofGeometryRevision : undefined,
+			resizeIntentRequired: this.resizeIntentRequired,
+			resizeIntentSatisfied: this.resizeIntentSatisfied,
+			intentId: this.proofIntentId,
+			deadlineState: this.deadlineState,
+		});
+		this.notReadyReason = decision.action === "wait" ? decision.reason : null;
+		if (decision.action === "publish") {
+			this.publishabilityState = "ready";
+			this.finishAttachTransition();
+		} else if (decision.action === "wait") {
+			this.publishabilityState = this.deadlineState === "expired" ? "unknown" : "wait";
+		}
+	}
+
+	private finishAttachTransition(): void {
+		if (!this.attaching || this.closed) return;
+		// Note: jiggle retry chain is NOT cancelled here — it survives the settle
+		// transition because any successful jiggle triggers a fullRender which emits
+		// \x1b[2J, self-cancelling the chain. Post-settle jiggles only occur when the
+		// child consumed none of the earlier ones (the exact failure mode this
+		// feature fixes); in that case the screen is already stale, so the trade-off
+		// of a brief full-render flicker (which also clears any in-progress text
+		// selection) is acceptable in exchange for self-healing. When the child is
+		// healthy, the very first jiggle's fullRender is detected and the chain
+		// stops before settle ends, so no post-settle jiggle fires at all.
+		this.attaching = false;
+		this.publishabilityState = "ready";
+		this.notReadyReason = null;
+		this.firstAttachSideEffectsApplied = true;
+		if (this.attachSettleTimer) {
+			clearTimeout(this.attachSettleTimer);
+			this.attachSettleTimer = null;
+		}
+		if (this.attachHardTimeout) {
+			clearTimeout(this.attachHardTimeout);
+			this.attachHardTimeout = null;
+		}
+		this.stopLoadingTicker();
+		// Force a full clear so the loading banner is replaced atomically by the settled
+		// buffer, instead of diffing banner lines into buffer lines.
+		this.scheduleRender(true);
+		this.startDesyncProbe();
+		// Issue #128: the settle transition is the single point where `attaching`
+		// flips false (never re-armed), so these hooks run at most once per attach.
+		this.attachColorSchemeBridge();
+		// Use only the tracked TUI probe. An extra terminal.write(OSC 11) has
+		// no local query owner, so handleInput's report branch forwards its
+		// reply to the child PTY. Settle can precede the child's raw-mode
+		// startup, making the line discipline echo that reply as visible
+		// ^[]11;rgb:... text.
+		this.reportRealTerminalColorScheme();
+	}
+
+	/** Issue #128 D2: the local pi-tui consumes the child's color-scheme
+	 * traffic (996 queries / 2031 notifications forwarded by D1) — reports
+	 * never reach the child. onTerminalColorSchemeChange fires from that same
+	 * consumption point, so the bridge repackages each event as a 997 report
+	 * on the child pty, where the child's pi-tui parser consumes it. Once per
+	 * attach (settle is single-shot + explicit guard); kill switch skips it. */
+	private attachColorSchemeBridge(): void {
+		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES === "0") return;
+		if (this.colorSchemeBridgeUnsubscribe) return;
+		try {
+			this.colorSchemeBridgeUnsubscribe = this.tui.onTerminalColorSchemeChange((scheme) => {
+				if (!toColorSchemeReport(scheme)) return;
+				this.pendingSchemeReport = { scheme };
+				this.flushPendingSchemeReport();
+			});
+		} catch {
+			/* best-effort: an unbridgeable TUI keeps pre-#128 behavior */
+		}
+	}
+
+	/** Called on every terminal path (close() covers detach/dispose; the exit
+	 * branch calls done() without close(), so it unsubscribes explicitly). */
+	private detachColorSchemeBridge(): void {
+		this.pendingSchemeReport = null;
+		this.childInputReady = false;
+		const unsubscribe = this.colorSchemeBridgeUnsubscribe;
+		this.colorSchemeBridgeUnsubscribe = null;
+		if (!unsubscribe) return;
+		try {
+			unsubscribe();
+		} catch {
+			/* best-effort: a stale listener must not block teardown */
+		}
+	}
+
+	/** Issue #148/#161: at settle, ask the REAL terminal itself (feature-detected
+	 * public query API — pi-tui >= 0.99 renamed it to queryTerminalColors) and
+	 * hand the child an unconditional 997 color-scheme report. One probe per
+	 * attach; the pre-#148 silence on failure is now observable via
+	 * onDiagnostic. Same kill switch as #128 D1-D3. */
+	private reportRealTerminalColorScheme(): void {
+		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES === "0") {
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ outcome: "suppressed" }));
+			return;
+		}
+		void this.probeAndReportRealTerminalColorScheme();
+	}
+
+	private async probeAndReportRealTerminalColorScheme(): Promise<void> {
+		const probe = resolveProbeApi(this.tui as never);
+		if (probe.api === "none") {
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: "none", outcome: "no_probe_api" }));
+			return;
+		}
+		let result: { rgb?: RgbColor; anyColors: boolean };
+		try {
+			result = await probe.invoke(
+				this.tui as never,
+				REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS,
+				(colors) => this.handleLateSettleColors(probe.api, colors),
+			);
+		} catch {
+			/* best-effort: a failed probe keeps the pre-#148 behavior, but recorded */
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: probe.api, outcome: "error" }));
+			return;
+		}
+		const rgb = result?.rgb;
+		if (!rgb) {
+			// Outcome rule (spec §2.3): any color answered but no background =>
+			// no_background; nothing answered at all => timeout. The old API only
+			// queries OSC 11, so its undefined is always a timeout.
+			const outcome = result && result.anyColors ? "no_background" : "timeout";
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: probe.api, outcome }));
+			return;
+		}
+		this.deliverSettleScheme(colorSchemeForBackgroundRgb(rgb) ?? undefined, probe.api, false);
+	}
+
+	/** pi-tui >= 0.99 late replies: deliver only when the scheme differs from
+	 * what was already sent (sentScheme starts null and never matches, so the
+	 * timeout-then-late path delivers). Closed => dropped, but recorded. */
+	private handleLateSettleColors(api: "colors" | "background" | "none", colors: unknown): void {
+		if (this.closed) {
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: api, outcome: "dropped_closed" }));
+			return;
+		}
+		const rgb = backgroundRgbFromTerminalColors(colors as never);
+		const scheme = rgb ? colorSchemeForBackgroundRgb(rgb) ?? undefined : undefined;
+		if (!scheme) return;
+		if (this.sentScheme === scheme && this.childInputReady) {
+			this.pendingSchemeReport = null;
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: api, outcome: "duplicate_skipped" }));
+			return;
+		}
+		this.deliverSettleScheme(scheme, api, true);
+	}
+
+	private deliverSettleScheme(scheme: TerminalColorScheme | undefined, api: "colors" | "background" | "none", late: boolean): void {
+		if (!scheme || this.closed) return;
+		const data = toColorSchemeReport(scheme);
+		if (!data) return;
+		// CR round-1 advisory: send() silently no-ops while the control socket is
+		// disconnected (hard-timeout settle before the host finished connecting).
+		// Claiming "reported" there would be a lie the dedup then acts on, so
+		// record the drop and leave sentScheme unset — a later same-scheme late
+		// reply re-attempts instead of being swallowed as duplicate_skipped.
+		if (!this.connected) {
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: api, outcome: "dropped_disconnected" }));
+			return;
+		}
+		if (!this.childInputReady) {
+			// Settle/probe completion is not a child-readiness handshake. Keep
+			// only the latest scheme, then send when the child enters raw mode.
+			this.pendingSchemeReport = { scheme, api, late };
+			return;
+		}
+		this.sentScheme = scheme;
+		this.send({ type: "input", data });
+		const details: { probeApi: "colors" | "background" | "none"; outcome: "reported"; report: string; late?: boolean } = {
+			probeApi: api,
+			outcome: "reported",
+			report: scheme === "light" ? "997;2" : "997;1",
+		};
+		if (late) details.late = true;
+		this.opts.onDiagnostic?.(buildSettleSchemePatch(details));
+	}
+
+	private updateChildInputReadiness(data: string): void {
+		// Scan only LIVE bytes, not warm-start history. A reused xterm buffer
+		// can still have the old child's paste mode enabled during cold boot.
+		const input = this.childInputModeCarry + data;
+		for (const match of input.matchAll(/\x1b\[\?2004([hl])/g)) {
+			this.childInputReady = match[1] === "h";
+		}
+		// Keep at most an incomplete eight-byte mode sequence across chunks.
+		this.childInputModeCarry = input.slice(-7);
+	}
+
+	private flushPendingSchemeReport(): void {
+		if (this.closed || !this.connected || !this.childInputReady) return;
+		const pending = this.pendingSchemeReport;
+		this.pendingSchemeReport = null;
+		if (!pending) return;
+		if (pending.api) this.deliverSettleScheme(pending.scheme, pending.api, pending.late ?? false);
+		else this.send({ type: "input", data: toColorSchemeReport(pending.scheme) });
+	}
+
+	private startDesyncProbe(): void {
+		this.stopDesyncProbe();
+		// The probe is deliberately NOT hooked into the render path: rendering is
+		// event-driven (socket output / keypress / resize) and stops exactly when
+		// desync strikes (output goes quiet). A self-contained timer is the only
+		// way an idle desynced screen gets its self-heal without user action.
+		this.desyncProbeTimer = setInterval(() => this.checkDesync(), DESYNC_PROBE_INTERVAL_MS);
+		this.desyncProbeTimer.unref?.();
+	}
+
+	private stopDesyncProbe(): void {
+		if (this.desyncProbeTimer) {
+			clearInterval(this.desyncProbeTimer);
+			this.desyncProbeTimer = null;
+		}
+	}
+
+	/**
+	 * Runtime desync backstop (issue #11). Seven gates, cheapest first:
+	 * settled+connected, child is a TUI (frame seen), chain idle, output quiet,
+	 * heal rate limit, misaligned cursor. All pass → heal() re-arms
+	 * shrink-and-hold; the child's fullRender clear then restores the size
+	 * and repaints a consistent screen.
+	 */
+	private checkDesync(): void {
+		if (this.closed || this.attaching || !this.connected) return; // gates 1, 7
+		// Protocol mode owns screen correctness via canonical frames (issue #91
+		// phase 4, CR R1 advisory): a "misaligned cursor" there is frame content
+		// or a stale-frame transient that resync heals — a jiggle heal would fire
+		// resize pulses in a mode whose e2e pins zero resizes. The undecided
+		// window keeps legacy semantics on purpose: until the snapshot answer
+		// arrives the jiggle IS armed and the legacy fallthrough owns the screen.
+		if (this.attachMode === "protocol") return;
+		const chain = this.jiggleRetry.getState();
+		if (!chain.tuiFrameSeen) return; // gate 2: shell/vim children never heal
+		if (!chain.stopped || chain.held) return; // gate 5: attach/heal chain active
+		const now = this.nowFn();
+		if (now - this.lastOutputAt <= DESYNC_QUIET_MS) return; // gate 4: streaming
+		if (now - this.lastHealAt <= HEAL_RATELIMIT_MS) return; // gate 6: rate limit
+		const height = this.bodyHeight();
+		this.clampViewportTop(height);
+		const start = this.viewportTop ?? this.bottomViewportTop(height);
+		const buf = this.term.buffer.active;
+		if (detectCursorDesync(buf, projectPtyCursor(buf, start, height)) !== "misaligned") return; // gate 3
+		this.lastHealAt = now;
+		this.jiggleRetry.heal(this.cols, this.rows);
+	}
+
+	private clearMouseRefreshTimers(): void {
+		for (const timer of this.mouseRefreshTimers) clearTimeout(timer);
+		this.mouseRefreshTimers = [];
+	}
+
+	/**
+	 * Legacy-path jiggle arming with a protocol-race guard (issue #91 phase 4).
+	 * Legacy decided immediately (env-forced) → start now; undecided → start
+	 * after the guard delay unless the snapshot answer wins (protocol). The
+	 * timer guard accepts ANY non-protocol mode, so a fast in-flight decision
+	 * (e.g. frame_version_mismatch landing ~1ms into the probe window) still
+	 * arms the chain — an early-decided legacy session must not end up
+	 * jiggle-less. start() re-arms idempotently, so a late duplicate is safe.
+	 */
+	private armLegacyJiggle(): void {
+		this.clearJiggleStartTimer();
+		if (this.attachMode === "protocol") return;
+		if (this.attachMode === "legacy") {
+			if (this.connected) this.jiggleRetry.start(this.cols, this.rows);
+			return;
+		}
+		this.jiggleStartTimer = setTimeout(() => {
+			this.jiggleStartTimer = null;
+			if (!this.closed && this.connected && this.attachMode !== "protocol") {
+				this.jiggleRetry.start(this.cols, this.rows);
+			}
+		}, LEGACY_JIGGLE_ARM_DELAY_MS);
+		this.jiggleStartTimer.unref?.();
+	}
+
+	private clearJiggleStartTimer(): void {
+		if (!this.jiggleStartTimer) return;
+		clearTimeout(this.jiggleStartTimer);
+		this.jiggleStartTimer = null;
+	}
+
+	private clearRetry(): void {
+		if (!this.retryTimer) return;
+		clearTimeout(this.retryTimer);
+		this.retryTimer = null;
+	}
+
+	private clearGracefulSocketCloseTimer(): void {
+		if (!this.gracefulSocketCloseTimer) return;
+		clearTimeout(this.gracefulSocketCloseTimer);
+		this.gracefulSocketCloseTimer = null;
+	}
+
+	/** Issue #170: an open reply window arms exactly one timer. Fragments do not
+	 * re-arm it (the window is anchored at the head); a timer that fires while
+	 * the window is still open — a newer head moved `since` forward — re-arms
+	 * instead of dropping the still-open sequence. */
+	private armReplyGuardTimer(): void {
+		if (this.replyGuardTimer) return;
+		this.replyGuardTimer = setTimeout(() => {
+			this.replyGuardTimer = null;
+			this.replyGuard?.expire(this.nowFn());
+			if (this.replyGuard?.pendingSince() !== null) this.armReplyGuardTimer();
+		}, REPLY_GUARD_WINDOW_MS);
+		this.replyGuardTimer.unref?.();
+	}
+
+	private clearReplyGuardTimer(): void {
+		if (!this.replyGuardTimer) return;
+		clearTimeout(this.replyGuardTimer);
+		this.replyGuardTimer = null;
+	}
+
+	private enableMouseScroll(): void {
+		if (!this.ownsOuterMouseMode()) return;
+		try {
+			this.tui.terminal.write(XTSHIFTESCAPE_SELECT);
+			this.tui.terminal.write(MOUSE_ENABLE);
+		} catch {
+			/* best-effort: some terminals reject these sequences; mouse reporting is optional */
+		}
+	}
+
+	/** Issue #169: in fullscreen mode TuiAltScreen owns outer-terminal mouse
+	 * reporting (asserted once at startup, never re-asserted) — writing any
+	 * mouse-mode sequence from here can only downgrade or kill it. tui.mode is
+	 * typed non-optional but old pi runtimes lack it; the strict inequality
+	 * then keeps today's (regular) behavior. */
+	private ownsOuterMouseMode(): boolean {
+		return shouldOwnOuterMouseMode(this.tui.mode, this.mouseScrollEnabled());
+	}
+
+	private mouseScrollEnabled(): boolean {
+		const mode = (process.env.AGENT_BOARD_ATTACH_MOUSE ?? "").trim().toLowerCase();
+		if (mode === "0" || mode === "off" || mode === "false") return false;
+		if (mode === "1" || mode === "on" || mode === "true" || mode === "classic") return true;
+		if ((process.env.AGENT_BOARD_ENABLE_MOUSE_SCROLL ?? "").trim() === "0") return false;
+		return true;
+	}
+
+	private refreshMouseScrollMode(): void {
+		this.clearMouseRefreshTimers();
+		if (!this.mouseScrollEnabled()) return;
+		for (const delay of [0, 50, 250]) {
+			const timer = setTimeout(() => {
+				if (!this.closed) this.enableMouseScroll();
+			}, delay);
+			timer.unref?.();
+			this.mouseRefreshTimers.push(timer);
+		}
+	}
+
+	private disableMouseScroll(): void {
+		if (!this.ownsOuterMouseMode()) return;
+		try {
+			this.tui.terminal.write(MOUSE_DISABLE);
+		} catch {
+			/* best-effort: terminal may already be gone at teardown */
+		}
+	}
+
+	private handleMouseInputChunk(events: Array<{ raw: string; mouse: { button: number; row: number; col: number; action: string } }>): boolean {
+		let handled = false;
+		for (const entry of events) {
+			const { mouse, raw } = entry;
+			if ((mouse.button & 64) !== 0) {
+				handled = true;
+				const wheelButton = mouse.button & 3;
+				const wheel = wheelButton === 0 ? 1 : wheelButton === 1 ? -1 : 0;
+				if (wheel === 0) continue;
+				this.clearPendingClick();
+				this.clearSelection();
+				this.lastUserInputAt = this.nowFn();
+				if (!this.tryScrollBy(wheel * this.mouseWheelLines)) this.send({ type: "input", data: raw });
+				continue;
+			}
+			handled = true;
+			this.handleLocalMouseEvent(mouse);
+		}
+		return handled;
+	}
+
+	private updateSelectionAutoScroll(row: number, col: number): void {
+		this.selectionAutoScrollMouse = { row, col };
+		if (!this.selection || !this.selectionDragging) return this.clearSelectionAutoScroll(false);
+		const lines = selectionDragScrollLines(row, this.bodyHeight());
+		if (lines === 0) return this.clearSelectionAutoScroll(false);
+		if (this.selectionAutoScrollTimer && this.selectionAutoScrollLines === lines) return;
+		this.clearSelectionAutoScroll(false);
+		this.selectionAutoScrollLines = lines;
+		this.selectionAutoScrollTimer = setInterval(() => this.tickSelectionAutoScroll(), 50);
+		this.selectionAutoScrollTimer.unref?.();
+	}
+
+	private tickSelectionAutoScroll(): void {
+		if (this.closed || !this.selection || !this.selectionDragging || !this.selectionAutoScrollMouse || !this.selectionAutoScrollLines) {
+			this.clearSelectionAutoScroll();
+			return;
+		}
+		const changed = this.tryScrollBy(this.selectionAutoScrollLines);
+		const point = this.mousePointForEvent(this.selectionAutoScrollMouse.row, this.selectionAutoScrollMouse.col, true);
+		if (point) this.selection.focus = point;
+		if (!changed) this.clearSelectionAutoScroll(false);
+	}
+
+	private clearSelectionAutoScroll(clearPointer = true): void {
+		if (this.selectionAutoScrollTimer) {
+			clearInterval(this.selectionAutoScrollTimer);
+			this.selectionAutoScrollTimer = null;
+		}
+		this.selectionAutoScrollLines = 0;
+		if (clearPointer) this.selectionAutoScrollMouse = null;
+	}
+
+	private handleLocalMouseEvent(mouse: { button: number; row: number; col: number; action: string }): void {
+		const primary = (mouse.button & 3) === 0;
+		const middleButton = (mouse.button & 3) === 1;
+		if (mouse.action === "press") {
+			this.clearSelectionAutoScroll();
+			if (middleButton) {
+				// Middle-click paste: forward the X11 PRIMARY selection to the hosted
+				// session as input, mimicking the terminal-native middle-click paste
+				// that mouse reporting (kept on for wheel scrolling) would swallow.
+				this.pastePrimarySelection();
+				this.clearPendingClick();
+				this.clearSelection();
+				return;
+			}
+			if (!primary) {
+				this.clearPendingClick();
+				this.clearSelection();
+				return;
+			}
+			const point = this.mousePointForEvent(mouse.row, mouse.col, false);
+			if (!point) {
+				this.clearPendingClick();
+				this.clearSelection();
+				return;
+			}
+			if (this.isDoubleClickCandidate(point)) this.clearPendingClick();
+			this.selection = { anchor: point, focus: point, screenAnchor: { row: mouse.row, col: mouse.col } };
+			this.selectionDragging = false;
+			this.scheduleRender();
+			return;
+		}
+		if (!this.selection) return;
+		if (mouse.action === "move") {
+			if (!primary) return;
+			const point = this.mousePointForEvent(mouse.row, mouse.col, true);
+			if (!point) return;
+			this.selection.focus = point;
+			this.selectionDragging = true;
+			this.updateSelectionAutoScroll(mouse.row, mouse.col);
+			this.scheduleRender();
+			return;
+		}
+		if (mouse.action === "release") {
+			this.clearSelectionAutoScroll();
+			const point = this.mousePointForEvent(mouse.row, mouse.col, true);
+			if (point) this.selection.focus = point;
+			// Issue #187: a Warp fast flick arrives as press + release with no motion
+			// event, so the move flag alone cannot decide. Compare the RAW reported
+			// screen cells (never the clamped buffer points, whose base drifts as the
+			// session streams).
+			const shouldCopy = selectionReleaseIsDrag({
+				dragging: this.selectionDragging,
+				pressScreen: this.selection.screenAnchor,
+				releaseScreen: { row: mouse.row, col: mouse.col },
+			});
+			this.selectionDragging = false;
+			if (shouldCopy) {
+				this.clearPendingClick();
+				this.lastClickPoint = null;
+				this.lastClickAt = 0;
+				this.copySelectionToClipboard();
+				this.scheduleRender();
+				return;
+			}
+			if (!point) {
+				this.clearPendingClick();
+				this.clearSelection();
+				return;
+			}
+			if (this.isDoubleClickCandidate(point)) {
+				this.clearPendingClick();
+				this.lastClickPoint = null;
+				this.lastClickAt = 0;
+				if (!this.selectWordAtPoint(point)) this.selection = null;
+				this.scheduleRender();
+				return;
+			}
+			this.lastClickPoint = point;
+			this.lastClickAt = Date.now();
+			this.schedulePendingClick(point);
+		}
+	}
+
+	private interactionLine(lineIndex: number): BufferLineLike | null {
+		if (this.modernCommittedMode()) return this.committedLineAt(lineIndex);
+		return this.term.buffer.active.getLine(lineIndex) ?? null;
+	}
+
+	private interactionNullCell(): BufferCellLike {
+		return this.modernCommittedMode() ? SnapshotCell.empty() : this.term.buffer.active.getNullCell();
+	}
+
+	private mousePointForEvent(row: number, col: number, clampToBody: boolean): MousePoint | null {
+		const height = this.bodyHeight();
+		const bodyRow = row - 2;
+		if (!clampToBody && (bodyRow < 0 || bodyRow >= height)) return null;
+		const clampedRow = clampInt(bodyRow, 0, Math.max(0, height - 1));
+		if (this.modernCommittedMode()) {
+			const view = this.activeCommittedView();
+			if (view === null) return null;
+			const line = clampInt(view.start + clampedRow, view.start, Math.max(view.start, view.end - 1));
+			return { line, col: clampInt(col - 1, 0, Math.max(0, this.cols - 1)) };
+		}
+		this.clampViewportTop(height);
+		const start = this.viewportTop ?? this.bottomViewportTop(height);
+		const line = clampInt(start + clampedRow, 0, Math.max(0, this.term.buffer.active.length - 1));
+		const cellCol = clampInt(col - 1, 0, Math.max(0, this.cols - 1));
+		return { line, col: cellCol };
+	}
+
+	private isDoubleClickCandidate(point: MousePoint): boolean {
+		return !!this.lastClickPoint && Date.now() - this.lastClickAt <= DOUBLE_CLICK_MS && sameMousePoint(this.lastClickPoint, point);
+	}
+
+	private schedulePendingClick(point: MousePoint): void {
+		this.clearPendingClick();
+		this.pendingClickTimer = setTimeout(() => {
+			this.pendingClickTimer = null;
+			this.lastClickPoint = null;
+			this.lastClickAt = 0;
+			if (this.closed) return;
+			this.openLinkAtPoint(point);
+			this.selection = null;
+			this.selectionDragging = false;
+			this.tui.requestRender();
+		}, DOUBLE_CLICK_MS);
+		this.pendingClickTimer.unref?.();
+	}
+
+	private clearPendingClick(): void {
+		if (!this.pendingClickTimer) return;
+		clearTimeout(this.pendingClickTimer);
+		this.pendingClickTimer = null;
+	}
+
+	private selectWordAtPoint(point: MousePoint): boolean {
+		const line = this.interactionLine(point.line);
+		if (!line) return false;
+		const reusable = this.interactionNullCell();
+		const range = findWordRangeAtCells(asciiCellsForBufferLine(line, reusable), point.col);
+		if (!range) return false;
+		this.selection = {
+			anchor: { line: point.line, col: range.start },
+			focus: { line: point.line, col: range.end },
+		};
+		this.selectionDragging = false;
+		this.copySelectionToClipboard();
+		return true;
+	}
+
+	private openLinkAtPoint(point: MousePoint): boolean {
+		const target = this.linkAtPoint(point);
+		return target ? openExternalTarget(target) : false;
+	}
+
+	private linkAtPoint(point: MousePoint): string | null {
+		const line = this.interactionLine(point.line);
+		if (!line) return null;
+		const reusable = this.interactionNullCell();
+		const cell = line.getCell(point.col, reusable);
+		const osc8 = cell ? osc8UriForCell(this.term, cell) : "";
+		if (osc8) return osc8;
+		return findHttpUrlAtCells(asciiCellsForBufferLine(line, reusable), point.col);
+	}
+
+	private clearSelection(): void {
+		this.clearSelectionAutoScroll();
+		if (!this.selection && !this.selectionDragging) return;
+		this.selection = null;
+		this.selectionDragging = false;
+		this.scheduleRender();
+	}
+
+	private copySelectionToClipboard(): void {
+		const text = this.selectionText();
+		if (!text) return;
+		const seq = osc52CopySequence(text);
+		if (seq) {
+			try {
+				this.tui.terminal.write(seq);
+			} catch {
+				/* best-effort: OSC52 clipboard support is optional */
+			}
+		}
+		// Also mirror the selection into the X11 PRIMARY selection so the rest of the
+		// desktop can middle-click-paste it — closes the loop with pastePrimarySelection().
+		this.writePrimarySelection(text);
+	}
+
+	/**
+	 * Middle-click paste. Reads the X11 selection (PRIMARY by default, or CLIPBOARD via
+	 * AGENT_BOARD_ATTACH_PASTE_SOURCE=clipboard) via xclip and forwards it to the hosted
+	 * session as input, mimicking the terminal-native middle-click paste that mouse
+	 * reporting (kept on for wheel scrolling) would otherwise swallow. Silent no-op when
+	 * xclip is absent or AGENT_BOARD_ATTACH_NATIVE_PASTE=0.
+	 */
+	private pastePrimarySelection(): void {
+		if (process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE === "0") return;
+		try {
+			const child = spawn("xclip", ["-o", "-selection", resolvePasteSelectionSource(process.env.AGENT_BOARD_ATTACH_PASTE_SOURCE)], { stdio: ["ignore", "pipe", "ignore"] });
+			let out = "";
+			const timer = setTimeout(() => {
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					/* the child may have already exited before the timeout fired */
+				}
+			}, 800);
+			child.stdout?.on("data", (chunk: Buffer) => {
+				out += chunk.toString("utf8");
+			});
+			child.on("error", () => clearTimeout(timer));
+			child.on("close", () => {
+				clearTimeout(timer);
+				if (!this.closed && out) this.send({ type: "input", data: out });
+			});
+		} catch {
+			/* silent no-op when xclip is absent — documented contract of this helper */
+		}
+	}
+
+	/** Issue #174 (B2) + #172: a selection gesture ended inside this overlay and pi has
+	 * finalized (and copied) its selection. Mirror the text into X11 PRIMARY so
+	 * middle-click paste closes the loop, then drop pi's selection so the inverse-video
+	 * highlight does not outlive the copy. Clearing is skipped when copy-on-select is
+	 * off (the user copies later with pi's Ctrl+X) and when the pi-tui method is absent
+	 * (older/newer runtime) — both degrade to the previous behaviour instead of throwing.
+	 * clearTextSelection preserves pi's multi-click history; resetTextSelection would
+	 * clear lastClick and break double-click word / triple-click line selection. */
+	private settleFullscreenSelection(nativePasteEnabled: boolean): void {
+		if (this.closed) return;
+		const alt = this.tui as FullscreenSelectionHost;
+		const text = alt.getActiveSelectionText?.();
+		if (typeof text !== "string" || text.length === 0) return;
+		if (nativePasteEnabled) this.writePrimarySelection(text);
+		if (alt.getCopyOnSelect?.() === false) return;
+		if (typeof alt.clearTextSelection !== "function") return;
+		alt.clearTextSelection();
+		this.scheduleRender();
+	}
+
+	/** Write `text` to the X11 PRIMARY selection so other apps can middle-click-paste it. */
+	private writePrimarySelection(text: string): void {
+		if (process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE === "0") return;
+		try {
+			const child = spawn("xclip", ["-selection", "primary"], { stdio: ["pipe", "ignore", "ignore"] });
+			child.stdin?.on("error", () => {});
+			child.on("error", () => {});
+			child.stdin?.end(text);
+		} catch {
+			/* silent no-op when xclip is absent */
+		}
+	}
+
+	private selectionText(): string {
+		const range = normalizeSelection(this.selection);
+		if (!range) return "";
+		const reusable = this.interactionNullCell();
+		const parts: string[] = [];
+		for (let lineIndex = range.start.line; lineIndex <= range.end.line; lineIndex++) {
+			const line = this.interactionLine(lineIndex);
+			if (!line) {
+				parts.push("");
+				continue;
+			}
+			const from = lineIndex === range.start.line ? range.start.col : 0;
+			const to = lineIndex === range.end.line ? range.end.col : line.length - 1;
+			let text = "";
+			for (let x = Math.max(0, from); x <= Math.max(from, to); x++) {
+				const cell = line.getCell(x, reusable);
+				if (!cell || cell.getWidth() === 0) continue;
+				text += cell.getChars() || " ";
+			}
+			parts.push(text.replace(/\s+$/u, ""));
+		}
+		return parts.join("\n").replace(/^\n+|\n+$/gu, "");
+	}
+
+	private currentSize(): { cols: number; rows: number } {
+		// SAFETY: duck-typed read — Pi TUI's Terminal type does not consistently expose
+		// cols/columns/rows across versions (see resizeIfNeeded below). Runtime
+		// fallbacks (120/24) keep this safe when the fields are absent.
+		const term = this.tui.terminal as unknown as { cols?: number; columns?: number; rows?: number } | undefined;
+		return {
+			cols: Math.max(20, term?.cols ?? term?.columns ?? 120),
+			rows: Math.max(5, (term?.rows ?? 24) - 2),
+		};
+	}
+
+	private resizeIfNeeded(width: number): void {
+		const size = this.currentSize();
+		// Render width is authoritative inside ctx.ui.custom; terminal.cols is not
+		// consistently exposed by all Pi TUI versions.
+		size.cols = Math.max(20, width);
+		if (size.cols === this.cols && size.rows === this.rows) {
+			// A same-size render after the early protocol size-sync consumes that
+			// one-shot pair; it must not mint another intent.
+			if (this.pendingEarlySyncTarget === `${size.cols}x${size.rows}`) this.pendingEarlySyncTarget = null;
+			return;
+		}
+		this.cols = size.cols;
+		this.rows = size.rows;
+		this.noteGeometryIntent(size.cols, size.rows);
+		// A real terminal resize supersedes the hold protocol: cancel any armed
+		// hold and adopt the new size as the baseline (guard G4, issue #25).
+		this.jiggleRetry.notifyExternalResize(size.cols, size.rows);
+		this.term.resize(this.cols, this.rows);
+		// Issue #205: reflow after a resize rewrites baseY, so the previous hydrate
+		// floor no longer describes the buffer. Re-base it on the observed baseY —
+		// losing local history is the safe side of this trade. A zero floor means no
+		// hydrate has established one yet, so a legacy attach keeps its replayed
+		// scrollback as real local history.
+		if (this.historyFloor > 0) this.historyFloor = this.term.buffer.active.baseY;
+		this.sendResize();
+		this.enableMouseScroll();
+	}
+
+	/** A differing resize is exactly one local geometry revision/intent; an
+	 *  applied ack is not completion, only a matching proof is. */
+	private noteGeometryIntent(cols = this.cols, rows = this.rows, options: { early?: boolean } = {}): void {
+		const target = `${cols}x${rows}`;
+		if (options.early === true) {
+			// Every actual early size-sync/mismatch advances once. De-dup is
+			// ONLY early→next render; early→early is never collapsed. The latest
+			// pending target is consumed by the next render of that target.
+			this.pendingEarlySyncTarget = target;
+		} else if (this.pendingEarlySyncTarget === target) {
+			// The next render of the same target consumes the early pair.
+			this.pendingEarlySyncTarget = null;
+			return;
+		} else {
+			this.pendingEarlySyncTarget = null;
+		}
+		this.geometryRevision += 1;
+		this.resizeIntentId = this.geometryRevision;
+		this.proofGeometryRevision = this.geometryRevision;
+		this.proofIntentId = this.resizeIntentId;
+		this.resizeIntentRequired = true;
+		this.resizeIntentSatisfied = false;
+		this.committedView = null;
+		this.recoveryView = null;
+		this.recoveryGeneration = null;
+		this.invalidateViewProof("geometry-resize");
+	}
+
+	private sendResize(cols = this.cols, rows = this.rows): void {
+		// Phase 5 (D4): enveloped resize when the host has an instance fence
+		// (correlated applied/superseded acks; starting-window host_starting is
+		// retried client-side); legacy plain message otherwise. Both paths reach
+		// the same runner resize handler.
+		if (!this.attachClient.sendControl("resize", { cols, rows })) {
+			this.send({ type: "resize", cols, rows });
+		}
+		this.clampViewportTop(this.bodyHeight());
+	}
+
+	/** Feed socket output into the jiggle retry controller (clear/frame detection). */
+	private checkClearSequence(data: string): void {
+		this.jiggleRetry.feed(data);
+	}
+
+	/** Issue #185: forward one synthesized SGR wheel report so an alternate-screen
+	 * child scrolls its own viewport (the attach's scrollback is inert there).
+	 * One report per received event — the child applies its own acceleration,
+	 * exactly as it would for a real terminal. Coordinates are child-screen
+	 * cells: the normalized event is zero-based and local to this overlay, the
+	 * body starts at local row 1 (header row 0, footer last row), and SGR is
+	 * one-based. */
+	private forwardWheelToChild(linesUp: number, event: TuiMouseEvent): void {
+		this.lastUserInputAt = this.nowFn();
+		this.send({
+			type: "input",
+			data: encodeWheelReport(linesUp > 0 ? "up" : "down", {
+				col: clampInt(event.x + 1, 1, this.cols),
+				row: clampInt(event.y, 1, Math.max(1, this.bodyHeight())),
+				// Issue #214: the overlay already received the Alt bit from pi-tui; carry it
+				// into the synthesized report so the child keeps its 5x wheel accelerator.
+				alt: event.alt === true,
+			}),
+		});
+	}
+
+	private tryScrollBy(linesUp: number): boolean {
+		const height = this.bodyHeight();
+		if (this.modernCommittedMode()) {
+			// The committed view is the only visible cache. Record the requested
+			// viewport intent but let the child own history: the display stays on
+			// the current complete range until a later verified boundary.
+			const intent = scrollViewportTop(this.viewportTop, this.bottomViewportTop(height), linesUp, this.scrollFloorStart(height));
+			this.viewportTop = intent.viewportTop;
+			return false;
+		}
+		const result = scrollViewportTop(this.viewportTop, this.bottomViewportTop(height), linesUp, this.scrollFloorStart(height));
+		this.viewportTop = result.viewportTop;
+		if (result.changed) this.requestScrollRender();
+		return result.changed;
+	}
+
+	private tryScrollToTop(): boolean {
+		const height = this.bodyHeight();
+		const floorStart = this.scrollFloorStart(height);
+		// Issue #205: compare against follow-bottom rather than against 0. A legacy
+		// attach has `historyFloor === 0`, so `floorStart` is 0 while `bottom` is not —
+		// this is then provably the parent "no local history" guard, and Home still
+		// scrolls the local viewport to line 0. A hydrated overflow frame sits at
+		// `floorStart === bottom`, so Home is forwarded to the child instead of being
+		// spent scrolling hydration residue.
+		if (floorStart >= this.bottomViewportTop(height) || this.viewportTop === floorStart) return false;
+		this.viewportTop = floorStart;
+		this.requestScrollRender();
+		return true;
+	}
+
+	private tryScrollToBottom(): boolean {
+		if (this.viewportTop === null) return false;
+		this.viewportTop = null;
+		this.requestScrollRender();
+		return true;
+	}
+
+	private scrollToBottom(): void {
+		this.viewportTop = null;
+		this.requestScrollRender();
+	}
+
+	private requestScrollRender(): void {
+		this.scheduleRender();
+	}
+
+	private bodyHeight(): number {
+		return Math.max(1, (this.tui.terminal?.rows ?? 24) - 2);
+	}
+
+	private pageSize(): number {
+		return Math.max(1, this.bodyHeight() - 2);
+	}
+
+	private bottomViewportTop(height: number): number {
+		const buf = this.term.buffer.active;
+		const bottom = Math.min(buf.length, buf.baseY + this.rows);
+		return Math.max(0, bottom - height);
+	}
+
+	/** Issue #205: lowest buffer line the local viewport may scroll to — the bottom
+	 * minus the rows the runner vouched for as real scrollback. */
+	private scrollFloorStart(height: number): number {
+		const bottom = this.bottomViewportTop(height);
+		return Math.max(0, bottom - scrollableHistoryLines(this.term.buffer.active.baseY, this.historyFloor));
+	}
+
+	/** Issue #207: re-assert the outer terminal mouse mode when the full-screen TUI owns it.
+	 *  pi-tui writes ENABLE_MOUSE exactly once in `beforeTerminalStart` and never again, so a
+	 *  single lost handshake (WezTerm on Windows is the reported case) turns every wheel
+	 *  notch into an arrow key for the rest of the session: pi-tui keeps dispatching mouse
+	 *  events that never arrive, and the attach surface only ever sees `[A`/`[B`.
+	 *  The sequence is pi-tui's own multiplexer-aware choice, so hover (1003) and focus
+	 *  (1004) reporting cannot be downgraded. We never write the disable form here, so this
+	 *  cannot break pi's own state either (the #173 contract stays intact). */
+	private assertFullscreenMouseMode(): void {
+		if (this.tui.mode !== "fullscreen") return;
+		if (!this.mouseScrollEnabled()) return;
+		try {
+			this.tui.terminal.write(fullscreenMouseEnableSequence());
+		} catch {
+			/* best-effort: a dead terminal must not break attach */
+		}
+	}
+
+	private clampViewportTop(height: number): void {
+		if (this.viewportTop === null) return;
+		// scrollViewportTop snaps a below-floor viewport up to the floor, so a floor
+		// that rose after the viewport parked (hydrate/resize) has to settle here too.
+		this.viewportTop = clampInt(this.viewportTop, this.scrollFloorStart(height), this.bottomViewportTop(height));
+	}
+
+	private send(msg: Record<string, unknown>): void {
+		if (!this.socket || !this.connected) return;
+		this.socket.write(JSON.stringify(msg) + "\n");
+	}
+
+	private onSocketData(text: string): void {
+		this.parserBuffer += text;
+		const lines = this.parserBuffer.split("\n");
+		this.parserBuffer = lines.pop() ?? "";
+		let needsRender = false;
+		let suppressGenerationRender = false;
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			try {
+				const msg = JSON.parse(line);
+				// Protocol-managed messages (snapshot windows, seq-checked live
+				// output, recovery) are consumed by the attach client and re-emitted
+				// through handleAttachEvent. UI-owned messages (hello/status/
+				// editor_state/exit/error) and pre-decision broadcast output return
+				// false and fall through to the legacy path below.
+				if (this.attachClient.handleMessage(msg)) continue;
+				if (msg.type === "output" && typeof msg.data === "string") {
+					this.pushOutput(msg.data, { forwardProtocols: true });
+					this.checkClearSequence(msg.data);
+					continue;
+				}
+				if (msg.type === "hello" || msg.type === "status") {
+					const wireGeneration = typeof msg.generation === "string" ? msg.generation : typeof msg.status?.generation === "string" ? msg.status.generation : null;
+					if (wireGeneration !== null) {
+						this.currentWireGeneration = wireGeneration;
+						this.emptyResetPending = this.recoveryGeneration !== null && wireGeneration !== this.recoveryGeneration;
+						if (
+							(this.committedView !== null && wireGeneration !== this.committedView.identity.generation) ||
+							(this.recoveryGeneration !== null && wireGeneration !== this.recoveryGeneration)
+						) {
+							this.outputRenderScheduler.cancel();
+							this.committedView = null;
+							this.invalidateRecoveryView();
+							this.invalidateViewProof("generation-change");
+							// Do not paint the previous generation from a status render
+							// before the new empty/snapshot arrives.
+							suppressGenerationRender = true;
+						}
+					}
+					this.status = "attached";
+					const status = (msg.status ?? msg) as { frameWitness?: { enabled?: unknown } };
+					if (status.frameWitness?.enabled === true) {
+						const wasAvailable = this.frameWitnessAvailable;
+						this.frameWitnessAvailable = true;
+						if (!wasAvailable && this.attaching && this.attachMode === "protocol") {
+							if (this.attachSettleTimer) {
+								clearTimeout(this.attachSettleTimer);
+								this.attachSettleTimer = null;
+							}
+							this.deadlineState = "pending";
+							this.evaluateAttachReady();
+						}
+					} else if (status.frameWitness?.enabled === false && this.frameWitnessAvailable) {
+						this.frameWitnessAvailable = false;
+						this.latestViewProof = null;
+						this.viewProofIdentity = null;
+						if (this.attaching && this.attachMode === "protocol") {
+							this.deadlineState = "pending";
+							this.notReadyReason = "legacy-deadlines-without-reporter";
+							this.restoreLegacyDeadlines();
+						}
+					}
+					if (msg.type === "hello") this.editorEmpty = typeof msg.editorEmpty === "boolean" ? msg.editorEmpty : null;
+				} else if (msg.type === "editor_state") {
+					this.editorEmpty = typeof msg.empty === "boolean" ? msg.empty : null;
+				} else if (msg.type === "exit") {
+					this.status = "host exited";
+					// The exit path calls done() directly (host disposes later);
+					// drop the #128 bridge now so A7 symmetry doesn't depend on
+					// the host honoring dispose().
+					this.detachColorSchemeBridge();
+					this.clearReplyGuardTimer();
+					this.replyGuard?.reset();
+					this.done({ action: "closed", exitCode: msg.exitCode ?? null });
+				} else if (msg.type === "error") this.status = `error: ${msg.message ?? "host error"}`;
+				if (shouldScheduleAttachRenderForMessage(msg.type)) needsRender = true;
+			} catch {
+				// Ignore malformed protocol lines; raw PTY data is only legal inside output.data.
+			}
+		}
+		if (needsRender && !suppressGenerationRender) this.scheduleRender();
+	}
+
+	/**
+	 * Attach-client events (issue #91 phase 4). The client owns protocol
+	 * recovery (it resubscribes internally); the UI only switches paths and
+	 * hydrates frames.
+	 */
+	private handleAttachEvent(
+		event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "viewProof" | "viewProofRecord" | "resubscribing" | "protocolError" | "cmdAck" | "reconciled" | "epochReset",
+		payload: any,
+	): void {
+		if (event === "mode") {
+			const prev = this.attachMode;
+			this.attachMode = payload as "protocol" | "legacy";
+			if (this.attachMode === "protocol") {
+				// Snapshot mode owns screen correctness: cancel any pending legacy
+				// jiggle arming and unwind anything already armed (restores a held
+				// resize; no-ops otherwise). The legacy 250 ms settle is cancelled
+				// permanently for this attach; the hard deadline only marks an
+				// explicit expired wait, never a forced publish.
+				this.clearJiggleStartTimer();
+				this.jiggleRetry.restoreAndStop();
+				if (this.frameWitnessAvailable && this.attachSettleTimer) {
+					clearTimeout(this.attachSettleTimer);
+					this.attachSettleTimer = null;
+				}
+				this.deadlineState = "pending";
+				this.notReadyReason = this.frameWitnessAvailable ? "awaiting-complete-frame" : "legacy-deadlines-without-reporter";
+				this.evaluateAttachReady();
+			} else if (prev === "protocol") {
+				// Downgrade after a protocol session (recovery budget exhausted):
+				// re-arm the legacy screen-healing machinery. This must run whenever
+				// the socket is alive — not only during the attach transition. A
+				// post-settle downgrade that skipped start() left the chain stopped
+				// forever (restoreAndStop on the protocol side), so feed() early-
+				// returned and raw output could never heal a desynced screen.
+				this.clearJiggleStartTimer();
+				if (this.connected) this.jiggleRetry.start(this.cols, this.rows);
+			}
+			if (this.attachMode === "legacy") this.restoreLegacyDeadlines();
+			// Legacy decided during the undecided window: the race-guard timer
+			// already fired at 100ms (≪ the 1500ms probe timeout) — nothing to do.
+			return;
+		}
+		if (event === "snapshotBegin") {
+			// Collecting identity only: replacement happens at snapshotReady.
+			const beginGeneration = (payload ?? {}) as { generation?: unknown; empty?: unknown };
+			if (beginGeneration.empty === true) {
+				// Empty baseline invalidates old views/proof AT THE BEGIN, before
+				// any status/hello render can present the dead generation again.
+				this.outputRenderScheduler.cancel();
+				this.committedView = null;
+				this.invalidateRecoveryView();
+				this.invalidateViewProof("new-empty-baseline");
+				this.emptyResetPending = true;
+				this.scheduleRender();
+			}
+			if (typeof beginGeneration.generation === "string") {
+				const generationChanged =
+					(this.committedView !== null && beginGeneration.generation !== this.committedView.identity.generation) ||
+					(this.recoveryGeneration !== null && beginGeneration.generation !== this.recoveryGeneration);
+				if (generationChanged) {
+					this.committedView = null;
+					this.invalidateRecoveryView();
+					this.invalidateViewProof("generation-change");
+				}
+			}
+			this.collectingConnectionToken = this.connectionToken;
+			this.collectingBaselineToken = this.baselineToken;
+			this.collectingParserEpoch = this.parserEpoch;
+			// Protocol attach size-sync (CR R1 blocking): the legacy attach resized
+			// the child at every connect (jiggle start); subscribe_terminal carries
+			// no size, so without this the child keeps its host-creation geometry
+			// and full-screen TUI children lay out at a stale size. begin is
+			// authoritative for the runner's CURRENT size; the in-flight frame stays
+			// old-geometry either way, but resizing now starts the child's redraw at
+			// the true size sooner. Matched sizes send nothing (zero-resize
+			// contract for same-size attach stays intact).
+			const beginSize = (payload ?? {}) as { cols?: number; rows?: number };
+			if (
+				typeof beginSize.cols === "number" &&
+				typeof beginSize.rows === "number" &&
+				(beginSize.cols !== this.cols || beginSize.rows !== this.rows)
+			) {
+				// One early size-sync pairs with the next render of the same target.
+				// Later independent size-syncs to an already-seen target still advance.
+				this.noteGeometryIntent(this.cols, this.rows, { early: true });
+				this.sendResize();
+			}
+			return;
+		}
+		if (event === "snapshotReady") {
+			const snap = (payload ?? {}) as { frame?: string; empty?: boolean; resnapshot?: boolean; scrollbackLines?: number; viewProof?: unknown; viewProofRecords?: unknown[] };
+			if (this.collectingConnectionToken !== this.connectionToken) return;
+			// The synthesized frame is self-contained on dirty terminals (phase 3
+			// torture-proven: DECSTR + clear preamble wipes the constructor
+			// screen.log replay and any pre-probe broadcast bytes), so hydrating is
+			// a plain push: the write callback drives receivedOutput/settle/render
+			// exactly like the legacy replay path. No protocol forwarding — the
+			// frame is runner-synthesized grid content, not child passthrough
+			// sequences. Empty baselines (the COMMON initial attach state: the host
+			// publishes alive+childPid before the child's first output) carry no
+			// frame; the loading banner persists until the first live output.
+			// Empty/resnapshot answers ALWAYS wipe the local buffer, attaching or
+			// not: while attaching the banner hides it (zero visual cost), and the
+			// constructor's screen.log warm-start must not outlive the protocol
+			// answer — a gated reset let the dead session's tail render as a
+			// cold-start ghost once the banner lifted (final-review F1).
+			if (!this.replaceParser()) {
+				this.handleParserReplacementFailure();
+				return; // fail-closed: no write to the old parser
+			}
+			const records = Array.isArray(snap.viewProofRecords) ? snap.viewProofRecords.slice(0, MAX_VIEW_PROOF_RECORDS) : [];
+			this.viewProofRecords = records;
+			this.viewProofRecordCount = records.length;
+			if (
+				!this.proofResyncRequested &&
+				records.some((record) => (record as { marker?: unknown } | null)?.marker === "F") &&
+				(snap.viewProof as { status?: string } | null | undefined)?.status !== "covered"
+			) {
+				this.proofResyncRequested = true;
+				this.attachClient.requestResync("view-proof-records-without-coverage");
+			}
+			this.viewProofTrailing.reset();
+			this.recentProtocolOutput = [];
+			this.resizeIntentSatisfied = false;
+			if (snap.viewProof !== undefined) {
+				this.latestViewProof = snap.viewProof;
+				this.viewProofIdentity = (snap.viewProof as { status?: string } | null)?.status === "covered" ? this.currentViewIdentity() : null;
+				if ((snap.viewProof as { status?: string } | null)?.status === "covered") this.proofResyncRequested = false;
+			} else if (snap.empty === true) {
+				this.latestViewProof = { status: "unknown", reason: "empty-baseline", proof: null, throughSeq: null, cursorVisible: null };
+				this.viewProofIdentity = null;
+			} else {
+				this.latestViewProof = null;
+				this.viewProofIdentity = null;
+			}
+			if (typeof snap.frame === "string") {
+				this.protocolBaselineState = "valid-content";
+				this.localHydrationState = "hydrating";
+				this.pushOutput(snap.frame, { authoritative: true, scrollbackLines: snap.scrollbackLines });
+			} else if (snap.empty || snap.resnapshot) {
+				if (snap.empty === true) {
+					this.committedView = null;
+					this.invalidateRecoveryView();
+					this.invalidateViewProof("new-empty-baseline");
+					this.emptyResetPending = true;
+				}
+				this.protocolBaselineState = "valid-empty";
+				this.childInputReady = false;
+				this.childInputModeCarry = "";
+				// Issue #205: the replacement parser is empty, so no stale floor/poison
+				// survives. Empty/resnapshot never triggers the first-attach hooks.
+				this.historyFloor = 0;
+				this.scheduleRender();
+				this.evaluateAttachReady();
+			}
+			return;
+		}
+		if (event === "output") {
+			// Replacement failure is a hard fence: protocol bytes cannot be mixed into
+			// the old parser while waiting for a bounded fresh resync/legacy decision.
+			if (this.localHydrationState === "failed") return;
+			// Live/replay protocol output: no jiggle clear-detection — that feed
+			// exists to cancel the shrink-and-hold chain, which never runs in
+			// protocol mode.
+			if (typeof payload === "string") {
+				this.recentProtocolOutput.push({ seq: this.attachClient.getLastSeq(), data: payload });
+				if (this.recentProtocolOutput.length > 16) this.recentProtocolOutput.shift();
+				this.noteViewProofOutput(payload);
+				this.pushOutput(payload, { forwardProtocols: true });
+			}
+			return;
+		}
+		if (event === "viewProof") {
+			this.latestViewProof = payload ?? null;
+			if ((payload as { status?: string } | null)?.status === "covered") {
+				this.viewProofIdentity = this.currentViewIdentity();
+				this.viewProofTrailing.reset({ cursorVisible: typeof (payload as { cursorVisible?: unknown }).cursorVisible === "boolean" ? (payload as { cursorVisible: boolean }).cursorVisible : undefined });
+			} else {
+				this.viewProofIdentity = null;
+				this.viewProofTrailing.reset();
+				if (String((payload as { reason?: string } | null)?.reason ?? "").includes("reporter-replaced")) {
+					this.viewProofRecords = [];
+					this.viewProofRecordCount = 0;
+				}
+			}
+			this.evaluateAttachReady();
+			return;
+		}
+		if (event === "viewProofRecord") {
+			if (payload !== null && typeof payload === "object") {
+				const record = payload as Record<string, unknown>;
+				this.noteViewProofRecord(record);
+				if (record.marker === "F") {
+					this.lastProofMetadata = record.metadata as { geometryRevision?: unknown; intentId?: unknown } | undefined;
+					this.resizeIntentSatisfied = this.proofMeetsResizeIntent();
+				}
+				this.evaluateAttachReady();
+			}
+			return;
+		}
+		if (event === "cmdAck") {
+			this.noteResizeAck(payload);
+			return;
+		}
+		if (event === "epochReset") {
+			this.childInputReady = false;
+			this.childInputModeCarry = "";
+			this.committedView = null;
+			this.invalidateRecoveryView();
+			this.invalidateViewProof("epoch-reset");
+		}
+		// "viewProof"/"viewProofRecord": independent protocol facts in this stage;
+		// the component has no readiness/publish hook for them yet.
+		// "resubscribing": recovery is client-internal (informational only).
+		// "protocolError": observability only — recovery is automatic until the
+		// legacy fallback, whose mode event the UI acts on above.
+		// "cmdAck"/"reconciled"/"epochReset" (phase 5): correlation/observability
+		// only — applied/superseded bookkeeping, reconcile baselines and the
+		// generation epoch rule live inside the client; the UI's behavioral
+		// surface (hydrate, mode switching, size-sync) is unchanged. host_starting
+		// resize retries are also client-internal (parity with the legacy runner-
+		// side cachedResize).
+	}
+
+	private nudgeGeometry(waitToken: number): void {
+		this.geometryNudges += 1;
+		const { cols, rows } = this;
+		this.sendResize(cols, Math.max(5, rows - 1));
+		const back = setTimeout(() => {
+			if (!this.closed && this.cols === cols && this.rows === rows) this.sendResize(cols, rows);
+		}, GEOMETRY_NUDGE_SETTLE_MS);
+		back.unref?.();
+		this.attachHardTimeout = setTimeout(() => this.handleAttachHardTimeout(waitToken), GEOMETRY_NUDGE_WAIT_MS);
+	}
+
+	private proofMeetsResizeIntent(): boolean {
+		if (!this.resizeIntentRequired) return true;
+		const metadata = this.lastProofMetadata;
+		return metadata?.geometryRevision === this.proofGeometryRevision && metadata?.intentId === this.proofIntentId;
+	}
+
+	/** Learns the runner's numbers for the resize we're waiting on. Runners from before it sent them
+	 * outlive an upgrade, and keep being compared with ours. */
+	private noteResizeAck(ack: { type?: string; stage?: string; cols?: number; rows?: number; resized?: boolean; geometryRevision?: unknown; intentId?: unknown }): void {
+		if (ack?.type !== "resize" || ack.stage !== "applied") return;
+		if (ack.cols !== this.cols || ack.rows !== this.rows) return; // A newer resize owns the gate.
+		if (typeof ack.geometryRevision !== "number" || typeof ack.intentId !== "number") return;
+		if (ack.resized === false) {
+			// Already that size, so the session won't draw a frame for it.
+			this.resizeIntentRequired = false;
+		} else {
+			this.proofGeometryRevision = ack.geometryRevision;
+			this.proofIntentId = ack.intentId;
+		}
+		this.resizeIntentSatisfied = this.proofMeetsResizeIntent();
+		this.evaluateAttachReady();
+	}
+
+	private forwardTerminalProtocols(data: string): void {
+		const toWrite: string[] = [];
+		if (process.env.AGENT_BOARD_FORWARD_OSC52 !== "0") {
+			const { sequences, carry } = extractOsc52Sequences(this.osc52Carry + data);
+			this.osc52Carry = carry;
+			toWrite.push(...sequences);
+		}
+		if (process.env.AGENT_BOARD_FORWARD_IMAGES !== "0") {
+			const { sequences, carry } = extractTerminalPassthroughSequences(this.passthroughCarry + data);
+			this.passthroughCarry = carry;
+			toWrite.push(...sequences);
+		}
+		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES !== "0") {
+			// Issue #128 D1: forward the child's terminal capability queries
+			// (OSC 11 background probe, 2031 scheme-notify switch) to the real
+			// terminal; set-forms and kitty/DA negotiation stay excluded (see
+			// extractOscQuerySequences).
+			const { sequences, carry } = extractOscQuerySequences(this.oscQueryCarry + data);
+			this.oscQueryCarry = carry;
+			toWrite.push(...sequences);
+		}
+		for (const seq of toWrite) {
+			try {
+				this.tui.terminal.write(seq);
+			} catch {
+				/* best-effort: forwarded sequences are enhancements, never critical */
+			}
+		}
+	}
+
+	/** LEGACY FALLBACK (issue #91 phase 6 marking): the screen.log tail replay
+	 * is kept only for pre-protocol runners and the
+	 * AGENT_BOARD_TERMINAL_SNAPSHOT=0 kill switch. It is NOT a correctness
+	 * path of the snapshot+subscribe protocol — the protocol hydrates from
+	 * runner-owned snapshots and resumes from a sequence cursor (phase 4),
+	 * and this replay runs before the probe resolves. Removal condition: the
+	 * installed runner fleet is on the snapshot protocol baseline
+	 * (wire-detectable via hello protocol fields).
+	 */
+	private replayScreenLog(): void {
+		if (!this.opts.screenLogPath || !existsSync(this.opts.screenLogPath)) return;
+		try {
+			// Read only the tail of the log instead of the whole file: large logs (tens of MB)
+			// would otherwise block the attach on a full readFileSync + UTF-8 decode before the
+			// first frame. Skip a leading partial line so we don't inject a half escape sequence.
+			const { size } = statSync(this.opts.screenLogPath);
+			const start = Math.max(0, size - ATTACH_REPLAY_BYTES);
+			const length = size - start;
+			if (length <= 0) return;
+			const fd = openSync(this.opts.screenLogPath, "r");
+			try {
+				const buf = Buffer.alloc(length);
+				readSync(fd, buf, 0, length, start);
+				let tail = buf.toString("utf8");
+				if (start > 0) {
+					const nl = tail.indexOf("\n");
+					tail = nl >= 0 ? tail.slice(nl + 1) : tail;
+				}
+				this.pushOutput(tail);
+			} finally {
+				closeSync(fd);
+			}
+		} catch {
+			/* best-effort: a missing or racing screen.log must not block attach */
+		}
+	}
+
+	private pushOutput(data: string, opts: { forwardProtocols?: boolean; authoritative?: boolean; scrollbackLines?: number } = {}): void {
+		if (data.length === 0) return;
+		// Recorded synchronously BEFORE term.write (whose callback is async): the
+		// desync quiet-window must measure when output ARRIVED, not when parsing finished.
+		this.lastOutputAt = this.nowFn();
+		// Current snapshots explicitly restore all modes, including paste mode.
+		// Read their readiness synchronously so an older parse callback cannot
+		// overwrite a newer live shutdown/reload signal.
+		if (opts.authoritative) {
+			this.childInputReady = false;
+			this.childInputModeCarry = "";
+		}
+		if (opts.forwardProtocols || opts.authoritative) this.updateChildInputReadiness(data);
+		if (opts.forwardProtocols) this.forwardTerminalProtocols(data);
+		const term = this.term;
+		const connectionToken = this.connectionToken;
+		const baselineToken = this.baselineToken;
+		const parserEpoch = this.parserEpoch;
+		const generation = this.attachClient.getIdentity().generation ?? "local";
+		const capturedIdentity = { connectionToken, baselineToken, generation, parser: term, geometryRevision: this.geometryRevision, targetCols: this.cols, targetRows: this.rows, closed: false };
+		// @xterm/headless parses asynchronously; the buffer is only populated once this
+		// callback fires. Mark the buffer as ready (so the project path can paint it), but
+		// stay on the loading banner while `attaching` — otherwise the screen-log replay and
+		// the initial resize-jiggle redraws would flash through the viewport. Each parsed
+		// chunk defers the settle window, so the banner holds until output actually
+		// stops arriving (i.e. the redraw finished), not just until the resize jiggle ends.
+		// Current-epoch invariant: replaceParser() resets this counter to 0 when it
+		// advances parserEpoch. A stale callback returns below WITHOUT decrementing;
+		// decrementing it would cancel a new-epoch write and allow premature publish.
+		this.parserWritesInFlight += 1;
+		try {
+			term.write(data, () => {
+				if (this.parserEpoch !== parserEpoch) return;
+				if (this.parserWritesInFlight > 0) this.parserWritesInFlight -= 1;
+			const currentIdentity = {
+				connectionToken: this.connectionToken,
+				baselineToken: this.baselineToken,
+				generation: this.attachClient.getIdentity().generation ?? "local",
+				parser: this.term,
+				geometryRevision: this.geometryRevision,
+				targetCols: this.cols,
+				targetRows: this.rows,
+				closed: this.closed,
+			};
+			if (!canPublishAttachView(capturedIdentity, currentIdentity)) return;
+			if (opts.forwardProtocols || opts.authoritative) this.flushPendingSchemeReport();
+			// Issue #205: baseY is only final once this chunk parsed, and the callback
+			// has no buffer binding — re-read it. Rows past the runner-vouched
+			// scrollback are overflow the hydration itself scrolled out.
+			if (opts.authoritative) {
+				this.historyFloor = historyFloorAfterHydrate(term.buffer.active.baseY, opts.scrollbackLines);
+				this.localHydrationState = "complete";
+				if (!this.parserSyncOpen) this.commitCommittedView(term, parserEpoch);
+			}
+			this.receivedOutput = true;
+				this.deferAttachSettle();
+				if (this.parserWritesInFlight === 0 && !this.parserSyncOpen && this.nowFn() - this.lastUserInputAt < INTERACTIVE_RENDER_WINDOW_MS) {
+					this.outputRenderScheduler.cancel();
+					this.scheduleRender();
+				} else {
+					this.outputRenderScheduler.request();
+				}
+				this.evaluateAttachReady();
+			});
+		} catch {
+			if (this.parserEpoch === parserEpoch && this.parserWritesInFlight > 0) this.parserWritesInFlight -= 1;
+		}
+	}
+
+	private projectCommitted(height: number): { lines: string[]; cursor: { row: number; col: number } | null } {
+		const view = this.activeCommittedView();
+		if (view === null) return { lines: [], cursor: null };
+		const selection = normalizeSelection(this.selection);
+		const out: string[] = [];
+		for (let index = 0; index < view.rows.length && out.length < height; index += 1) {
+			const lineIndex = view.start + index;
+			out.push(lineToAnsi(view.rows[index].cells, SnapshotCell.empty(), this.term, lineIndex, selection, view.cursor, view.cursorHidden));
+		}
+		return { lines: out, cursor: view.cursor };
+	}
+
+	private project(height: number): { lines: string[]; cursor: { row: number; col: number } | null } {
+		if (this.closed) return { lines: [], cursor: null };
+		if (this.modernCommittedMode()) return this.projectCommitted(height);
+		const out: string[] = [];
+		const buf = this.term.buffer.active;
+		const selection = normalizeSelection(this.selection);
+		this.clampViewportTop(height);
+		const start = this.viewportTop ?? this.bottomViewportTop(height);
+		const end = Math.min(buf.length, start + height);
+		const reusable = buf.getNullCell();
+		// The PTY cursor: xterm buffer cursorY is relative to baseY (the viewport top of
+		// the child terminal); cursorX may equal cols (one past the last cell). Only render
+		// it when it lands inside the projected viewport.
+		const cursor = projectPtyCursor(buf, start, height);
+		const cursorHidden = isPtyCursorHidden(this.term);
+		for (let i = start; i < end; i++) {
+			out.push(lineToAnsi(buf.getLine(i), reusable, this.term, i, selection, cursor, cursorHidden));
+		}
+		if (out.length === 0) out.push("Waiting for PTY output…");
+		return { lines: out.slice(-height), cursor };
+	}
+
+	private close(gracefulSocket = false): void {
+		if (this.closed && !this.socket) {
+			// Already closed (e.g. dispose() after detach()); a pending graceful-close
+			// fallback timer stays armed on purpose — it self-clears on socket close
+			// or destroys the socket after the grace window.
+			return;
+		}
+		this.closed = true;
+		this.attachWaitToken += 1;
+		this.committedView = null;
+		this.recoveryView = null;
+		this.recoveryGeneration = null;
+		this.disposeCurrentParser();
+		this.imeCoalesceUninstall?.();
+		this.releaseInput();
+		this.detachColorSchemeBridge();
+		this.clearReplyGuardTimer();
+		this.replyGuard?.reset();
+		this.attachClient.close();
+		this.jiggleRetry.restoreAndStop();
+		this.disableMouseScroll();
+		this.clearMouseRefreshTimers();
+		this.clearPendingClick();
+		this.clearSelectionAutoScroll();
+		this.clearRetry();
+		this.stopLoadingTicker();
+		this.outputRenderScheduler.dispose();
+		// Narrow feature-detected host seam (repo pi-tui 1.1.0, host pi 1.4.0):
+		// cancel the already-queued TUI frame without stopping the TUI. A closed
+		// flag inside render cannot cancel a render queued before dispose.
+		const renderSeam = this.tui as unknown as {
+			cancelRenderTimer?: () => void;
+			renderRequested?: boolean;
+		};
+		if (typeof renderSeam.cancelRenderTimer === "function") {
+			try { renderSeam.cancelRenderTimer(); } catch { /* host seam is best-effort */ }
+		}
+		// TuiBase.requestImmediateRender() queues a process.nextTick that checks
+		// renderRequested; clearing it cancels an already queued immediate paint
+		// without stopping the TUI. Verified host pi 1.4.0 shape.
+		if (typeof renderSeam.renderRequested === "boolean") renderSeam.renderRequested = false;
+		this.stopDesyncProbe();
+		if (this.attachSettleTimer) {
+			clearTimeout(this.attachSettleTimer);
+			this.attachSettleTimer = null;
+		}
+		if (this.attachHardTimeout) {
+			clearTimeout(this.attachHardTimeout);
+			this.attachHardTimeout = null;
+		}
+		this.clearGracefulSocketCloseTimer();
+		const socket = this.socket;
+		this.socket = null;
+		this.connected = false;
+		if (!socket) return;
+		if (!gracefulSocket) {
+			try { socket.destroy(); } catch { /* best-effort teardown */ }
+			return;
+		}
+		// socket.end() preserves the ordering of the already-buffered restore and
+		// detach packets. destroy() would discard buffered writes under backpressure.
+		socket.once("close", () => this.clearGracefulSocketCloseTimer());
+		try { socket.end(); } catch { /* fallback timer below forces cleanup */ }
+		this.gracefulSocketCloseTimer = setTimeout(() => {
+			this.gracefulSocketCloseTimer = null;
+			try { socket.destroy(); } catch { /* best-effort teardown */ }
+		}, GRACEFUL_SOCKET_CLOSE_MS);
+		this.gracefulSocketCloseTimer.unref?.();
+	}
+}
+
+function asciiCellsForBufferLine(line: BufferLineLike, reusable: BufferCellLike): string[] {
+	const cells: string[] = [];
+	for (let x = 0; x < line.length; x++) {
+		const cell = line.getCell(x, reusable);
+		if (!cell || cell.getWidth() === 0) {
+			cells.push(" ");
+			continue;
+		}
+		const chars = cell.getChars() || " ";
+		cells.push(chars.length === 1 && chars >= " " && chars <= "~" ? chars : " ");
+	}
+	return cells;
+}
+
+function openExternalTarget(target: string): boolean {
+	const sanitized = sanitizeOscPayload(target).trim();
+	if (!isOpenableLink(sanitized)) return false;
+	// Opening the target is best-effort: an async spawn failure (e.g. xdg-open
+	// missing on a minimal server) must be swallowed, not crash the host (issue #86).
+	try {
+		if (process.platform === "darwin") {
+			const child = spawn("open", [sanitized], { detached: true, stdio: "ignore" });
+			child.on("error", () => {});
+			child.unref();
+			return true;
+		}
+		if (process.platform === "win32") {
+			const child = spawn("cmd", ["/c", "start", "", sanitized], { detached: true, stdio: "ignore" });
+			child.on("error", () => {});
+			child.unref();
+			return true;
+		}
+		const child = spawn("xdg-open", [sanitized], { detached: true, stdio: "ignore" });
+		child.on("error", () => {});
+		child.unref();
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function compareMousePoints(a: MousePoint, b: MousePoint): number {
+	return a.line === b.line ? a.col - b.col : a.line - b.line;
+}
+
+function normalizeSelection(selection: MouseSelection | null): NormalizedSelection | null {
+	if (!selection) return null;
+	return compareMousePoints(selection.anchor, selection.focus) <= 0
+		? { start: selection.anchor, end: selection.focus }
+		: { start: selection.focus, end: selection.anchor };
+}
+
+function pointWithinSelection(line: number, col: number, selection: NormalizedSelection | null): boolean {
+	if (!selection) return false;
+	if (line < selection.start.line || line > selection.end.line) return false;
+	if (selection.start.line === selection.end.line) return col >= selection.start.col && col <= selection.end.col;
+	if (line === selection.start.line) return col >= selection.start.col;
+	if (line === selection.end.line) return col <= selection.end.col;
+	return true;
+}
+
+function osc52CopySequence(text: string): string {
+	if (!text) return "";
+	const data = Buffer.from(text, "utf8").toString("base64");
+	const seq = `\x1b]52;c;${data}\x07`;
+	return Buffer.byteLength(seq, "utf8") <= OSC52_MAX_BYTES ? seq : "";
+}
+
+function lineToAnsi(
+	line: BufferLineLike | undefined,
+	reusable: BufferCellLike,
+	term: XtermLike,
+	lineIndex: number,
+	selection: NormalizedSelection | null,
+	cursor: { row: number; col: number } | null,
+	cursorHidden = false,
+): string {
+	const isCursorRow = cursor !== null && cursor.row === lineIndex;
+	let last = -1;
+	if (!line) {
+		// No buffer line: keep the marker (IME positioning) and paint the inverse block
+		// only while the child reports a visible cursor.
+		if (isCursorRow && cursor!.col >= 0) return cursorHidden ? CURSOR_MARKER : CURSOR_MARKER + "\x1b[7m \x1b[0m";
+		return "";
+	}
+	let lastBg = -1;
+	for (let x = 0; x < line.length; x++) {
+		const cell = line.getCell(x, reusable);
+		if (!cell || cell.getWidth() === 0) continue;
+		if (cell.getChars()) last = x;
+		if (!cell.isBgDefault()) lastBg = x;
+	}
+	// Issue #232: full-screen TUIs paint an explicit theme bg over otherwise empty
+	// regions. Trimming at the last character drops that paint and lets the host
+	// terminal's default bg show through, so the render bound covers the last
+	// painted cell too. Default-bg lines keep the old bound, byte for byte.
+	const renderEnd = Math.max(last, lastBg);
+	if (renderEnd < 0) {
+		// Empty line: same split as above.
+		if (isCursorRow && cursor!.col >= 0) return cursorHidden ? CURSOR_MARKER : CURSOR_MARKER + "\x1b[7m \x1b[0m";
+		return "";
+	}
+
+	let out = "";
+	let prevAttr = "";
+	let prevUri = "";
+	for (let x = 0; x <= renderEnd; x++) {
+		const cell = line.getCell(x, reusable);
+		if (!cell || cell.getWidth() === 0) continue;
+		const uri = osc8UriForCell(term, cell);
+		if (uri !== prevUri) {
+			if (prevUri) out += closeOsc8();
+			if (uri) out += openOsc8(uri);
+			prevUri = uri;
+		}
+		const selected = pointWithinSelection(lineIndex, x, selection);
+		// Position and visibility are separate concerns: the zero-width CURSOR_MARKER
+		// (stripped by the TUI) always marks where the hardware cursor belongs for IME
+		// and PI_HARDWARE_CURSOR=1 terminals, while the solid inverse block is only
+		// painted when the child terminal itself reports the cursor as visible. pi-tui
+		// parks a hidden cursor at a diff-write byproduct position, so painting it
+		// unconditionally showed a ghost block (issue #102).
+		const isCursor = isCursorRow && x === cursor!.col;
+		if (isCursor) out += CURSOR_MARKER;
+		const paintCursor = isCursor && !cursorHidden;
+		const key = attrKey(cell, selected, paintCursor);
+		if (key !== prevAttr) {
+			out += attrsToAnsi(cell, selected, paintCursor);
+			prevAttr = key;
+		}
+		out += cell.getChars() || " ";
+	}
+	if (prevUri) out += closeOsc8();
+	// Cursor past the end of the painted region (cursorX == cols or beyond the last
+	// rendered cell): append an inverse space so a VISIBLE position shows, keeping the
+	// marker either way.
+	if (isCursorRow && cursor!.col > renderEnd) {
+		out += CURSOR_MARKER + (cursorHidden ? "" : "\x1b[7m \x1b[0m");
+	}
+	return out + "\x1b[0m";
+}
+
+function attrKey(cell: BufferCellLike, selected = false, isCursor = false): string {
+	// Runs for every cell of every frame, so no array to build and join.
+	const flags =
+		(selected ? 1 : 0) |
+		(isCursor ? 2 : 0) |
+		(cell.isBold() ? 4 : 0) |
+		(cell.isDim() ? 8 : 0) |
+		(cell.isItalic() ? 16 : 0) |
+		(cell.isUnderline() ? 32 : 0) |
+		(cell.isBlink() ? 64 : 0) |
+		(cell.isInverse() ? 128 : 0) |
+		(cell.isInvisible() ? 256 : 0) |
+		(cell.isStrikethrough() ? 512 : 0) |
+		(cell.isOverline() ? 1024 : 0) |
+		(cell.isFgRGB() ? 2048 : 0) |
+		(cell.isFgPalette() ? 4096 : 0) |
+		(cell.isBgRGB() ? 8192 : 0) |
+		(cell.isBgPalette() ? 16384 : 0);
+	return `${flags};${cell.getFgColor()};${cell.getBgColor()}`;
+}
+
+function attrsToAnsi(cell: BufferCellLike, selected = false, isCursor = false): string {
+	const codes: string[] = ["0"];
+	if (cell.isBold()) codes.push("1");
+	if (cell.isDim()) codes.push("2");
+	if (cell.isItalic()) codes.push("3");
+	if (cell.isUnderline()) codes.push("4");
+	if (cell.isBlink()) codes.push("5");
+	if (cell.isInverse() || selected || isCursor) codes.push("7");
+	if (cell.isInvisible()) codes.push("8");
+	if (cell.isStrikethrough()) codes.push("9");
+	if (cell.isOverline()) codes.push("53");
+	codes.push(...colorCodes(cell, "fg"));
+	codes.push(...colorCodes(cell, "bg"));
+	return `\x1b[${codes.join(";")}m`;
+}
+
+function colorCodes(cell: BufferCellLike, kind: "fg" | "bg"): string[] {
+	const isFg = kind === "fg";
+	const color = isFg ? cell.getFgColor() : cell.getBgColor();
+	if (isFg ? cell.isFgRGB() : cell.isBgRGB()) {
+		return [isFg ? "38" : "48", "2", String((color >> 16) & 255), String((color >> 8) & 255), String(color & 255)];
+	}
+	if (isFg ? cell.isFgPalette() : cell.isBgPalette()) {
+		if (color >= 0 && color <= 7) return [String((isFg ? 30 : 40) + color)];
+		if (color >= 8 && color <= 15) return [String((isFg ? 90 : 100) + color - 8)];
+		return [isFg ? "38" : "48", "5", String(color)];
+	}
+	return [isFg ? "39" : "49"];
+}
+
+function clip(line: string, width: number): string {
+	return truncateToWidth(line, width, "");
+}
+
+function clipTerminalLine(line: string, width: number): string {
+	// pi-tui's width helpers are ANSI-aware, but OSC sequences are terminal
+	// protocols rather than SGR styling. Avoid truncating inside OSC 8 hyperlinks;
+	// these lines are already projected from an xterm buffer sized to the viewport.
+	return line.includes("\x1b]") ? line : clip(line, width);
+}
+
+function osc8UriForCell(term: XtermLike, cell: BufferCellLike): string {
+	const committed = (cell as { osc8Uri?: () => string }).osc8Uri?.();
+	if (typeof committed === "string" && committed.length > 0) return committed;
+	// xterm leaves cached extended data on reused cells when this flag is unset.
+	if (!cell.hasExtendedAttrs()) return "";
+	const id = cell.extended?.urlId ?? cell.extended?._urlId ?? 0;
+	if (!id) return "";
+	const service = term._core?._oscLinkService;
+	const uri = service?.getLinkData?.(id)?.uri ?? service?._dataByLinkId?.get(id)?.data?.uri;
+	return sanitizeOscPayload(uri ?? "");
+}
+
+function openOsc8(uri: string): string {
+	return uri ? `\x1b]8;;${uri}\x07` : "";
+}
+
+function closeOsc8(): string {
+	return "\x1b]8;;\x07";
+}
+
+function extractOsc52Sequences(input: string): { sequences: string[]; carry: string } {
+	const sequences: string[] = [];
+	let scanFrom = 0;
+	let carryStart = -1;
+	while (scanFrom < input.length) {
+		const start = input.indexOf(OSC52_PREFIX, scanFrom);
+		if (start < 0) break;
+		const bel = input.indexOf("\x07", start + OSC52_PREFIX.length);
+		const st = input.indexOf("\x1b\\", start + OSC52_PREFIX.length);
+		const end = firstTerminator(bel, st);
+		if (!end) {
+			carryStart = start;
+			break;
+		}
+		const [endIndex, terminatorLength] = end;
+		const seq = input.slice(start, endIndex + terminatorLength);
+		if (isForwardableOsc52(seq)) sequences.push(seq);
+		scanFrom = endIndex + terminatorLength;
+	}
+	const carry = carryStart >= 0 ? input.slice(carryStart).slice(-OSC52_CARRY_MAX_BYTES) : osc52PrefixSuffix(input);
+	return { sequences, carry };
+}
+
+function osc52PrefixSuffix(input: string): string {
+	const max = Math.min(input.length, OSC52_PREFIX.length - 1);
+	for (let len = max; len > 0; len--) {
+		const suffix = input.slice(-len);
+		if (OSC52_PREFIX.startsWith(suffix)) return suffix;
+	}
+	return "";
+}
+
+function firstTerminator(bel: number, st: number): [number, number] | null {
+	if (bel < 0 && st < 0) return null;
+	if (bel >= 0 && (st < 0 || bel < st)) return [bel, 1];
+	return [st, 2];
+}
+
+function extractTerminalPassthroughSequences(input: string): { sequences: string[]; carry: string } {
+	const sequences: string[] = [];
+	let scanFrom = 0;
+	let carryStart = -1;
+	while (scanFrom < input.length) {
+		const kitty = input.indexOf(KITTY_IMAGE_PREFIX, scanFrom);
+		const iterm = input.indexOf(ITERM2_FILE_PREFIX, scanFrom);
+		const start = firstIndex(kitty, iterm);
+		if (start < 0) break;
+		const prefix = start === kitty ? KITTY_IMAGE_PREFIX : ITERM2_FILE_PREFIX;
+		const bel = prefix === ITERM2_FILE_PREFIX ? input.indexOf("\x07", start + prefix.length) : -1;
+		const st = input.indexOf("\x1b\\", start + prefix.length);
+		const end = firstTerminator(bel, st);
+		if (!end) {
+			carryStart = start;
+			break;
+		}
+		const [endIndex, terminatorLength] = end;
+		const seq = input.slice(start, endIndex + terminatorLength);
+		// Without inline=1, iTerm2 takes this as a file download rather than an image.
+		const isInlineImage = prefix !== ITERM2_FILE_PREFIX || /^[^:]*\binline=1\b/.test(seq.slice(prefix.length));
+		if (seq.length <= TERMINAL_PASSTHROUGH_MAX_BYTES && isInlineImage) sequences.push(seq);
+		scanFrom = endIndex + terminatorLength;
+	}
+	const carry = carryStart >= 0 ? input.slice(carryStart).slice(-TERMINAL_PASSTHROUGH_CARRY_MAX_BYTES) : terminalPassthroughPrefixSuffix(input);
+	return { sequences, carry };
+}
+
+function firstIndex(a: number, b: number): number {
+	if (a < 0) return b;
+	if (b < 0) return a;
+	return Math.min(a, b);
+}
+
+function terminalPassthroughPrefixSuffix(input: string): string {
+	let best = "";
+	for (const prefix of [KITTY_IMAGE_PREFIX, ITERM2_FILE_PREFIX]) {
+		const max = Math.min(input.length, prefix.length - 1);
+		for (let len = max; len > best.length; len--) {
+			const suffix = input.slice(-len);
+			if (prefix.startsWith(suffix)) best = suffix;
+		}
+	}
+	return best;
+}
+
+function isForwardableOsc52(seq: string): boolean {
+	if (seq.length > OSC52_MAX_BYTES) return false;
+	const terminatorLength = seq.endsWith("\x1b\\") ? 2 : 1;
+	const body = seq.slice(2, -terminatorLength); // strip ESC] and BEL/ST
+	const firstSemi = body.indexOf(";");
+	const secondSemi = body.indexOf(";", firstSemi + 1);
+	if (!body.startsWith("52;") || secondSemi < 0) return false;
+	const payload = body.slice(secondSemi + 1).replace(/[\r\n]/g, "");
+	// Do not forward clipboard-read requests (OSC 52 ; ... ; ?) to the outer terminal.
+	if (payload === "?") return false;
+	return /^[A-Za-z0-9+/=]*$/.test(payload);
+}
+
+function sanitizeOscPayload(value: string): string {
+	return value.replace(/[\x00-\x1f\x7f]/g, "");
+}
+
+function center(text: string, width: number): string {
+	const w = visibleWidth(text);
+	if (w >= width) return clip(text, width);
+	return " ".repeat(Math.floor((width - w) / 2)) + text;
+}

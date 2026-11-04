@@ -1,0 +1,61 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+	ATTACH_HOST_START_TIMEOUT_MS,
+	ATTACH_RECONNECT_TIMEOUT_MS,
+	evaluateAttachReconnect,
+	shouldEscapeAttach,
+} from "../src/core/pty-attach-reconnect.mjs";
+
+test("shouldEscapeAttach: disconnected always escapes; connected detaches only on editorEmpty === true", () => {
+	assert.equal(shouldEscapeAttach(false, false), true);
+	assert.equal(shouldEscapeAttach(false, true), true);
+	// Connected + pushed editorEmpty === true is the ONLY detach condition.
+	assert.equal(shouldEscapeAttach(true, true), true);
+	// Connected + editorEmpty false → the key must be forwarded to the child.
+	assert.equal(shouldEscapeAttach(true, false), false);
+	// null/undefined (unknown) forwards too — the documented conservative
+	// contract; never a buffer-heuristic fallback.
+	assert.equal(shouldEscapeAttach(true, null), false);
+	assert.equal(shouldEscapeAttach(true, undefined), false);
+});
+
+test("evaluateAttachReconnect: previously-connected host gives 15s after disconnect", () => {
+	const t0 = 1_000_000;
+	const base = { everConnected: true, disconnectedAt: t0, connectStartedAt: t0 - 600_000 };
+	assert.deepEqual(evaluateAttachReconnect({ ...base, now: t0 + 14_999 }), { giveUp: false, status: null });
+	assert.deepEqual(evaluateAttachReconnect({ ...base, now: t0 + 15_000 }), { giveUp: true, status: "host exited" });
+	assert.equal(ATTACH_RECONNECT_TIMEOUT_MS, 15_000);
+});
+
+test("evaluateAttachReconnect: never-connected host gets a long start window", () => {
+	const t0 = 1_000_000;
+	const base = { everConnected: false, disconnectedAt: null, connectStartedAt: t0 };
+	assert.deepEqual(evaluateAttachReconnect({ ...base, now: t0 + ATTACH_HOST_START_TIMEOUT_MS - 1 }), { giveUp: false, status: null });
+	assert.deepEqual(evaluateAttachReconnect({ ...base, now: t0 + ATTACH_HOST_START_TIMEOUT_MS }), { giveUp: true, status: "host not reachable" });
+});
+
+test("evaluateAttachReconnect: AGENT_BOARD_TEST_ATTACH_RECONNECT_TIMEOUT_MS moves the give-up boundary", () => {
+	const t0 = 1_000_000;
+	const base = { everConnected: true, disconnectedAt: t0, connectStartedAt: t0 - 600_000 };
+	const original = process.env.AGENT_BOARD_TEST_ATTACH_RECONNECT_TIMEOUT_MS;
+	try {
+		process.env.AGENT_BOARD_TEST_ATTACH_RECONNECT_TIMEOUT_MS = "1000";
+		assert.deepEqual(evaluateAttachReconnect({ ...base, now: t0 + 1_000 }), { giveUp: true, status: "host exited" });
+		assert.deepEqual(evaluateAttachReconnect({ ...base, now: t0 + 999 }), { giveUp: false, status: null });
+
+		// Unset, the 15s production default still covers the same elapsed — the
+		// verdict at 1000ms flips only because the knob was set.
+		delete process.env.AGENT_BOARD_TEST_ATTACH_RECONNECT_TIMEOUT_MS;
+		assert.deepEqual(evaluateAttachReconnect({ ...base, now: t0 + 1_000 }), { giveUp: false, status: null });
+	} finally {
+		if (original === undefined) delete process.env.AGENT_BOARD_TEST_ATTACH_RECONNECT_TIMEOUT_MS;
+		else process.env.AGENT_BOARD_TEST_ATTACH_RECONNECT_TIMEOUT_MS = original;
+	}
+});
+
+test("evaluateAttachReconnect never gives up before any timeout", () => {
+	const t0 = 1_000_000;
+	assert.deepEqual(evaluateAttachReconnect({ everConnected: false, disconnectedAt: null, connectStartedAt: t0, now: t0 + 1 }), { giveUp: false, status: null });
+	assert.deepEqual(evaluateAttachReconnect({ everConnected: true, disconnectedAt: t0, connectStartedAt: t0, now: t0 + 1 }), { giveUp: false, status: null });
+});

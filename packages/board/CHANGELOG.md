@@ -1,0 +1,340 @@
+# Changelog
+
+## [0.18.2] - 2026-11-04
+
+### Fixes
+
+- **attach**: a session past about 85 frames opens at once instead of showing Loading for 2.5s, or 5.5s at a new size, and it follows resizes again. It stopped proving its frames when an internal log filled up. Sessions need a restart to pick this up, since the fix runs inside them
+- **attach**: sessions fill screens wider than 300 columns or taller than 120 rows
+- **attach**: a big frame no longer shows `���` and wraps a row when a read ends halfway through a character. Pasted text gets the same fix
+
+## [0.18.1] - 2026-11-04
+
+### Fixes
+
+- **keys**: `Ctrl+Z` puts Pi in the background from the board and from an attached session. It did nothing on the board, and in an attached session it stopped that session's screen, so it no longer took input
+
+## [0.18.0] - 2026-11-04
+
+### Features
+
+- **board**: a new task starts in the selected session's folder, and the input's title shows which
+
+### Fixes
+
+- **attach**: reattaching at a new window size, or resizing during an attach, no longer sticks on "waiting for the session to render"
+- **attach**: a session that redraws for a resize without proving it finished gets resized away and back, so the attach can't hang
+- **keys**: the board and attached sessions get every key. Shift+Tab reached the Pi behind them, where `pi-modes` changed its permission mode
+- **launch**: after choosing a folder, Enter starts the session rather than opening the picker again
+- **security**: only `http` and `https` links open on click, since `open` also starts apps from other schemes
+- **security**: session output can no longer start an iTerm2 file download, only show an inline image
+- **security**: the board's folder is private to you, as it holds transcripts and screen logs
+
+### Performance
+
+- **attach**: frames that answer a key or the wheel paint as soon as they're whole. A wheel notch took 58 ms in testing, and now takes 17 ms
+
+## [0.17.0] - 2026-11-04
+
+### Features
+
+- **keys**: `/` opens Pi's commands, with the usual menu. Commands run in the Pi the board was opened from; templates and skills start a session
+- **keys**: `Ctrl+C` twice quits Pi from the board and from an attached session, and leaves background sessions running
+
+### Changes
+
+- **keys**: `Ctrl+F` is now the only way to filter
+
+## [0.16.0] - 2026-11-04
+
+### Features
+
+- **keys**: `Alt+1..9` counts the rows in the selected session's folder
+
+### Fixes
+
+- **replies**: a reply during a permission prompt now waits in the queue. Sent straight to the session, its Enter could approve the prompt (from 0.15.1)
+
+### Changes
+
+- **repo**: its own repository, with new docs and without the original's plans and release tooling
+
+## [0.15.3] - 2026-11-04
+
+### Fixes
+
+- **state**: Pi no longer crashes on `/new`, `/resume`, `/fork` or `/reload` (from 0.15.0)
+
+## [0.15.2] - 2026-11-04
+
+### Changes
+
+- **deps**: exact versions everywhere, with Pi 1.5.0, TypeScript 7 and @types/node 26 for development
+- **deps**: remove the postinstall script, since Pi 1.5.0 no longer ships the versions it patched
+
+## [0.15.1] - 2026-11-04
+
+### Features
+
+- **keys**: `Ctrl+S` groups by directory, `Shift+Up` and `Shift+Down` reorder, `Ctrl+G` opens your editor
+- **state**: a session waiting on a permission prompt or other dialog shows as `Needs answer`
+
+## [0.15.0] - 2026-11-04
+
+### Features
+
+- **keys**: typing starts a task with no key first, and the keys follow Claude Code's agent view
+- **board**: `Left` twice puts the session you're in on the board, so you can come back to it
+- **config**: settings move to `~/.pi/agent/extensions/pi-board/config.json`
+- **model**: `/board-model` chooses the helper model, which is now off until you choose one
+- **ui**: drawn with frames and Pi's theme colors, to match pi-frame
+
+## [0.14.0] - 2026-11-04
+
+First release of `@huseynsnmz/pi-board`, a fork of `@zhuxixi/pi-agent-board` 0.13.1.
+
+### Features
+
+- **dispatch**: `Enter` starts a task right away; `Ctrl+N` while typing opens the Start session dialog
+- **board**: `Left` twice on an empty prompt opens the board
+- **board**: announce `agent-board:closed`, so an extension can draw its header and footer again
+
+## [0.13.1] - 2026-10-28
+
+### Fixes
+
+- **attach**: clear the fullscreen selection highlight after copy-on-release (issue #172) (#251)
+- **coordinator**: self-supervise the endpoint and restore the #70 cleanup gate (issue #255) (#256)
+
+### Changes
+
+- **ui**: align SELECT hints, help overlay and ! wording with the handler (issue #252) (#253)
+- sync key hints with the implemented bindings — peek footer, README ! rows, multi-select table (issue #245) (#249)
+
+[0.13.1]: https://github.com/zhuxixi/pi-agent-board/compare/v0.13.0...v0.13.1
+
+## [0.13.0] - 2026-10-26
+
+### Features
+
+- **ui**: vim-style j/k/l board keys — j/k navigate, l attaches (issue #229) (#237)
+- **ui**: paint the selected board row with selectedBg (issue #231) (#233)
+
+### Fixes
+
+- **coordinator**: verify lease identity before signalling (issue #239) (#247)
+- **dashboard**: keep selected rows visible beside scroll markers (#226)
+- **attach**: render cells that only carry a background (#235)
+- **coordinator**: root-vanished self-exit and suite leak gate (issue #241) (#244)
+- **host**: unify process identity tokens and produce them on win32 (issue #238) (#243)
+- **host**: keep warm hosts alive while a background workflow run is active (issue #230) (#242)
+- **host**: corroborate unverified process identity to unstick pid-reuse recovery (issue #217) (#240)
+- **lease**: reclaim stale coordinator leases by heartbeat instead of pid liveness (issue #224) (#236)
+- keep foreground rows monotonic across out-of-order state writes (#228)
+- recognize ask_user_question and questionnaire-shaped tools as pending questions (#223)
+
+[0.13.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.12.1...v0.13.0
+
+## [0.12.1] - 2026-10-20
+
+### Fixes
+
+- **release**: collapse repeated trailing PR refs in CHANGELOG entries (#218)
+- **attach**: keep the Alt modifier on the forwarded wheel report (#216)
+- **attach**: stop the reply guard swallowing kitty/modifyOtherKeys PageDown (#215)
+
+### Changes
+
+- **attach**: tidy the mouse-enable helper placement and comment indent (#209)
+
+[0.12.1]: https://github.com/zhuxixi/pi-agent-board/compare/v0.12.0...v0.12.1
+
+## [0.12.0] - 2026-10-19
+
+### Features
+
+- **attach**: ctrl+x in-place delete confirm — archive from the attach view (#193)
+
+### Fixes
+
+- **attach**: re-assert the fullscreen mouse mode when the attach view opens (#208) (#208)
+- **attach**: stop spending wheel notches on snapshot-hydration scrollback (#206)
+- **attach**: decode the X10 mouse release code as release (#200) (#200)
+- **attach**: classify a motion-less legacy drag by screen geometry (#202)
+- **attach**: dispatch mixed input reads per segment and pass terminal reports through (issue #189) (#196)
+- **attach**: forward the fullscreen wheel whenever the local viewport cannot move (#199)
+- **attach**: stop terminal reply fragments leaking into the attached child's input (#194)
+- **attach**: forward the fullscreen wheel to alternate-screen children (#190)
+- **attach**: scroll the fullscreen wheel in the attach viewport (#183)
+
+### Changes
+
+- **attach**: gate the alt-wheel scenario on the child's first frame (#204)
+- accept-registration race — echo-probe waits, flake postmortems, load-independent repro (#192) (#192)
+- **attach**: keep the A5 burst inside the snapshot frame window and pin the window contract (#191)
+
+[0.12.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.11.1...v0.12.0
+
+## [0.11.1] - 2026-10-13
+
+### Fixes
+
+- **attach**: defer color-scheme reports until child input is ready (#180)
+
+[0.11.1]: https://github.com/zhuxixi/pi-agent-board/compare/v0.11.0...v0.11.1
+
+## [0.11.0] - 2026-10-12
+
+### Features
+
+- **attach**: mirror pi's fullscreen selection into X11 PRIMARY + paste-source override (#177)
+
+[0.11.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.10.2...v0.11.0
+
+## [0.10.2] - 2026-10-10
+
+### Fixes
+
+- **attach**: stop writing outer-terminal mouse mode in fullscreen TUI (#173)
+- **attach**: middle-click paste via handleMouse under pi >=1.0 fullscreen TUI (#171)
+- **attach**: deliver terminal color scheme at settle via feature-detected probe API (#166)
+- **attach**: prevent startup background replies from echoing in the PTY (#165) (#165)
+
+[0.10.2]: https://github.com/zhuxixi/pi-agent-board/compare/v0.10.1...v0.10.2
+
+## [0.10.1] - 2026-10-01
+
+### Fixes
+
+- **attach**: prevent stale hyperlink IDs from leaking across cells (#158)
+
+[0.10.1]: https://github.com/zhuxixi/pi-agent-board/compare/v0.10.0...v0.10.1
+
+## [0.10.0] - 2026-10-01
+
+### Features
+
+- **ui**: x then y confirms session deletion (issue #150) (#152)
+- 8th semantic state holding + manual-fence lift on interactive input (issue #145) (#151)
+
+### Fixes
+
+- **ci**: read the dispatch recovery tag from inputs, not the ref name (issue #154) (#156)
+- job-runner boot-window stop loss + dead-run reconcile convergence (issue #153) (#155)
+- **attach**: answer the color-scheme query client-side for attached sessions (issue #148) (#149)
+
+### Changes
+
+- probe knob guard uses the production-default floor, not a jitter-prone absolute bound (issue #95) (#159)
+- flake postmortems, budget audit gate, ladder knobs (issue #95 F3-F4) (#157)
+
+[0.10.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.9.0...v0.10.0
+
+## [0.9.0] - 2026-09-25
+
+### Features
+
+- **attach**: forward terminal queries to the real terminal — automatic theme works in attach sessions (issue #128) (#138)
+- **attach**: unconditional Ctrl+\ detach key, terminal-independent (issue #126) (#137)
+
+### Fixes
+
+- **runner**: probes leave attachedClients at hello (issue #130) (#142)
+- browse-mode Tab completes and drills down directories in cwd picker (issue #127) (#141)
+
+### Changes
+
+- **release**: orchestrate releases and publish from CI (#144)
+- control-reconcile flaky assertions — windowed recorder + invariant realignment (issue #140) (#143)
+- **attach**: scope A5 mid-stream seq assertion to post-snapshot window (issue #132) (#139)
+
+[0.9.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.8.0...v0.9.0
+
+## [0.8.0] - 2026-09-23
+
+### Features
+
+- **attach**: detach gate reads only editor_state — delete buffer heuristics (issue #91 phase 6, D1) (#135)
+- control command lifecycle — staged acks, durable journal, reconcile, generation token (issue #91 phase 5, D4) (#134)
+- switch attach to snapshot+subscribe with legacy fallback (issue #91 phase 4, D2 closure) (#122)
+- canonical terminal model and capture-and-subscribe protocol (issue #91 phase 3, D2+D5) (#117)
+- reader-side revision consistency, beat bootstrap, and paired-revision invariant (issue #91, D3 arc closure) (#111)
+
+### Fixes
+
+- **attach**: editor-shaped ← detach anchor + restore the editor-state reporter endpoint (issue #103) (#119)
+- **paths**: normalize root before hashing the win32 coordinator pipe name (issue #124) (#125)
+- **locks**: reclaim Windows lease orphans on publish-rename EPERM (issue #114) (#123)
+- **attach**: stop painting the PTY cursor block when the child hides it (issue #102) (#120)
+- **attach**: learn TUI frame cognition in terminal chain states (issue #106) (#118)
+- **host**: reclaim orphaned host-meta locks and add contention diagnostics (issue #112) (#116)
+- foreground preview read-your-writes cache for coordinator write races (issue #113) (#115)
+
+### Changes
+
+- move the A11 perf gate out of coverage instrumentation (issue #121) (#133)
+
+[0.8.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.7.0...v0.8.0
+
+## [0.7.0] - 2026-09-10
+
+### Features
+
+- runtime cursor desync detect + rate-limited heal (issue #11) (#105)
+- detached View State Coordinator as single writer for state/status (issue #91, phase 1+2a) (#104)
+
+### Fixes
+
+- **coordinator**: protocol version gate replaces stale coordinators on extension updates (issue #108) (#109)
+
+### Changes
+
+- route all remaining state writes through the View State Coordinator (issue #91, phase 2b) (#107)
+
+[0.7.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.6.2...v0.7.0
+
+## [0.6.2] - 2026-09-09
+
+### Fixes
+
+- **host**: claim role no longer blocks terminal host replacement (#99) (#100)
+
+[0.6.2]: https://github.com/zhuxixi/pi-agent-board/compare/v0.6.1...v0.6.2
+
+## [0.6.1] - 2026-09-08
+
+### Fixes
+
+- add an unconditional Ctrl+Left detach chord to the attach surface (issue #89) (#97)
+- force full-clear repaint on dashboard mount and content shrink (issue #88) (#96)
+- fail host launch fast on a provably stale defaultModel + exit attribution (issue #90) (#94)
+- finalize provably-dead legacy hosts in attach resolver and self-heal (issue #87) (#93)
+- swallow async spawn errors in detached runner launches (issue #86) (#92)
+
+[0.6.1]: https://github.com/zhuxixi/pi-agent-board/compare/v0.6.0...v0.6.1
+
+## [0.6.0] - 2026-09-07
+
+### Features
+
+- conventional-commit driven CHANGELOG via release_helper.mjs (issue #64) (#83)
+
+### Fixes
+
+- pty host stacking and control.sock cross-deletion via per-instance ownership protocol (issue #70) (#84)
+- guard mention fallback against placeholders, code spans, and pr-context (issue #61) (#82)
+- truncate never splits surrogate pairs or emits lone surrogates (issue #39) (#81)
+- extract evidence outputPreview from AgentToolResult content (issue #41) (#77)
+- reclaim idle warm PTY hosts via periodic sweep + lifecycle cleanup (issue #75) (#76)
+- narrow code-refs PR back-link extraction by evidence context (issue #65) (#73)
+
+### Performance
+
+- use cached PTY probe on the reconcile drain path (issue #13) (#79)
+
+### Changes
+
+- Windows WezTerm IME needs a visible hardware cursor (issue #38) (#80)
+- poll markCompleted to success instead of racing the persist window (issue #63) (#78)
+
+[0.6.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.5.2...v0.6.0

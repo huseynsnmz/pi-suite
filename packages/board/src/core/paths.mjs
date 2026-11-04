@@ -1,0 +1,183 @@
+/**
+ * Filesystem layout for the agent-board store.
+ *
+ * Every helper takes an explicit `root` so tests can point at a tmp dir.
+ * The live default is `~/.pi/agent/agent-board/` (override with $AGENT_BOARD_ROOT;
+ * legacy $AGENT_VIEW_ROOT is also honored for migration).
+ */
+import { createHash } from "node:crypto";
+import * as os from "node:os";
+import * as path from "node:path";
+
+/** @returns {string} the live store root (env override or ~/.pi/agent/agent-board). */
+export function defaultRoot() {
+	if (process.env.AGENT_BOARD_ROOT) return path.resolve(process.env.AGENT_BOARD_ROOT);
+	if (process.env.AGENT_VIEW_ROOT) return path.resolve(process.env.AGENT_VIEW_ROOT);
+	return path.join(os.homedir(), ".pi", "agent", "agent-board");
+}
+
+/** @param {string} root */
+export const rosterPath = (root) => path.join(root, "roster.json");
+/** @param {string} root */
+export const launchPrefsPath = (root) => path.join(root, "launch-prefs.json");
+/** @param {string} root */
+export const gcHistoryPath = (root) => path.join(root, "gc-history.jsonl");
+/** @param {string} root */
+export const cwdStatsPath = (root) => path.join(root, "cwd-stats.json");
+/** @param {string} root */
+export const providersPath = (root) => path.join(root, "providers.json");
+
+/** @param {string} root */
+export const viewsDir = (root) => path.join(root, "views");
+/** @param {string} root @param {string} viewId */
+export const viewDir = (root, viewId) => path.join(root, "views", viewId);
+/** @param {string} root @param {string} viewId */
+export const metaPath = (root, viewId) => path.join(viewDir(root, viewId), "meta.json");
+/** @param {string} root @param {string} viewId */
+export const statePath = (root, viewId) => path.join(viewDir(root, viewId), "state.json");
+/** @param {string} root @param {string} viewId */
+export const hostPath = (root, viewId) => path.join(viewDir(root, viewId), "host.json");
+/** Durable control-command journal for a view's host (issue #91 phase 5, spec
+ *  D4): one JSONL line per durable-command lifecycle transition
+ *  (accepted/applied). Sibling of host.json in the view dir. */
+export const controlJournalPath = (root, viewId) => path.join(viewDir(root, viewId), "control-journal.jsonl");
+/** @param {string} root @param {string} viewId */
+export const hostConfigPath = (root, viewId) => path.join(viewDir(root, viewId), "host-config.json");
+/**
+ * Per-instance host config path. Each host launch owns its own config file so a
+ * concurrent launch can never overwrite another instance's prompt/cwd/model (issue #70).
+ * @param {string} root @param {string} viewId @param {string} instanceId
+ */
+export const hostConfigPathFor = (root, viewId, instanceId) =>
+	path.join(viewDir(root, viewId), `host-config.${instanceId}.json`);
+/** @param {string} root @param {string} viewId */
+export const titleConfigPath = (root, viewId) => path.join(viewDir(root, viewId), "title-config.json");
+/** @param {string} root @param {string} viewId */
+export const autoStateConfigPath = (root, viewId) => path.join(viewDir(root, viewId), "auto-state-config.json");
+/**
+ * Named pipe used for the host control socket on Windows. Named pipes are kernel
+ * objects, not filesystem entries, so existsSync/unlink never apply to them; they
+ * vanish automatically when the owning process exits. Names must be ≤ 256 chars.
+ * @param {string} viewId
+ */
+export const controlPipeName = (viewId) => `\\\\.\\pipe\\pi-agent-board-${viewId}`;
+/**
+ * Control socket address for a view, platform-aware. On Windows plain filesystem
+ * paths cannot be bound by node's net module (EACCES) — only `\\.\pipe\`-style
+ * names work (see libuv#458, nodejs/node#55979).
+ * @param {"win32"|"linux"|"darwin"} platform
+ * @param {string} root
+ * @param {string} viewId
+ */
+export function controlSocketPathFor(platform, root, viewId) {
+	if (platform === "win32") return controlPipeName(viewId);
+	return path.join(viewDir(root, viewId), "control.sock");
+}
+/** @param {string} root @param {string} viewId */
+export const controlSocketPath = (root, viewId) => controlSocketPathFor(process.platform, root, viewId);
+/**
+ * Endpoint a hosted child's editor-state reporter should connect to.
+ *
+ * The runner knows which endpoint it actually bound and injects it into the
+ * child env as AGENT_BOARD_CONTROL_SOCKET (issue #103): since #70 the owned
+ * runner binds a per-instance address, while the reporter kept dialing the
+ * stable per-view one, so it never connected and the attach gate lost its
+ * authoritative editor state. The injected value wins; the stable address
+ * remains the fallback for legacy hosts and older runners that predate the key.
+ * @param {{ envSocketPath?: string | null, platform: "win32"|"linux"|"darwin", root: string, viewId: string }} args
+ */
+export function resolveControlEndpoint({ envSocketPath, platform, root, viewId }) {
+	const injected = typeof envSocketPath === "string" ? envSocketPath.trim() : "";
+	return injected.length > 0 ? injected : controlSocketPathFor(platform, root, viewId);
+}
+/**
+ * Per-instance control endpoint. Each new host instance binds its own socket/pipe,
+ * so a superseded runner can never unlink the current owner's endpoint (issue #70).
+ * win32 pipe names embed an 8-hex hash of the instanceId to stay under the 256-char limit.
+ * @param {"win32"|"linux"|"darwin"} platform
+ * @param {string} root
+ * @param {string} viewId
+ * @param {string} instanceId
+ */
+export function hostEndpointPathFor(platform, root, viewId, instanceId) {
+	if (platform === "win32") {
+		const hash = createHash("sha256").update(String(instanceId)).digest("hex").slice(0, 8);
+		return `\\\\.\\pipe\\pi-agent-board-${viewId}-${hash}`;
+	}
+	return path.join(viewDir(root, viewId), `control.${instanceId}.sock`);
+}
+/** @param {string} root @param {string} viewId */
+export const screenLogPath = (root, viewId) => path.join(viewDir(root, viewId), "screen.log");
+/**
+ * Well-known endpoint for the board-root View State Coordinator (issue #91, spec D3).
+ * Exactly one coordinator may own a root (token-fenced lease), so one stable path
+ * suffices; a stale POSIX socket left by a crashed coordinator is unlinked by the
+ * new lease owner before bind. win32 pipe names embed a 16-hex hash of the
+ * *normalized* root to stay under the 256-char limit and keep per-root isolation.
+ * @param {"win32"|"linux"|"darwin"} platform
+ * @param {string} root
+ */
+export function coordinatorEndpointPathFor(platform, root) {
+	if (platform === "win32") {
+		// Normalize before hashing: the pipe name must be invariant to the root's
+		// spelling (C:/x vs C:\x, trailing separators, dot segments). The lock path
+		// derived from the same root already is (via path.join); a mismatch yields
+		// "same lock, two pipes" — the panel probes a pipe nobody bound, spawns
+		// replacements that cannot take the held lease, and locks itself out
+		// (issue #124). resolve() is idempotent on canonical roots, so coordinators
+		// already deployed keep their pipe name and need no restart.
+		// win32 semantics are named explicitly rather than using the ambient
+		// path.resolve: this branch must emit the same pipe name on every host OS
+		// (on POSIX, ambient resolve treats `C:\x` as a relative path: no
+		// drive-letter or backslash-separator semantics), so platform-injected
+		// tests and CI behave identically everywhere.
+		const normalized = path.win32.resolve(root);
+		const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+		return `\\\\.\\pipe\\agent-board-coordinator-${hash}`;
+	}
+	return path.join(root, "coordinator.sock");
+}
+/** @param {string} root @param {string} viewId */
+export const hostPidPath = (root, viewId) => path.join(viewDir(root, viewId), "host-pid.json");
+/** @param {string} root @param {string} viewId */
+export const runsDir = (root, viewId) => path.join(viewDir(root, viewId), "runs");
+/** @param {string} root @param {string} viewId @param {string} runId */
+export const runDir = (root, viewId, runId) => path.join(runsDir(root, viewId), runId);
+/** @param {string} root @param {string} viewId @param {string} runId */
+export const statusPath = (root, viewId, runId) => path.join(runDir(root, viewId, runId), "status.json");
+/** @param {string} root @param {string} viewId @param {string} runId */
+export const eventsPath = (root, viewId, runId) => path.join(runDir(root, viewId, runId), "events.jsonl");
+/** @param {string} root @param {string} viewId @param {string} runId */
+export const stdoutPath = (root, viewId, runId) => path.join(runDir(root, viewId, runId), "stdout.log");
+/** @param {string} root @param {string} viewId @param {string} runId */
+export const stderrPath = (root, viewId, runId) => path.join(runDir(root, viewId, runId), "stderr.log");
+/** @param {string} root @param {string} viewId @param {string} runId */
+export const pidPath = (root, viewId, runId) => path.join(runDir(root, viewId, runId), "pid.json");
+/** @param {string} root @param {string} viewId */
+export const diagnosticsPath = (root, viewId) => path.join(viewDir(root, viewId), "diagnostics.jsonl");
+/** @param {string} root @param {string} viewId */
+export const evidencePath = (root, viewId) => path.join(viewDir(root, viewId), "evidence.json");
+/** @param {string} root @param {string} viewId */
+export const codeRefsPath = (root, viewId) => path.join(viewDir(root, viewId), "github.json");
+/** @param {string} root @param {string} viewId */
+export const viewEvidencePath = evidencePath;
+/** @param {string} root @param {string} viewId */
+export const followUpQueuePath = (root, viewId) => path.join(viewDir(root, viewId), "queue.json");
+/** @param {string} root @param {string} viewId */
+export const queuePath = followUpQueuePath;
+/** @param {string} root @param {string} viewId */
+export const steeringPath = (root, viewId) => path.join(viewDir(root, viewId), "steering.json");
+/** @param {string} root @param {string} viewId @param {string} name */
+export const viewLockPath = (root, viewId, name) => path.join(viewDir(root, viewId), `${name}.lock`);
+/** @param {string} root @param {string} viewId @param {string} runId */
+export const runEvidencePath = (root, viewId, runId) => path.join(runDir(root, viewId, runId), "evidence.json");
+
+/** @param {string} root */
+export const sessionsDir = (root) => path.join(root, "sessions");
+/** @param {string} root @param {string} viewId */
+export const sessionFilePath = (root, viewId) => path.join(sessionsDir(root), `${viewId}.jsonl`);
+
+/** @param {string} root */
+export const worktreesDir = (root) => path.join(root, "worktrees");
+/** @param {string} root @param {string} viewId */
+export const worktreePath = (root, viewId) => path.join(worktreesDir(root), viewId);

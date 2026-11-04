@@ -1,0 +1,345 @@
+/**
+ * Cross-process concurrency integration tests (issue #70 A8/A9/A10).
+ *
+ * Unlike test/pty-runner.integration.test.mjs (which drives the runner directly),
+ * these tests spawn the REAL service entry via test-support/ensure-host-helper.mjs
+ * child processes, so claim/lease/fencing contends across actual process
+ * boundaries:
+ *
+ *  - A8: two helper processes call ensureHost simultaneously → exactly one host.
+ *  - A9: a hijacked host record must fence a second launcher and late writes.
+ *  - A10: a SIGKILLed runner (dead endpoint, live orphaned child) is recovered by
+ *    resolveAttachTarget: revoke → wait for old child death → fresh claim →
+ *    adopt-and-spawn → new ready host. Old child dead before the new one exists
+ *    is the no-double-child guarantee.
+ */
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { test } from "node:test";
+import { probeHost } from "../src/core/host-probe.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
+import * as P from "../src/core/paths.mjs";
+import { createView, readHost, updateOwnedHost, writeHost } from "../src/core/store.mjs";
+import { createService } from "../src/runtime/service.mjs";
+import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
+
+const HELPER = resolve("test-support/ensure-host-helper.mjs");
+
+function freshRoot() {
+	return mkdtempSync(join(tmpdir(), "agentview-conc-"));
+}
+
+async function waitFor(predicate, timeoutMs = 15_000, capture = null) {
+	return waitForWithPostmortem(predicate, { timeoutMs, intervalMs: 25, capture });
+}
+
+function isAlive(pid) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function launchHostEvents(root, viewId) {
+	return readDiagnostics(root, viewId).filter((d) => d.code === "launch_host");
+}
+
+/** The service instance the TEST process uses for teardown/assertions — same real
+ *  dependencies as the helper, so requestHostStop etc. behave exactly like prod. */
+function testService(root) {
+	return createService({
+		root,
+		runnerScript: resolve("runner/job-runner.mjs"),
+		ptyRunnerScript: resolve("runner/pty-runner.mjs"),
+		piCommand: process.execPath,
+		piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+		defaultCwd: process.cwd(),
+	});
+}
+
+/** createView does not touch the session file; ensureHost requires it to exist. */
+function ensureSessionFile(root, viewId) {
+	const meta = JSON.parse(readFileSync(P.metaPath(root, viewId), "utf8"));
+	mkdirSync(dirname(meta.sessionFile), { recursive: true });
+	if (!existsSync(meta.sessionFile)) writeFileSync(meta.sessionFile, "\n");
+	return meta;
+}
+
+/** Spawn a helper and collect its single ENSURE_RESULT line. */
+function runHelper(root, viewId) {
+	return new Promise((resolvePromise) => {
+		const child = spawn(process.execPath, [HELPER, root, viewId], { stdio: ["ignore", "pipe", "inherit"] });
+		let out = "";
+		child.stdout.on("data", (chunk) => { out += chunk.toString(); });
+		child.on("error", (err) => resolvePromise({ error: String(err) }));
+		child.on("close", (code) => {
+			const line = out.split("\n").find((l) => l.startsWith("ENSURE_RESULT "));
+			resolvePromise(line ? { code, result: JSON.parse(line.slice("ENSURE_RESULT ".length)) } : { code, error: `no result line: ${out.trim()}` });
+		});
+	});
+}
+
+async function teardownHost(root, viewId, service) {
+	const host = readHost(root, viewId);
+	if (host?.runnerPid && isAlive(host.runnerPid)) {
+		try { service.requestHostStop(viewId, host.instanceId, "test teardown"); } catch { /* best effort */ }
+		await waitFor(() => !isAlive(host.runnerPid), 8_000).catch(() => {
+			try { process.kill(host.runnerPid, "SIGKILL"); } catch { /* already gone */ }
+		});
+	}
+	try { if (host?.childPid) process.kill(host.childPid, "SIGKILL"); } catch { /* already gone */ }
+	rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+}
+
+let hasNodePty = true;
+try {
+	await import("node-pty");
+} catch {
+	hasNodePty = false;
+}
+
+test("A8: two concurrent helper processes start exactly one host", { skip: !hasNodePty }, async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "conc", cwd: process.cwd() });
+		ensureSessionFile(root, "v1");
+
+		// Launch both helpers within milliseconds of each other.
+		const [a, b] = await Promise.all([runHelper(root, "v1"), runHelper(root, "v1")]);
+		assert.ok(a.result, `helper A produced a result: ${a.error ?? ""}`);
+		assert.ok(b.result, `helper B produced a result: ${b.error ?? ""}`);
+		assert.equal(a.result.ok, true, `helper A ok: ${JSON.stringify(a.result)}`);
+		assert.equal(b.result.ok, true, `helper B ok: ${JSON.stringify(b.result)}`);
+
+		const results = [a.result, b.result];
+		assert.equal(results.filter((r) => r.started === true).length, 1, `exactly one starter: ${JSON.stringify(results)}`);
+		const other = results.find((r) => r.started !== true);
+		assert.equal(other.pending, true, `loser is pending, not failed: ${JSON.stringify(other)}`);
+
+		// Exactly one launch_host diagnostic — the loser must not have spawned.
+		assert.equal(launchHostEvents(root, "v1").length, 1);
+
+		// The single host reaches alive+ready with a live runner.
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h.readyAt != null && h.runnerPid && isAlive(h.runnerPid) ? h : false;
+		}, 15_000);
+		assert.ok(host.instanceId);
+
+		// host.json is authoritative; the mirror agrees on the instance.
+		const mirror = JSON.parse(readFileSync(P.hostPidPath(root, "v1"), "utf8"));
+		assert.equal(mirror.instanceId, host.instanceId);
+
+		// The endpoint is real: a live probe classifies ready.
+		const probe = await probeHost(host.socketPath, { expectedViewId: "v1", expectedInstanceId: host.instanceId });
+		assert.equal(probe.classification, "ready");
+
+		await teardownHost(root, "v1", testService(root));
+	} catch (err) {
+		await teardownHost(root, "v1", testService(root)).catch(() => {});
+		throw err;
+	}
+});
+
+test("A9: a hijacked host record fences second launchers and late writers", { skip: !hasNodePty }, async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "fence", cwd: process.cwd() });
+		ensureSessionFile(root, "v1");
+
+		const first = await runHelper(root, "v1");
+		assert.equal(first.result?.ok, true, `first helper ok: ${JSON.stringify(first)}`);
+		assert.equal(first.result.started, true, `first helper started the host: ${JSON.stringify(first.result)}`);
+		const original = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h.readyAt != null && h.runnerPid && isAlive(h.runnerPid) ? h : false;
+		}, 15_000);
+
+		// Hijack the record: host.json now claims a different instance owns the view.
+		writeHost(root, { ...original, instanceId: "hijack" });
+
+		const second = await runHelper(root, "v1");
+		assert.equal(second.result?.ok, true, `second helper ok: ${JSON.stringify(second)}`);
+		assert.equal(second.result.started !== true && second.result.pending === true, true, `second helper pends against the hijacked claim: ${JSON.stringify(second.result)}`);
+		assert.equal(launchHostEvents(root, "v1").length, 1, "no second spawn happened");
+		// The second helper never signals the original runner. The runner may still
+		// be alive here, or may already have self-terminated via its 1s owner_lost
+		// heartbeat after the hijack (by design, issue #70) — owner_lost deliberately
+		// skips the terminal write, so the hijacked record must stay untouched either
+		// way. On slow CI runners the heartbeat reliably wins this race (issue #95).
+		if (!isAlive(original.runnerPid)) {
+			const hijacked = readHost(root, "v1");
+			assert.equal(hijacked.instanceId, "hijack", "owner_lost exit left the hijacked record untouched");
+			assert.equal(hijacked.state, "alive", "dead runner wrote no terminal state");
+		}
+
+		// Restore the true record; a writer holding the pre-hijack token is fenced out.
+		writeHost(root, { ...original });
+		const late = updateOwnedHost(root, "v1", "stale-pre-hijack-token", (h) => ({ ...h, state: "exited", endedAt: Date.now() }));
+		assert.equal(late.updated, false);
+		assert.equal(late.ownerChanged, true);
+		const after = readHost(root, "v1");
+		assert.equal(after.instanceId, original.instanceId);
+		assert.equal(after.state, "alive", "late write did not land");
+
+		await teardownHost(root, "v1", testService(root));
+	} catch (err) {
+		await teardownHost(root, "v1", testService(root)).catch(() => {});
+		throw err;
+	}
+});
+
+test("A10: SIGKILLed runner is recovered by the attach resolver without double children", { skip: !hasNodePty }, async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "recover", cwd: process.cwd() });
+		ensureSessionFile(root, "v1");
+
+		// issue #95: A10's waits have historically flaked, so a timeout now carries
+		// a snapshot of the durable state at the moment of failure.
+		const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+
+		const first = await runHelper(root, "v1");
+		assert.equal(first.result?.started, true, `first helper started: ${JSON.stringify(first)}`);
+		const original = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h.readyAt != null && h.childPid && isAlive(h.runnerPid) ? h : false;
+		}, 30_000, capture);
+		assert.equal(isAlive(original.childPid), true, "original child alive before the kill");
+
+		// Orphan the host the hard way: runner SIGKILL leaves a stale endpoint file,
+		// host.json claiming alive, and a live orphaned child — the classic #70 state.
+		process.kill(original.runnerPid, "SIGKILL");
+		await waitFor(() => !isAlive(original.runnerPid), 10_000, capture);
+
+		// CR round-7 (blocking): on slow CI runners the full chain — stale detection,
+		// recovery + child-kill ladder, adopt, cold runner boot, ready probe — can
+		// stretch past 40s and starve the deadline ("host start timed out"). Budget
+		// is sized for the slowest runners; typical completion is ~20s.
+		// issue #95: 90s proved insufficient on slower CI — widened to 150s.
+		const service = testService(root);
+		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 150_000 }); // budget: explicit 150s resolve budget, slow-machine headroom; node-default test timeout accepted
+		assert.equal(resolved.kind, "pty", `resolver produced a pty target: ${JSON.stringify(resolved)}`);
+		assert.notEqual(resolved.instanceId, original.instanceId, "replacement is a new instance");
+
+		// The no-double-child guarantee: recovery claims only after the OLD child died.
+		assert.equal(isAlive(original.childPid), false, "old child is dead once the resolver returns");
+
+		const replacement = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h.readyAt != null && h.runnerPid && isAlive(h.runnerPid) && h.childPid ? h : false;
+		}, 30_000, capture);
+		assert.notEqual(replacement.childPid, original.childPid);
+		assert.notEqual(replacement.instanceId, original.instanceId);
+		assert.equal(isAlive(replacement.runnerPid), true);
+
+		// One original launch + one adopt-and-spawn — no stacking. The replacement
+		// spawn is deliberately recorded under its own code, so each appearing
+		// exactly once is a stronger no-respawn-loop assertion than a shared count.
+		const diags = readDiagnostics(root, "v1");
+		assert.equal(diags.filter((d) => d.code === "launch_host").length, 1, "one original launch");
+		assert.equal(diags.filter((d) => d.code === "host_adopted").length, 1, "one adopt-and-spawn");
+		assert.ok(diags.some((d) => d.code === "host_recovered"), "recovery diagnostic recorded");
+
+		const probe = await probeHost(replacement.socketPath, { expectedViewId: "v1", expectedInstanceId: replacement.instanceId });
+		assert.equal(probe.classification, "ready");
+
+		await teardownHost(root, "v1", service);
+	} catch (err) {
+		await teardownHost(root, "v1", testService(root)).catch(() => {});
+		throw err;
+	}
+});
+
+test("A7: ladder knobs compress the A10 recovery chain without weakening it", { skip: !hasNodePty }, async () => {
+	// issue #95 F4: the ladder readers are dynamic, so in-process env reaches the
+	// helper (inherited at spawn), the pty host, and this test's own service.
+	process.env.AGENT_BOARD_TEST_HOST_START_GRACE_MS = "1000";
+	process.env.AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS = "500";
+	process.env.AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS = "50";
+	process.env.AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS = "30000";
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "knob", cwd: process.cwd() });
+		ensureSessionFile(root, "v1");
+
+		const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+
+		const first = await runHelper(root, "v1");
+		assert.equal(first.result?.started, true, `first helper started: ${JSON.stringify(first)}`);
+		const original = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h.readyAt != null && h.childPid && isAlive(h.runnerPid) ? h : false;
+		}, 30_000, capture);
+
+		// Same hard orphan as A10: SIGKILL the runner, leaving a stale endpoint,
+		// host.json claiming alive, and a live orphaned child.
+		process.kill(original.runnerPid, "SIGKILL");
+		await waitFor(() => !isAlive(original.runnerPid), 10_000, capture);
+
+		// No explicit timeoutMs: the resolve budget is AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS
+		// alone, so the knob is this test's sole budget source (the 1ms sibling below pins
+		// the inversion if the reader is ever unwired). The compressed chain must converge
+		// well inside the 30s it allows — A10 budgets 150s of slow-machine headroom for the
+		// same walk.
+		const service = testService(root);
+		const resolved = await service.resolveAttachTarget("v1");
+		assert.equal(resolved.kind, "pty", `resolver produced a pty target: ${JSON.stringify(resolved)}`);
+		assert.notEqual(resolved.instanceId, original.instanceId, "replacement is a new instance");
+		assert.equal(isAlive(original.childPid), false, "old child is dead once the resolver returns");
+
+		await teardownHost(root, "v1", service);
+	} catch (err) {
+		await teardownHost(root, "v1", testService(root)).catch(() => {});
+		throw err;
+	} finally {
+		delete process.env.AGENT_BOARD_TEST_HOST_START_GRACE_MS;
+		delete process.env.AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS;
+		delete process.env.AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS;
+		delete process.env.AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS;
+	}
+});
+
+test("A7 (red world): a 1ms resolve knob budget starves the resolver", { skip: !hasNodePty }, async () => {
+	// issue #95 F2: only the resolve budget is knobbed. The start/recovery graces
+	// keep their production defaults, so this orphaned host WOULD converge to a pty
+	// under the 120s default — the 1ms budget expires first and the starve outcome is
+	// the observable. Unwiring the reader restores 120s, the chain converges to pty,
+	// and this test fails: the inversion is the anti-rot proof.
+	process.env.AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS = "1";
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "starve", cwd: process.cwd() });
+		ensureSessionFile(root, "v1");
+
+		const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+
+		const first = await runHelper(root, "v1");
+		assert.equal(first.result?.started, true, `first helper started: ${JSON.stringify(first)}`);
+		const original = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h.readyAt != null && h.childPid && isAlive(h.runnerPid) ? h : false;
+		}, 30_000, capture);
+
+		// Same hard orphan as A10/A7: SIGKILL the runner, leaving a live orphaned child.
+		process.kill(original.runnerPid, "SIGKILL");
+		await waitFor(() => !isAlive(original.runnerPid), 10_000, capture);
+
+		const service = testService(root);
+		const resolved = await service.resolveAttachTarget("v1");
+		assert.equal(resolved.kind, "pending", `1ms budget starves before recovery converges: ${JSON.stringify(resolved)}`);
+		assert.match(resolved.reason, /timed out/);
+
+		await teardownHost(root, "v1", service);
+	} catch (err) {
+		await teardownHost(root, "v1", testService(root)).catch(() => {});
+		throw err;
+	} finally {
+		delete process.env.AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS;
+	}
+});

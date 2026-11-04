@@ -1,0 +1,2221 @@
+/**
+ * The agent-board dashboard: a single full-screen `ctx.ui.custom` component that owns the
+ * list, peek/reply, dispatch, filter, rename, and confirm modes plus a live poll loop.
+ *
+ * It resolves (`done`) only for actions the command handler must run after the surface
+ * closes — attaching to a session (tears down the current session) or quitting. Everything
+ * else (dispatch, reply, stop, pin, rename, archive) is handled in-place against the store.
+ */
+import { suspendToShell } from "../core/suspend.mjs";
+import { readFileSync } from "node:fs";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import type { Component, EditorTheme, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { createDoublePress, QUIT_PRESS_MS } from "../core/double-press.mjs";
+import { runsInPi } from "../core/slash-commands.mjs";
+import { readConfig, writeConfig } from "../core/config.mjs";
+import { editExternally } from "./external-editor.ts";
+import { requestDashboardRender } from "../core/dashboard-render.mjs";
+import { normalizeGenericStatusText } from "../core/derive.mjs";
+import { firstSentence, truncate } from "../core/heuristics.mjs";
+import {
+	browseTabCompletion,
+	canonicalModelRef,
+	clampThinkingLevel,
+	listDirectorySuggestions,
+	existingCwdCandidates,
+	modelRefAvailable,
+	nextCwdPickerState,
+	resolveDirectoryValue,
+	resolveLaunchContext,
+	supportedThinkingLevels,
+} from "../core/launch-options.mjs";
+import { createPrewarmScheduler } from "../core/prewarm-schedule.mjs";
+import { planDashboardAttach, planPrewarm, replyNotice } from "./dashboard-decisions.mjs";
+import { ensureCwdStatsSeeded, rankedCwdCandidates, recordCwdLaunch } from "../core/cwd-stats.mjs";
+import { filterRows, groupRowsByFolder, groupRowsByDirectory, rowState, stateGlyph } from "../core/rows.mjs";
+import { loadSessionView } from "../core/session-view.mjs";
+import { GROUP_LABELS } from "../core/types.mjs";
+import { buildEvidencePanel } from "./dashboard-evidence.mjs";
+import { type Row } from "../core/store.mjs";
+import type { createService } from "../runtime/service.mjs";
+
+type Service = ReturnType<typeof createService>;
+type PtyIssue = {
+	id: string;
+	title: string;
+	statusLabel: string;
+	summary: string;
+	fixHint: string;
+	steps: string[];
+	rawReason: string;
+};
+type PtyHealth = { ok: boolean; reason: string | null; staleHosts: number; liveHosts: number; issue?: PtyIssue | null };
+
+interface ThemeLike {
+	fg(color: string, text: string): string;
+	bg(color: string, text: string): string;
+	bold(text: string): string;
+	italic(text: string): string;
+	strikethrough(text: string): string;
+}
+
+export type DashboardResult =
+	| { action: "exit" }
+	| { action: "attach"; viewId: string; stopFirst: boolean }
+	| { action: "quit" }
+	| { action: "command"; text: string };
+
+type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+type LaunchModel = {
+	provider: string;
+	id: string;
+	name?: string;
+	reasoning?: boolean;
+	thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
+};
+type LaunchChoice = { model: LaunchModel; thinkingLevel?: ThinkingLevel };
+type LaunchPicker = "cwd" | "model" | "thinking" | null;
+
+type Mode = "list" | "select" | "dispatch" | "filter" | "peek" | "reply" | "rename" | "confirm" | "help" | "ptyHelp" | "session" | "evidence" | "launch";
+
+interface PendingConfirm {
+	prompt: string;
+	onYes: () => void;
+	returnMode?: Mode;
+}
+
+type ReturnableMode = Exclude<Mode, "help">;
+
+type InputNoticeColor = "accent" | "success" | "warning" | "muted" | "dim";
+type FlashLevel = "info" | "warn" | "error";
+
+interface InputNotice {
+	text: string;
+	color: InputNoticeColor;
+	expiresAt: number;
+}
+
+interface CwdCandidate {
+	path: string;
+	count: number;
+}
+
+interface LaunchState {
+	fieldIndex: number;
+	picker: LaunchPicker;
+	action: "background" | "attach";
+	cwd: string;
+	cwdQuery: string;
+	cwdSuggestions: string[];
+	cwdSuggestionIndex: number;
+	cwdRanked: CwdCandidate[];
+	cwdPickerMode: "favorites" | "browse";
+	choices: LaunchChoice[];
+	scopeSource: "scoped" | "all";
+	model: LaunchModel | null;
+	modelQuery: string;
+	modelFiltered: LaunchChoice[];
+	modelIndex: number;
+	thinking: ThinkingLevel;
+	thinkingOptions: ThinkingLevel[];
+	thinkingIndex: number;
+}
+
+export interface DashboardDeps {
+	service: Service;
+	root: string;
+	defaultCwd: string;
+	currentSessionFile?: string | null;
+	availableModels: LaunchModel[];
+	currentModel: LaunchModel | null;
+	currentThinkingLevel: ThinkingLevel;
+	initialSelectedId?: string | null;
+	initialNotice?: string;
+	commands?: { name: string; description?: string; source: string }[];
+}
+
+export class DashboardComponent implements Component {
+	private mode: Mode = "list";
+	private rows: Row[] = [];
+	private orderedIds: string[] = [];
+	private selectedId: string | null = null;
+	private selectedIds = new Set<string>();
+	private input = "";
+	private filterQuery = "";
+	private pending: PendingConfirm | null = null;
+	private deleteArm: { id: string; at: number } | null = null;
+	private readonly quitPresses = createDoublePress(Date.now, QUIT_PRESS_MS);
+	private groupBy: "state" | "directory" = readConfig().groupBy === "directory" ? "directory" : "state";
+	private readonly groupOf = new Map<string, string>();
+	private readonly neighborsOf = new Map<string, string>();
+	private readonly folderOf = new Map<string, string>();
+	private helpReturnMode: ReturnableMode = "list";
+	private ptyHelpReturnMode: ReturnableMode = "list";
+	private peekId: string | null = null;
+	private scrollTop = 0;
+	private sessionScrollTop = 0;
+	private evidenceScrollTop = 0;
+	private prewarmedId: string | null = null;
+	private readonly prewarmScheduler = createPrewarmScheduler(() => this.prewarmSelected(), 200);
+	private flash: { text: string; level: FlashLevel } | null = null;
+	private inputNotice: InputNotice | null = null;
+	private launch: LaunchState | null = null;
+	private lastLaunchPrefs: { cwd: string | null; model: string | null; thinkingLevel: ThinkingLevel | null } | null = null;
+	/** First frame after mount must clear the screen: pi-tui's first render
+	 *  "assumes clean screen" (fullRender(false)) and overlays never get
+	 *  clearOnShrink — crash output / dirty bottoms would persist (issue #88). */
+	private needsFullClear = true;
+	/** Content line count of the previous frame BEFORE spacer/padding fill
+	 *  (padding always fills the terminal height, so padded counts never
+	 *  shrink — shrink detection must run on pre-fill counts). */
+	private lastContentLineCount: number | null = null;
+	private frameContentLineCount = 0;
+	private readonly editor: CustomEditor;
+
+	constructor(
+		private readonly tui: TUI,
+		private readonly theme: ThemeLike,
+		private readonly keybindings: KeybindingsManager,
+		private readonly done: (result: DashboardResult) => void,
+		private readonly deps: DashboardDeps,
+	) {
+		stageTheme = theme;
+		this.editor = new CustomEditor(tui, editorTheme(theme), keybindings as never, { paddingX: 0 });
+		this.editor.onChange = (text) => {
+			this.input = this.editor.getExpandedText();
+			if (this.mode === "filter") {
+				this.filterQuery = text;
+				this.refresh();
+			}
+		};
+		this.editor.onSubmit = (text) => this.submitEditor(text);
+		this.editor.setAutocompleteProvider(this.commandMenu());
+		this.selectedId = deps.initialSelectedId ?? null;
+		// Issue #147: the post-delete reopen carries the Deleted notice here —
+		// the component is new each open, so an inline notice cannot travel.
+		if (deps.initialNotice) this.notice(deps.initialNotice, "info");
+		try {
+			this.lastLaunchPrefs = this.deps.service.getLaunchPrefs?.() ?? null;
+		} catch {
+			this.lastLaunchPrefs = null;
+		}
+		this.refresh();
+		this.prewarmSelected();
+	}
+
+	// ---- data ---------------------------------------------------------------
+
+	refresh(): void {
+		const previousSelected = this.selectedId;
+		const all = this.deps.service.rows();
+		this.rows = this.filterQuery ? filterRows(all, this.filterQuery) : all;
+		this.groupOf.clear();
+		this.neighborsOf.clear();
+		this.folderOf.clear();
+		const place = (group: string, folder: string, ids: string[]) => {
+			for (const id of ids) {
+				this.groupOf.set(id, group);
+				this.folderOf.set(id, folder);
+				this.neighborsOf.set(id, `${group}\0${folder}`);
+			}
+			return ids;
+		};
+		this.orderedIds = this.groupBy === "directory"
+			? groupRowsByDirectory(this.rows, Date.now()).flatMap((f) => place(f.key, f.key, f.rows.map((r) => r.id)))
+			: groupRowsByFolder(this.rows, Date.now()).flatMap((g) => g.folders.flatMap((f) => place(g.state, f.key, f.rows.map((r) => r.id))));
+		const visibleIds = new Set(this.orderedIds);
+		this.selectedIds = new Set([...this.selectedIds].filter((id) => visibleIds.has(id)));
+		if (this.orderedIds.length === 0) {
+			this.selectedId = null;
+			if (this.mode === "select") this.mode = "list";
+		} else if (!this.selectedId || !this.orderedIds.includes(this.selectedId)) {
+			this.selectedId = this.orderedIds[0];
+		}
+		if (this.selectedId && this.selectedId !== previousSelected) this.prewarmScheduler.schedule();
+	}
+
+	private selectedRow(): Row | null {
+		const id = this.mode === "peek" || this.mode === "reply" ? this.peekId : this.selectedId;
+		return id ? (this.rows.find((r) => r.meta.id === id) ?? this.deps.service.row(id)) : null;
+	}
+
+	private selectionCount(): number {
+		return this.selectedIds.size;
+	}
+
+	private unreadCount(): number {
+		return this.rows.filter((row) => {
+			const lastVisitedAt = row.state?.lastVisitedAt ?? null;
+			const lastAgentActivityAt = row.state?.lastAgentActivityAt ?? null;
+			return lastAgentActivityAt !== null && (lastVisitedAt === null || lastAgentActivityAt > lastVisitedAt);
+		}).length;
+	}
+
+	private isSelectedForBatch(viewId: string): boolean {
+		return this.selectedIds.has(viewId);
+	}
+
+	private startSelectionMode(): void {
+		if (!this.selectedId) return;
+		this.mode = "select";
+		this.selectedIds.clear();
+		this.notifyInputState("SELECT mode — 0 selected", "accent");
+	}
+
+	private openHelp(returnMode: ReturnableMode): void {
+		this.helpReturnMode = returnMode;
+		this.mode = "help";
+	}
+
+	private openPtyHelp(returnMode: ReturnableMode): void {
+		this.ptyHelpReturnMode = returnMode;
+		this.mode = "ptyHelp";
+	}
+
+	private exitSelectionMode(clear = true): void {
+		if (clear) this.selectedIds.clear();
+		this.mode = "list";
+		
+	}
+
+	private toggleSelectedCurrent(): void {
+		if (!this.selectedId) return;
+		if (this.selectedIds.has(this.selectedId)) this.selectedIds.delete(this.selectedId);
+		else this.selectedIds.add(this.selectedId);
+	}
+
+	private selectAllVisible(): void {
+		this.selectedIds = new Set(this.orderedIds);
+	}
+
+	private selectedBatchRows(): Row[] {
+		return [...this.selectedIds].map((id) => this.deps.service.row(id)).filter((row): row is Row => Boolean(row));
+	}
+
+	private moveSelection(delta: number): void {
+		if (this.orderedIds.length === 0) return;
+		const cur = this.selectedId ? this.orderedIds.indexOf(this.selectedId) : 0;
+		const len = this.orderedIds.length;
+		// Wrap around both ends: down past last -> first, up past first -> last.
+		const next = (((cur < 0 ? 0 : cur) + delta) % len + len) % len;
+		const nextId = this.orderedIds[next];
+		if (nextId === this.selectedId) return;
+		this.selectedId = nextId;
+		this.prewarmScheduler.schedule();
+	}
+
+	private prewarmSelected(): void {
+		// A debounced timer can outlive mode changes; never prewarm from modes
+		// where selectedId is not the navigation target.
+		if (this.mode !== "list" && this.mode !== "select") return;
+		const id = this.selectedId;
+		if (!id || id === this.prewarmedId) return;
+		const row = this.selectedRow();
+		if (!row) return;
+		// This session is open behind the board, and a second Pi must not write to its file.
+		if (this.deps.currentSessionFile && row.meta.sessionFile === this.deps.currentSessionFile) return;
+		// hostActive claims (starting/alive/stopping) already have a launch — mark
+		// them prewarmed without another service call; a pending claim is not a
+		// failure to retry on every debounce tick (issue #70 A14).
+		const decision = planPrewarm({ hostActive: row.hostActive, agentBusy: isAgentBusy(row) });
+		if (decision.action === "skip") return;
+		if (decision.action === "mark-only") {
+			this.prewarmedId = id;
+			return;
+		}
+		const res = this.deps.service.prewarmHost?.(id);
+		if (res?.ok) this.prewarmedId = id;
+	}
+
+	private notice(text: string, level: FlashLevel = "info"): void {
+		this.flash = { text, level };
+	}
+
+	private notifyInputState(text: string, color: InputNoticeColor): void {
+		this.inputNotice = { text, color, expiresAt: Date.now() + 3_000 };
+	}
+
+	private currentInputNotice(): InputNotice | null {
+		if (this.inputNotice && this.inputNotice.expiresAt <= Date.now()) this.inputNotice = null;
+		return this.inputNotice;
+	}
+
+	// ---- input --------------------------------------------------------------
+
+	handleInput(data: string): void {
+		if (this.keybindings?.matches?.(data, "app.suspend")) return suspendToShell(this.tui);
+		if (!matchesKey(data, Key.ctrl("c"))) this.quitPresses.reset();
+		else if (this.quitPresses.press()) return this.done({ action: "quit" });
+		switch (this.mode) {
+			case "list":
+				this.handleListKey(data);
+				break;
+			case "select":
+				this.handleSelectKey(data);
+				break;
+			case "dispatch":
+				this.handleDispatchKey(data);
+				break;
+			case "filter":
+				this.handleTextMode(data, () => this.toListMode(), () => this.clearFilter(), { live: true });
+				break;
+			case "rename":
+				this.handleTextMode(data, () => this.submitRename(), () => this.toListMode());
+				break;
+			case "reply":
+				this.handleTextMode(data, () => this.submitReply(), () => (this.mode = "peek"));
+				break;
+			case "peek":
+				this.handlePeekKey(data);
+				break;
+			case "session":
+				this.handleSessionKey(data);
+				break;
+			case "evidence":
+				this.handleEvidenceKey(data);
+				break;
+			case "launch":
+				this.handleLaunchKey(data);
+				break;
+			case "confirm":
+				this.handleConfirmKey(data);
+				break;
+			case "help":
+				this.mode = this.helpReturnMode;
+				break;
+			case "ptyHelp":
+				this.mode = this.ptyHelpReturnMode;
+				break;
+		}
+		requestDashboardRender(this.tui);
+	}
+
+	private handleListKey(data: string): void {
+		if (!matchesKey(data, Key.ctrl("x"))) this.deleteArm = null;
+		if (this.handleRowKey(data)) return;
+		if (matchesKey(data, Key.right) || matchesKey(data, Key.left) || matchesKey(data, Key.enter)) return this.attachSelected();
+		if (matchesKey(data, Key.space)) return this.openPeek();
+		if (matchesKey(data, Key.ctrl("f"))) return this.startFilter();
+		if (data === "?") return this.openHelp("list");
+		if (data === "!") return this.openPtyHelp("list");
+		if (matchesKey(data, Key.ctrl("r"))) return this.startRename();
+		if (matchesKey(data, Key.ctrl("t"))) return this.togglePin();
+		if (matchesKey(data, Key.ctrl("x"))) return this.handleDeleteKey();
+		if (matchesKey(data, Key.ctrl("s"))) return this.toggleGrouping();
+		if (matchesKey(data, Key.ctrl("g"))) return void this.openExternalEditor();
+		if (matchesKey(data, Key.shift("up"))) return this.moveRow(-1);
+		if (matchesKey(data, Key.shift("down"))) return this.moveRow(1);
+		if (matchesKey(data, Key.ctrl("a"))) return this.startSelectionMode();
+		if (matchesKey(data, Key.ctrl("o"))) return this.openSessionView();
+		if (matchesKey(data, Key.ctrl("e"))) return this.openEvidenceView();
+		if (matchesKey(data, Key.ctrl("d"))) return this.confirmDone();
+		if (matchesKey(data, Key.ctrl("b"))) return this.toggleHold();
+		if (matchesKey(data, Key.ctrl("k"))) return this.confirmDeleteState();
+		for (let n = 1; n <= 9; n++) {
+			if (matchesKey(data, Key.alt(String(n) as never))) return this.attachInFolder(n - 1);
+		}
+		if (matchesKey(data, Key.escape)) return this.done({ action: "exit" });
+		if (matchesKey(data, Key.ctrl("c"))) return this.notifyInputState("Press ctrl+c again to quit Pi", "accent");
+		if (isPrintable(data) || isBracketedPaste(data)) {
+			this.mode = "dispatch";
+			this.handleEditorInput(data);
+		}
+	}
+
+	/** The keys that move between rows, in the list and while typing a task. Says if it was one. */
+	private handleRowKey(data: string): boolean {
+		const rows = this.orderedIds.length;
+		const page = Math.max(1, (this.tui.terminal?.rows ?? 24) - 8);
+		const at = this.selectedId ? Math.max(0, this.orderedIds.indexOf(this.selectedId)) : 0;
+		if (matchesKey(data, Key.up)) this.moveSelection(-1);
+		else if (matchesKey(data, Key.down)) this.moveSelection(1);
+		else if (matchesKey(data, Key.pageUp)) this.selectIndex(Math.max(0, at - page));
+		else if (matchesKey(data, Key.pageDown)) this.selectIndex(Math.min(rows - 1, at + page));
+		else if (matchesKey(data, Key.home)) this.selectIndex(0);
+		else if (matchesKey(data, Key.end)) this.selectIndex(rows - 1);
+		else if (matchesKey(data, Key.alt("up"))) this.jumpGroup(-1);
+		else if (matchesKey(data, Key.alt("down"))) this.jumpGroup(1);
+		else return false;
+		return true;
+	}
+
+	private selectIndex(index: number): void {
+		const id = this.orderedIds[index];
+		if (!id || id === this.selectedId) return;
+		this.selectedId = id;
+		this.prewarmScheduler.schedule();
+	}
+
+	private toggleGrouping(): void {
+		this.groupBy = this.groupBy === "state" ? "directory" : "state";
+		try {
+			writeConfig({ groupBy: this.groupBy });
+		} catch {
+			/* best effort: it still applies until the board closes */
+		}
+		this.refresh();
+	}
+
+	/** Swaps it with the row next to it, within the same group. */
+	private moveRow(direction: 1 | -1): void {
+		const id = this.selectedId;
+		if (!id) return;
+		const neighbor = this.orderedIds[this.orderedIds.indexOf(id) + direction];
+		if (!neighbor || this.neighborsOf.get(neighbor) !== this.neighborsOf.get(id)) return;
+		const group = this.orderedIds.filter((other) => this.neighborsOf.get(other) === this.neighborsOf.get(id));
+		const at = group.indexOf(id);
+		[group[at], group[at + direction]] = [group[at + direction]!, group[at]!];
+		this.deps.service.setRowOrder?.(group);
+		this.refresh();
+	}
+
+	private async openExternalEditor(): Promise<void> {
+		const terminal = this.tui as unknown as { stop?: () => void; start?: () => void };
+		terminal.stop?.();
+		let edited: string | undefined;
+		try {
+			edited = await editExternally(this.input);
+		} finally {
+			terminal.start?.();
+			this.tui.requestRender(true);
+		}
+		if (edited === undefined) {
+			this.notifyInputState("Set $VISUAL or $EDITOR to write the task in your editor", "warning");
+			return;
+		}
+		this.setInput(edited);
+		this.mode = edited ? "dispatch" : "list";
+	}
+
+	/** To the first row of the next group, or of this one when going back. */
+	private jumpGroup(direction: 1 | -1): void {
+		const stateAt = (index: number) => this.groupOf.get(this.orderedIds[index]);
+		let index = this.selectedId ? this.orderedIds.indexOf(this.selectedId) : 0;
+		const start = stateAt(index);
+		if (direction === 1) {
+			while (index < this.orderedIds.length && stateAt(index) === start) index++;
+			if (index < this.orderedIds.length) this.selectIndex(index);
+			return;
+		}
+		if (index > 0 && stateAt(index - 1) !== start) index--;
+		const group = stateAt(index);
+		while (index > 0 && stateAt(index - 1) === group) index--;
+		this.selectIndex(index);
+	}
+
+	/** Counts the rows in the selected session's folder. */
+	private attachInFolder(index: number): void {
+		const folder = this.folderOf.get(this.selectedId ?? "");
+		const id = this.orderedIds.filter((other) => this.folderOf.get(other) === folder)[index];
+		if (!id) return;
+		this.selectIndex(this.orderedIds.indexOf(id));
+		this.attachSelected();
+	}
+
+	private handleDispatchKey(data: string): void {
+		// The menu has its own use for Enter, Tab, Esc and the arrows.
+		if (this.editor.isShowingAutocomplete() && !matchesKey(data, Key.ctrl("c"))) {
+			this.handleEditorInput(data);
+			if (!this.input && this.mode === "dispatch") this.mode = "list";
+			return;
+		}
+		if (matchesKey(data, Key.ctrl("n"))) return this.openLaunchDialog();
+		if (matchesKey(data, Key.ctrl("g"))) return void this.openExternalEditor();
+		if (matchesKey(data, Key.ctrl("enter"))) return this.startNow(true);
+		if (matchesKey(data, Key.enter)) return this.startNow();
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+			this.setInput("");
+			this.mode = "list";
+			return;
+		}
+		// With several lines these move the cursor.
+		if (!this.input.includes("\n") && this.handleRowKey(data)) return;
+		this.handleEditorInput(data);
+		if (!this.input) this.mode = "list";
+	}
+
+	private handleSelectKey(data: string): void {
+		if (matchesKey(data, Key.up) || data === "k") return void this.moveSelection(-1);
+		if (matchesKey(data, Key.down) || data === "j") return void this.moveSelection(1);
+		if (matchesKey(data, Key.space)) {
+			this.toggleSelectedCurrent();
+			return;
+		}
+		if (data === "a") {
+			this.selectAllVisible();
+			this.notifyInputState(`SELECT mode — ${this.selectionCount()} selected`, "accent");
+			return;
+		}
+		if (data === "d") return this.confirmDoneSelection();
+		if (matchesKey(data, Key.ctrl("x"))) return this.confirmDeleteSelection();
+		if (data === "u") {
+			this.selectedIds.clear();
+			this.notifyInputState("SELECT mode — selection cleared", "accent");
+			return;
+		}
+		if (data === "m" || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+			this.exitSelectionMode(true);
+			return;
+		}
+		if (data === "?") return this.openHelp("select");
+		if (data === "!") return this.openPtyHelp("select");
+	}
+
+	private handlePeekKey(data: string): void {
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.space)) return void (this.mode = "list");
+		if (matchesKey(data, Key.right) || matchesKey(data, Key.left)) return this.attachPeek();
+		if (matchesKey(data, Key.up)) return void this.peekStep(-1);
+		if (matchesKey(data, Key.down)) return void this.peekStep(1);
+		if (matchesKey(data, Key.enter)) return this.startReply();
+		if (matchesKey(data, Key.ctrl("o"))) return this.openSessionView();
+		if (matchesKey(data, Key.ctrl("e"))) return this.openEvidenceView();
+		if (matchesKey(data, Key.ctrl("d"))) return this.confirmDone();
+		if (matchesKey(data, Key.ctrl("b"))) return this.toggleHold();
+		if (data === "!") return this.openPtyHelp("peek");
+		if (isPrintable(data) || isBracketedPaste(data)) {
+			this.startReply();
+			this.handleEditorInput(data);
+		}
+	}
+
+	private handleSessionKey(data: string): void {
+		if (data === "!") return this.openPtyHelp("session");
+		const termRows = this.tui.terminal?.rows ?? 24;
+		const page = Math.max(1, termRows - 8);
+		if (matchesKey(data, Key.left) || matchesKey(data, Key.escape) || data === "<") {
+			const row = this.selectedRow();
+			if (row) void this.deps.service.markVisited?.(row.meta.id)?.catch(() => {});
+			this.mode = "list";
+			return;
+		}
+		if (matchesKey(data, Key.up) || data === "k") {
+			this.sessionScrollTop = Math.max(0, this.sessionScrollTop - 1);
+			return;
+		}
+		if (matchesKey(data, Key.down) || data === "j") {
+			this.sessionScrollTop += 1;
+			return;
+		}
+		if (matchesKey(data, Key.pageUp)) {
+			this.sessionScrollTop = Math.max(0, this.sessionScrollTop - page);
+			return;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			this.sessionScrollTop += page;
+			return;
+		}
+		if (matchesKey(data, Key.space)) return this.openPeek();
+		if (data === "e") return this.openEvidenceView();
+		if (data === "r") {
+			this.startReply();
+			return;
+		}
+		if (data === "d") return this.confirmDone();
+		if (data === "h") return this.toggleHold();
+		if (data === "a" || matchesKey(data, Key.enter)) return this.attachSelected();
+	}
+
+	private handleEvidenceKey(data: string): void {
+		const termRows = this.tui.terminal?.rows ?? 24;
+		const page = Math.max(1, termRows - 8);
+		if (matchesKey(data, Key.left) || matchesKey(data, Key.escape) || data === "<") {
+			this.mode = "list";
+			return;
+		}
+		if (matchesKey(data, Key.up) || data === "k") {
+			this.evidenceScrollTop = Math.max(0, this.evidenceScrollTop - 1);
+			return;
+		}
+		if (matchesKey(data, Key.down) || data === "j") {
+			this.evidenceScrollTop += 1;
+			return;
+		}
+		if (matchesKey(data, Key.pageUp)) {
+			this.evidenceScrollTop = Math.max(0, this.evidenceScrollTop - page);
+			return;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			this.evidenceScrollTop += page;
+			return;
+		}
+		if (data === "r") return this.startReply();
+		if (data === "v") return this.openSessionView();
+		if (data === "a" || matchesKey(data, Key.enter) || matchesKey(data, Key.right) || data === "l") return this.attachSelected();
+		if (data === "x") return this.confirmClearDiagnostics();
+	}
+
+	private handleConfirmKey(data: string): void {
+		if (data === "y" || data === "Y" || matchesKey(data, Key.enter)) {
+			const action = this.pending?.onYes;
+			const returnMode = this.pending?.returnMode ?? "list";
+			this.pending = null;
+			this.mode = returnMode;
+			try {
+				action?.();
+			} catch (err) {
+				this.notice(err instanceof Error ? err.message : String(err), "error");
+			}
+			return;
+		}
+		// any other key cancels
+		const returnMode = this.pending?.returnMode ?? "list";
+		this.pending = null;
+		this.mode = returnMode;
+	}
+
+	private handleLaunchKey(data: string): void {
+		const launch = this.launch;
+		if (!launch) {
+			this.mode = "list";
+			return;
+		}
+		if (launch.picker) {
+			this.handleLaunchPickerKey(data, launch);
+			return;
+		}
+		if (matchesKey(data, Key.up)) {
+			launch.fieldIndex = launch.fieldIndex === 0 ? 4 : launch.fieldIndex - 1;
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			launch.fieldIndex = launch.fieldIndex === 4 ? 0 : launch.fieldIndex + 1;
+			return;
+		}
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+			this.closeLaunchDialog();
+			return;
+		}
+		if (matchesKey(data, Key.enter)) {
+			this.activateLaunchField();
+			return;
+		}
+		if (launch.fieldIndex === 1 || launch.fieldIndex === 2) {
+			const seeded = this.applyLaunchQueryInput("", data);
+			if (seeded !== null) {
+				this.openLaunchPicker(launch.fieldIndex === 1 ? "cwd" : "model", seeded);
+			}
+		}
+	}
+
+	private handleLaunchPickerKey(data: string, launch: LaunchState): void {
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+			launch.picker = null;
+			return;
+		}
+		if (matchesKey(data, Key.up)) {
+			if (launch.picker === "cwd") launch.cwdSuggestionIndex = Math.max(0, launch.cwdSuggestionIndex - 1);
+			else if (launch.picker === "model") launch.modelIndex = Math.max(0, launch.modelIndex - 1);
+			else launch.thinkingIndex = Math.max(0, launch.thinkingIndex - 1);
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			if (launch.picker === "cwd") launch.cwdSuggestionIndex = Math.min(Math.max(0, launch.cwdSuggestions.length - 1), launch.cwdSuggestionIndex + 1);
+			else if (launch.picker === "model") launch.modelIndex = Math.min(Math.max(0, launch.modelFiltered.length - 1), launch.modelIndex + 1);
+			else launch.thinkingIndex = Math.min(Math.max(0, launch.thinkingOptions.length - 1), launch.thinkingIndex + 1);
+			return;
+		}
+		if (matchesKey(data, Key.enter)) {
+			if (launch.picker === "cwd") {
+				const selected = launch.cwdSuggestions[launch.cwdSuggestionIndex] ?? resolveDirectoryValue(launch.cwdQuery, launch.cwd);
+				if (!selected) {
+					this.notice("Select an existing folder", "warn");
+					return;
+				}
+				this.selectLaunchCwd(selected);
+				if (this.launch) this.launch.picker = null;
+				return;
+			}
+			if (launch.picker === "model") {
+				const selected = launch.modelFiltered[launch.modelIndex];
+				if (!selected) {
+					this.notice("Select a model", "warn");
+					return;
+				}
+				this.selectLaunchModel(selected);
+				launch.picker = null;
+				return;
+			}
+			const selectedThinking = launch.thinkingOptions[launch.thinkingIndex];
+			if (selectedThinking) launch.thinking = selectedThinking;
+			launch.picker = null;
+			return;
+		}
+		if (launch.picker === "cwd" && matchesKey(data, Key.tab)) {
+			if (launch.cwdSuggestions.length > 0) {
+				if (launch.cwdPickerMode === "browse") {
+					const completion = browseTabCompletion(launch.cwdQuery, launch.cwdSuggestions, launch.cwdSuggestionIndex);
+					if (completion) {
+						launch.cwdQuery = completion.query;
+						const state = nextCwdPickerState(launch.cwdQuery, launch.cwdRanked, launch.cwd);
+						launch.cwdPickerMode = state.mode;
+						launch.cwdSuggestions = state.suggestions;
+						launch.cwdSuggestionIndex = Math.max(0, state.suggestions.indexOf(completion.completed));
+					}
+				} else {
+					const completed = launch.cwdSuggestions[launch.cwdSuggestionIndex] ?? launch.cwdSuggestions[0];
+					launch.cwdQuery = completed;
+					const state = nextCwdPickerState(launch.cwdQuery, launch.cwdRanked, launch.cwd);
+					launch.cwdPickerMode = state.mode;
+					launch.cwdSuggestions = state.suggestions;
+					launch.cwdSuggestionIndex = Math.max(0, state.suggestions.indexOf(completed));
+				}
+			}
+			return;
+		}
+		if (launch.picker === "cwd") {
+			const next = this.applyLaunchQueryInput(launch.cwdQuery, data);
+			if (next !== null) {
+				launch.cwdQuery = next;
+				const state = nextCwdPickerState(next, launch.cwdRanked, launch.cwd);
+				launch.cwdPickerMode = state.mode;
+				launch.cwdSuggestions = state.suggestions;
+				launch.cwdSuggestionIndex = 0;
+			}
+			return;
+		}
+		if (launch.picker === "model") {
+			const next = this.applyLaunchQueryInput(launch.modelQuery, data);
+			if (next !== null) {
+				launch.modelQuery = next;
+				launch.modelFiltered = filterLaunchChoices(launch.choices, next);
+				launch.modelIndex = 0;
+			}
+		}
+	}
+
+	private applyLaunchQueryInput(current: string, data: string): string | null {
+		if (matchesKey(data, Key.backspace)) return current.slice(0, -1);
+		if (isBracketedPaste(data)) return `${current}${stripBracketedPaste(data)}`;
+		if (isPrintable(data)) return `${current}${data}`;
+		return null;
+	}
+
+	private activateLaunchField(): void {
+		if (!this.launch) return;
+		if (this.launch.fieldIndex === 0) {
+			this.confirmLaunch();
+			return;
+		}
+		if (this.launch.fieldIndex === 1) return this.openLaunchPicker("cwd");
+		if (this.launch.fieldIndex === 2) return this.openLaunchPicker("model", "");
+		if (this.launch.fieldIndex === 3) {
+			if (this.launch.thinkingOptions.length <= 1) return;
+			this.openLaunchPicker("thinking");
+			return;
+		}
+		if (this.launch.fieldIndex === 4) {
+			this.launch.action = this.launch.action === "attach" ? "background" : "attach";
+			return;
+		}
+	}
+
+	/** The selected session's folder, or this one with nothing selected or if that folder is gone. */
+	private newTaskCwd(): string {
+		return resolveDirectoryValue(this.selectedRow()?.meta.cwd ?? "", this.deps.defaultCwd) ?? this.deps.defaultCwd;
+	}
+
+	/** In the folder on the input's title, with this session's model. Ctrl+N is there for anything else. */
+	private startNow(attach = false): void {
+		const text = this.input.trim();
+		if (runsInPi(text, this.deps.commands ?? [])) {
+			this.setInput("");
+			return this.done({ action: "command", text });
+		}
+		const cwd = this.newTaskCwd();
+		const { model, thinking } = this.buildLaunchState(cwd, this.deps.currentModel, this.deps.currentThinkingLevel);
+		this.submitDispatch({ cwd, model: model ? canonicalModelRef(model) : null, thinkingLevel: thinking, attach });
+	}
+
+	private openLaunchDialog(): void {
+		const prompt = this.input.trim();
+		if (!prompt) return this.toListMode();
+		const defaults = this.launchDefaults();
+		try {
+			ensureCwdStatsSeeded(this.deps.root);
+		} catch {
+			/* best effort: favorites degrade to browse mode */
+		}
+		this.launch = this.buildLaunchState(defaults.cwd, defaults.model, defaults.thinking);
+		this.mode = "launch";
+		this.inputNotice = null;
+	}
+
+	private launchDefaults(): { cwd: string; model: LaunchModel | null; thinking: ThinkingLevel } {
+		const saved = this.lastLaunchPrefs;
+		const cwd = this.selectedRow() ? this.newTaskCwd() : (resolveDirectoryValue(saved?.cwd ?? "", this.deps.defaultCwd) ?? this.deps.defaultCwd);
+		const model = saved?.model ? findLaunchModelByRef(this.deps.availableModels, saved.model) ?? this.deps.currentModel : this.deps.currentModel;
+		const thinking = saved?.thinkingLevel ?? this.deps.currentThinkingLevel;
+		return { cwd, model, thinking };
+	}
+
+	private closeLaunchDialog(): void {
+		this.launch = null;
+		this.mode = "list";
+	}
+
+	private confirmLaunch(): void {
+		if (!this.launch) return;
+		this.submitDispatch({
+			cwd: this.launch.cwd,
+			model: this.launch.model ? canonicalModelRef(this.launch.model) : null,
+			thinkingLevel: this.launch.thinking,
+			attach: this.launch.action === "attach",
+		});
+	}
+
+	private buildLaunchState(cwd: string, preferredModel: LaunchModel | null, preferredThinking: ThinkingLevel): LaunchState {
+		const context = resolveLaunchContext(cwd, this.deps.availableModels, preferredModel, preferredThinking) as {
+			choices: LaunchChoice[];
+			selectedModel: LaunchModel | null;
+			thinking: ThinkingLevel;
+			thinkingOptions: ThinkingLevel[];
+			scopeSource: "scoped" | "all";
+		};
+		const modelFiltered = filterLaunchChoices(context.choices, "");
+		const modelIndex = Math.max(0, modelFiltered.findIndex((choice) => sameLaunchModel(choice.model, context.selectedModel)));
+		const thinkingOptions = supportedThinkingLevels(context.selectedModel) as ThinkingLevel[];
+		const thinking = clampThinkingLevel(context.selectedModel, context.thinking, context.thinking);
+		const thinkingIndex = Math.max(0, thinkingOptions.indexOf(thinking));
+		return {
+			fieldIndex: 0,
+			picker: null,
+			action: "background",
+			cwd,
+			cwdQuery: "",
+			cwdSuggestions: [],
+			cwdSuggestionIndex: 0,
+			cwdRanked: [],
+			cwdPickerMode: "browse",
+			choices: context.choices,
+			scopeSource: context.scopeSource,
+			model: context.selectedModel,
+			modelQuery: "",
+			modelFiltered,
+			modelIndex,
+			thinking,
+			thinkingOptions,
+			thinkingIndex,
+		};
+	}
+
+	private openLaunchPicker(picker: Exclude<LaunchPicker, null>, seed?: string): void {
+		const launch = this.launch;
+		if (!launch) return;
+		launch.picker = picker;
+		if (picker === "cwd") {
+			try {
+				ensureCwdStatsSeeded(this.deps.root);
+				launch.cwdRanked = existingCwdCandidates(rankedCwdCandidates(this.deps.root));
+			} catch {
+				launch.cwdRanked = [];
+			}
+			launch.cwdQuery = seed ?? "";
+			const state = nextCwdPickerState(launch.cwdQuery, launch.cwdRanked, launch.cwd);
+			launch.cwdPickerMode = state.mode;
+			launch.cwdSuggestions = state.suggestions;
+			launch.cwdSuggestionIndex = 0;
+			return;
+		}
+		if (picker === "model") {
+			launch.modelQuery = seed ?? "";
+			launch.modelFiltered = filterLaunchChoices(launch.choices, launch.modelQuery);
+			const selected = launch.modelFiltered.findIndex((choice) => sameLaunchModel(choice.model, launch.model));
+			launch.modelIndex = selected >= 0 ? selected : 0;
+			return;
+		}
+		launch.thinkingOptions = supportedThinkingLevels(launch.model) as ThinkingLevel[];
+		launch.thinkingIndex = Math.max(0, launch.thinkingOptions.indexOf(launch.thinking));
+	}
+
+	private selectLaunchCwd(cwd: string): void {
+		if (!this.launch) return;
+		const next = this.buildLaunchState(cwd, this.launch.model, this.launch.thinking);
+		next.action = this.launch.action;
+		// Back on the top row, where Enter starts the session. On this one it opens the picker again.
+		next.fieldIndex = 0;
+		next.cwdQuery = cwd;
+		next.cwdSuggestions = listDirectorySuggestions(cwd, cwd);
+		this.launch = next;
+	}
+
+	private selectLaunchModel(choice: LaunchChoice): void {
+		if (!this.launch) return;
+		this.launch.model = choice.model;
+		this.launch.modelQuery = "";
+		this.launch.modelFiltered = filterLaunchChoices(this.launch.choices, "");
+		this.launch.modelIndex = Math.max(0, this.launch.modelFiltered.findIndex((entry) => sameLaunchModel(entry.model, choice.model)));
+		this.launch.thinkingOptions = supportedThinkingLevels(choice.model) as ThinkingLevel[];
+		this.launch.thinking = clampThinkingLevel(choice.model, choice.thinkingLevel ?? this.launch.thinking, this.launch.thinking);
+		this.launch.thinkingIndex = Math.max(0, this.launch.thinkingOptions.indexOf(this.launch.thinking));
+	}
+
+	/** Shared text-editing for input modes. */
+	private handleTextMode(data: string, onSubmit: () => void, onCancel: () => void, opts: { live?: boolean } = {}): void {
+		void opts.live; // live filtering is driven by editor.onChange.
+		if (matchesKey(data, Key.enter)) return onSubmit();
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) return onCancel();
+		this.handleEditorInput(data);
+	}
+
+	/** Only for a task that starts with `/`: the same editor takes filters, names and replies. */
+	private commandMenu(): CombinedAutocompleteProvider {
+		const menu = new CombinedAutocompleteProvider(this.deps.commands ?? [], this.deps.defaultCwd);
+		const suggest = menu.getSuggestions.bind(menu);
+		menu.getSuggestions = async (lines, line, col, options) => {
+			if (this.mode !== "dispatch" || line !== 0 || !lines[0]?.startsWith("/")) return null;
+			return suggest(lines, line, col, options);
+		};
+		return menu;
+	}
+
+	private handleEditorInput(data: string): void {
+		this.editor.handleInput(data);
+		this.input = this.editor.getExpandedText();
+	}
+
+	private setInput(text: string): void {
+		this.input = text;
+		this.editor.setText(text);
+	}
+
+	private submitEditor(textOverride?: string): void {
+		if (textOverride !== undefined) this.input = textOverride;
+		switch (this.mode) {
+			case "filter":
+				return this.toListMode();
+			case "rename":
+				return this.submitRename();
+			case "reply":
+				void this.submitReply();
+				return;
+			case "list":
+			case "dispatch":
+				return this.input.trim() ? this.startNow() : this.attachSelected();
+		}
+	}
+
+	// ---- actions ------------------------------------------------------------
+
+	private toListMode(): void {
+		this.mode = "list";
+		this.setInput("");
+	}
+
+	private startFilter(): void {
+		this.setInput(this.filterQuery);
+		this.mode = "filter";
+		this.notifyInputState("FILTER mode — type query; Esc clears", "warning");
+	}
+
+	private clearFilter(): void {
+		this.setInput("");
+		this.filterQuery = "";
+		this.refresh();
+		this.mode = "list";
+		this.notifyInputState("Filter cleared", "muted");
+	}
+
+	private submitDispatch(launchOpts?: { cwd?: string; model?: string | null; thinkingLevel?: ThinkingLevel | null; attach?: boolean }): void {
+		const text = this.input.trim();
+		if (!text) return this.toListMode();
+		const launchCwd = launchOpts?.cwd ?? this.deps.defaultCwd;
+		const launchModel = launchOpts?.model ?? (this.launch?.model ? canonicalModelRef(this.launch.model) : null);
+		const launchThinking = launchOpts?.thinkingLevel ?? this.launch?.thinking ?? this.deps.currentThinkingLevel;
+		// Clear synchronously, BEFORE the async dispatch: closes the double-submit
+		// window — a second Enter during the coordinator round-trip (mark_queued
+		// lands before the runner spawns, issue #91) must not re-dispatch.
+		this.setInput("");
+		this.launch = null;
+		this.mode = "list";
+		this.inputNotice = null;
+		this.refresh();
+		// dispatch is async (mark_queued routes through the view-state coordinator
+		// before the runner spawns, issue #91); notices/attach land when it settles.
+		void Promise.resolve(
+			this.deps.service.dispatch(text, {
+				cwd: launchCwd,
+				model: launchModel,
+				thinkingLevel: launchThinking,
+			}),
+		).then((res) => {
+			if (!res.ok) {
+				this.notice(res.error ?? "Dispatch failed", "error");
+				this.refresh();
+				return;
+			}
+			this.lastLaunchPrefs = { ...this.deps.service.getLaunchPrefs?.(), cwd: launchCwd, model: launchModel, thinkingLevel: launchThinking };
+			try {
+				recordCwdLaunch(this.deps.root, launchCwd);
+			} catch {
+				/* best effort: stats must never block dispatch */
+			}
+			try {
+				this.deps.service.saveLaunchPrefs?.(this.lastLaunchPrefs);
+			} catch {
+				/* best effort */
+			}
+			this.selectedId = res.viewId ?? this.selectedId;
+			if (launchOpts?.attach && res.hostMode === "pty" && res.viewId) {
+				this.done({ action: "attach", viewId: res.viewId, stopFirst: false });
+				return;
+			}
+			if (res.hostMode === "json-runner") {
+				this.notice(launchOpts?.attach ? `Start & attach needs PTY; launched in background: ${res.fallbackReason ?? "PTY unavailable"}` : `Dispatched with non-live fallback: ${res.fallbackReason ?? "PTY unavailable"}`, "warn");
+			} else {
+				this.notice(`Dispatched: ${truncate(text, 40)}`, "info");
+			}
+			this.refresh();
+		}).catch(() => {
+			// dispatch() is not expected to reject (its failures surface as
+			// {ok:false}); this guards fs-class throws from escaping as unhandled
+			// rejections (issue #91 hygiene).
+			this.notice("Dispatch failed", "error");
+			this.refresh();
+		});
+	}
+
+	private async submitReply(): Promise<void> {
+		const text = this.input.trim();
+		const row = this.selectedRow();
+		if (!text || !row) {
+			this.mode = "peek";
+			this.setInput("");
+			return;
+		}
+		// reply() is async since issue #70 A13 (ack-gated host delivery); the
+		// result (sent vs queued) only shapes the notice.
+		const res = await this.deps.service.reply(row.meta.id, text);
+		const notice = replyNotice(res);
+		this.notice(notice.text, notice.level);
+		this.setInput("");
+		this.mode = "peek";
+		this.inputNotice = null;
+		this.refresh();
+	}
+
+	private submitRename(): void {
+		const name = this.input.trim();
+		if (name && this.selectedId) {
+			const res = this.deps.service.rename(this.selectedId, name);
+			if (!res.ok) this.notice(res.error ?? "Rename failed", "error");
+		}
+		this.toListMode();
+		this.refresh();
+	}
+
+	private startRename(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		this.setInput(row.meta.name);
+		this.mode = "rename";
+		this.notifyInputState("RENAME mode — Enter saves; Esc cancels", "accent");
+	}
+
+	private togglePin(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		this.deps.service.setPinned(row.meta.id, !row.meta.pinned);
+		this.refresh();
+	}
+
+	private stopSelected(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		if (!row.alive && !row.hostAlive) return this.notice("No active run or host to stop", "warn");
+		const res = this.deps.service.stop(row.meta.id);
+		this.notice(res.ok ? "Stopping…" : (res.error ?? "Stop failed"), res.ok ? "info" : "warn");
+	}
+
+	private confirmDone(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		if (isAgentBusy(row)) return this.notice("Wait for the active run to finish before marking done", "warn");
+		if (row.state?.semanticState === "completed") return this.notice("Already marked done", "info");
+		this.pending = {
+			prompt: `Mark "${row.meta.name}" as done? (y/N)`,
+			onYes: () => {
+				void this.markCompleted(row).then((res) => {
+					if (!res.ok) this.notice(res.error ?? "Mark done failed", "error");
+					else this.notice("Marked done", "info");
+					this.refresh();
+				});
+			},
+		};
+		this.mode = "confirm";
+	}
+
+	// On-hold toggle (issue #145): manual-only state, so the command travels as
+	// dashboard-user; the coordinator's source guard rejects any other writer.
+	private toggleHold(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		const holding = row.state?.semanticState === "holding";
+		if (!holding && isAgentBusy(row)) return this.notice("Wait for the active run to finish before placing on hold", "warn");
+		const run = holding ? this.deps.service.clearHoldView(row.meta.id) : this.deps.service.holdView(row.meta.id);
+		void Promise.resolve(run).then((res) => {
+			if (!res.ok) this.notice(res.error ?? (holding ? "Resume failed" : "Hold failed"), "error");
+			else this.notice(holding ? "Resumed — needs instructions" : "On hold", "info");
+			this.refresh();
+		});
+	}
+
+	private confirmDoneSelection(): void {
+		const rows = this.selectedBatchRows();
+		if (rows.length === 0) return this.notice("Select one or more sessions first", "warn");
+		const doneIds = rows.filter((row) => !isAgentBusy(row) && row.state?.semanticState !== "completed").map((row) => row.meta.id);
+		const skipped = rows.length - doneIds.length;
+		if (doneIds.length === 0) return this.notice("No inactive sessions in the selection can be moved to Done", "warn");
+		this.pending = {
+			prompt: `Mark ${doneIds.length} selected session${doneIds.length === 1 ? "" : "s"} as done?${skipped ? ` ${skipped} will be skipped.` : ""} (y/N)`,
+			returnMode: "select",
+			onYes: () => {
+				void Promise.resolve(this.deps.service.markCompletedMany?.(doneIds) ?? { ok: true, completed: 0, skipped: doneIds.length, completedIds: [] }).then((res) => {
+					if (!res.ok) this.notice("Mark done failed", "error");
+					else {
+						if (res.completedIds?.length) this.selectedId = res.completedIds[0];
+						this.notice(`Moved ${res.completed} to Done${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
+					}
+					this.refresh();
+				});
+			},
+		};
+		this.mode = "confirm";
+	}
+
+	// Routes through the View State Coordinator (issue #91): the service's
+	// markCompleted submits a fenced state command. No compat fallback for stale
+	// pre-coordinator service objects — the window is transient and self-heals
+	// on the next dashboard reload.
+	private markCompleted(row: Row): Promise<{ ok: boolean; error?: string }> {
+		return this.deps.service.markCompleted(row.meta.id);
+	}
+
+	private handleDeleteKey(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		const now = Date.now();
+		if (this.deleteArm !== null && this.deleteArm.id === row.meta.id && now - this.deleteArm.at <= DELETE_DOUBLE_PRESS_MS) {
+			this.deleteArm = null;
+			// archive is async (routes through the view-state coordinator, issue #91);
+			// the notice + refresh land when the command settles.
+			void Promise.resolve(this.deps.service.archive(row.meta.id)).then((res) => {
+				if (!res.ok) this.notice(res.error ?? "Delete failed", "error");
+				else this.notice(`Deleted "${row.meta.name}"`, "info");
+				this.refresh();
+			});
+			return;
+		}
+		this.deleteArm = { id: row.meta.id, at: now };
+		if (row.alive || row.hostAlive) {
+			const res = this.deps.service.stop(row.meta.id);
+			this.notifyInputState(res.ok ? `Stopping "${row.meta.name}". Press ctrl+x again to delete it` : (res.error ?? "Stop failed"), "warning");
+			return;
+		}
+		this.notifyInputState(`Press ctrl+x again quickly to delete "${row.meta.name}"${isAgentBusy(row) ? " (stops the active run)" : ""}`, "warning");
+	}
+
+	private confirmDeleteState(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		const state = rowState(row);
+		const matching = this.deps.service.rows().filter((r) => rowState(r) === state);
+		const deletable = matching.filter((r) => !isAgentBusy(r)).length;
+		const skipped = matching.length - deletable;
+		if (deletable === 0) return this.notice(`No inactive ${GROUP_LABELS[state].toLowerCase()} sessions to delete`, "warn");
+		this.pending = {
+			prompt: `Delete ${deletable} ${GROUP_LABELS[state].toLowerCase()} session${deletable === 1 ? "" : "s"}?${skipped ? ` ${skipped} live skipped.` : ""} (y/N)`,
+			onYes: () => {
+				const res = this.deps.service.archiveByState(state);
+				if (!res.ok) this.notice(res.error ?? "Delete failed", "error");
+				else this.notice(`Deleted ${res.archived}${res.skipped ? ` · skipped ${res.skipped} live` : ""}`, "info");
+				this.refresh();
+			},
+		};
+		this.mode = "confirm";
+	}
+
+	private confirmDeleteSelection(): void {
+		const rows = this.selectedBatchRows();
+		if (rows.length === 0) return this.notice("Select one or more Done sessions first", "warn");
+		if (rows.some((row) => rowState(row) !== "completed")) return this.notice("Only Done sessions can be batch deleted", "warn");
+		this.pending = {
+			prompt: `Delete ${rows.length} done session${rows.length === 1 ? "" : "s"}? Session files are preserved. (y/N)`,
+			returnMode: "select",
+			onYes: () => {
+				// archiveMany is async (coordinator-routed, issue #91).
+				void Promise.resolve(this.deps.service.archiveMany?.(rows.map((row) => row.meta.id)) ?? { ok: true, archived: 0, skipped: rows.length }).then((res) => {
+					if (!res.ok) this.notice("Delete failed", "error");
+					else this.notice(`Deleted ${res.archived}${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
+					this.exitSelectionMode(true);
+					this.refresh();
+				});
+			},
+		};
+		this.mode = "confirm";
+	}
+
+	private openPeek(): void {
+		if (!this.selectedId) return;
+		this.peekId = this.selectedId;
+		this.mode = "peek";
+	}
+
+	private startReply(): void {
+		this.peekId = this.peekId ?? this.selectedId;
+		this.setInput("");
+		this.mode = "reply";
+			}
+
+	private openSessionView(): void {
+		if (!this.selectedId) return;
+		void this.deps.service.markVisited?.(this.selectedId)?.catch(() => {});
+		this.sessionScrollTop = 0;
+		this.mode = "session";
+	}
+
+	private openEvidenceView(): void {
+		if (!this.selectedId) return;
+		this.evidenceScrollTop = 0;
+		this.mode = "evidence";
+	}
+
+	private confirmClearDiagnostics(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		this.pending = {
+			prompt: `Clear diagnostics for "${row.meta.name}"? Evidence is preserved. (y/N)`,
+			returnMode: "evidence",
+			onYes: () => {
+				const res = this.deps.service.clearDiagnostics?.(row.meta.id) as { ok?: boolean; error?: string } | undefined;
+				if (!res?.ok) this.notice(res?.error ?? "Clear diagnostics failed", "error");
+				else this.notice("Diagnostics cleared", "info");
+				this.refresh();
+			},
+		};
+		this.mode = "confirm";
+	}
+
+	private peekStep(delta: number): void {
+		if (!this.peekId) return;
+		const idx = this.orderedIds.indexOf(this.peekId);
+		if (idx < 0) return;
+		const len = this.orderedIds.length;
+		// Wrap around both ends, same as moveSelection().
+		const next = ((idx + delta) % len + len) % len;
+		this.peekId = this.orderedIds[next];
+		this.selectedId = this.peekId;
+	}
+
+	private attachSelected(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		this.requestAttach(row);
+	}
+
+	private attachPeek(): void {
+		const row = this.selectedRow();
+		if (row) this.requestAttach(row);
+	}
+
+	private requestAttach(row: Row): void {
+		// hostActive rows (starting/alive/stopping) attach directly — the async
+		// resolver owns the starting/stopping wait, so no interrupt confirm even
+		// when the row is busy (issue #70 A14).
+		const plan = planDashboardAttach({ hostActive: row.hostActive, agentBusy: isAgentBusy(row) });
+		if (plan.plan === "confirm-stop-first") {
+			this.pending = {
+				prompt: `"${row.meta.name}" is running. Interrupt and attach? (y/N)`,
+				onYes: () => this.done({ action: "attach", viewId: row.meta.id, stopFirst: true }),
+			};
+			this.mode = "confirm";
+			return;
+		}
+		this.done({ action: "attach", viewId: row.meta.id, stopFirst: false });
+	}
+
+	// ---- rendering ----------------------------------------------------------
+
+	invalidate(): void {
+		/* stateless render; nothing cached */
+	}
+
+	dispose(): void {
+		/* poll interval is owned by the factory */
+		this.prewarmScheduler.cancel();
+	}
+
+	render(width: number): string[] {
+		const lines = this.renderLines(width);
+		// Self-heal frames (issue #88): pi-tui disables clearOnShrink while an
+		// overlay is active ("overlays need the padding"), so a content shrink
+		// under the dashboard overlay would leave stale rows forever. Force a
+		// full clear on the first frame and on any content-line shrink.
+		// The force MUST be deferred past the active doRender pass: calling
+		// requestRender(true) synchronously here resets pi-tui's diff state
+		// mid-frame (previousLines=[], previousWidth=-1), making the CURRENT frame
+		// take the first-render no-clear branch, after which the deferred re-render
+		// diffs identical content — nothing is ever cleared (issue #88 CR r1).
+		// Deferred to nextTick, the reset lands between frames: the next doRender
+		// sees previousWidth=-1 ≠ width → widthChanged → fullRender(true), a real
+		// clear wrapped in DECSET 2026 synchronized output by pi-tui itself.
+		if (this.needsFullClear || (this.lastContentLineCount != null && this.frameContentLineCount < this.lastContentLineCount)) {
+			this.needsFullClear = false;
+			process.nextTick(() => this.tui.requestRender(true));
+		}
+		this.lastContentLineCount = this.frameContentLineCount;
+		return lines;
+	}
+
+	private renderLines(width: number): string[] {
+		const allRows = this.deps.service.rows();
+		const needs = allRows.filter((r) => r.state?.semanticState === "needs_input").length;
+		const working = allRows.filter((r) => r.state?.semanticState === "working").length;
+		const completed = allRows.filter((r) => r.state?.semanticState === "completed").length;
+		const unread = allRows.filter((r) => {
+			const lastVisitedAt = r.state?.lastVisitedAt ?? null;
+			const lastAgentActivityAt = r.state?.lastAgentActivityAt ?? null;
+			return lastAgentActivityAt !== null && (lastVisitedAt === null || lastAgentActivityAt > lastVisitedAt);
+		}).length;
+		const lines: string[] = [];
+		const ptyHealth = this.ptyHealth();
+
+		lines.push(...this.renderOverview(width, { needs, working, completed, unread }, ptyHealth));
+		if (!ptyHealth.ok && ptyHealth.issue) lines.push(...renderPtyWarningBanner(this.theme, ptyHealth.issue, width));
+		if (this.flash) lines.push(...renderFlashBanner(this.flash, width, { bottomGap: true }));
+
+		if (this.mode === "help") return this.fitToHeight(this.renderHelp(width), width);
+		if (this.mode === "ptyHelp") return this.fitToHeight(this.renderPtyHelp(width, ptyHealth), width);
+		if (this.mode === "peek" || this.mode === "reply") return this.fitToHeight(lines.concat(this.renderPeek(width)), width);
+		if (this.mode === "session") return this.fitToHeight(lines.concat(this.renderSession(width)), width);
+		if (this.mode === "evidence") return this.fitToHeight(lines.concat(this.renderEvidence(width)), width);
+		if (this.mode === "launch") return this.fitToHeight(lines.concat(this.renderLaunch(width)), width);
+
+		// Body: grouped rows with a scroll viewport.
+		const footer = this.renderFooter(width);
+		const capacity = Math.max(1, (this.tui.terminal?.rows ?? 24) - lines.length - footer.length);
+		const body = this.renderRows(width);
+		const windowed = this.windowBody(body, capacity);
+		lines.push(...windowed.lines);
+		// Shrink-detection count: recorded BEFORE the spacer fill — the spacer
+		// pads the frame back out to the terminal height, so the padded (or
+		// pre-fitToHeight-padding) total never shrinks and would mask row
+		// removals, the exact ghosting trigger (issue #88). Non-list modes
+		// return earlier and intentionally don't record.
+		this.frameContentLineCount = lines.length;
+		// Keep the compose box visually docked to the bottom instead of glued to the
+		// final session row. This matches the Claude-style layout: list at top,
+		// large calm workspace, input/footer at bottom.
+		const spacer = Math.max(0, capacity - windowed.lines.length);
+		for (let i = 0; i < spacer; i++) lines.push("");
+
+		lines.push(...footer);
+		return this.fitToHeight(lines, width);
+	}
+
+	private fitToHeight(lines: string[], width: number): string[] {
+		const height = this.tui.terminal?.rows ?? 24;
+		const out = lines.slice(0, height).map((l) => clip(l, width));
+		while (out.length < height) out.push("");
+		return out;
+	}
+
+	private ptyHealth(): PtyHealth {
+		return this.deps.service.ptyHealth?.() ?? {
+			ok: false,
+			reason: "unknown",
+			issue: null,
+			staleHosts: 0,
+			liveHosts: 0,
+		};
+	}
+
+	private renderOverview(
+		width: number,
+		counts: { needs: number; working: number; completed: number; unread: number },
+		ptyHealth: PtyHealth,
+	): string[] {
+		return renderAgentboardHeader(width, this.theme, counts, ptyHealth, this.filterQuery);
+	}
+
+	/** Framed as pi-frame frames its editor: what it is on the top edge, the keys on the bottom. */
+	private renderFooter(width: number): string[] {
+		const t = this.theme;
+		const color = this.modeColor();
+		const inner = Math.max(1, width - 4);
+		if (this.mode === "confirm" && this.pending) {
+			return renderFrame(t, "warning", width, { title: t.fg("warning", "confirm"), hints: "" }, [t.fg("warning", this.pending.prompt)]);
+		}
+		// Enter starts it right there, so the folder has to be in view first.
+		let title = t.fg("muted", `new session in ${truncate(displayPath(this.newTaskCwd()), Math.max(10, inner - 20))}`);
+		let hints = this.listHints();
+		let body: string[];
+		if (this.mode === "filter" || this.mode === "rename") {
+			title = t.fg(color as never, t.bold(this.mode));
+			hints = this.mode === "filter" ? ["enter apply", "esc clear"] : ["enter save", "esc cancel"];
+			body = this.renderEditorInputLines(inner, { prompt: t.fg(color as never, "› "), continuation: "", editing: true, placeholder: "" });
+		} else if (this.mode === "list" || this.mode === "dispatch" || this.mode === "select") {
+			if (this.mode === "select") title = t.fg(color as never, t.bold("select"));
+			body = this.taskInputLines(inner);
+		} else {
+			body = [];
+		}
+		const lines = renderFrame(t, color, width, { title, hints: t.fg("dim", hints.join("   ")) }, body);
+		const notice = this.currentInputNotice();
+		if (notice) lines.push(clip(` ${t.fg(notice.color, notice.text)}`, width));
+		return lines;
+	}
+
+	private listHints(): string[] {
+		const selected = this.selectedRow();
+		const live = selected ? selected.hostAlive && isAgentBusy(selected) : false;
+		const unread = this.unreadCount();
+		const dots = unread > 0 ? [`•${unread} unread`] : [];
+		if (this.mode === "dispatch") return ["enter start", "ctrl+enter start & attach", "ctrl+n options", "esc clear"];
+		if (this.mode === "select") {
+			return [`${this.selectionCount()} selected`, ...dots, "space toggle", "a all", "u clear", "d done", "ctrl+x delete", "esc cancel"];
+		}
+		return [selected ? (live ? "enter attach live" : "enter resume") : "type to start", "space peek", "ctrl+f filter", "ctrl+x stop", "? keys", ...dots];
+	}
+
+	private hintLine(label: string, color: InputNoticeColor, hints: string[]): string {
+		return `${this.theme.fg(color, this.theme.bold(label))} ${this.theme.fg("dim", hints.join("   "))}`;
+	}
+
+	private modeColor(): string {
+		switch (this.mode) {
+			case "dispatch":
+			case "reply":
+				return "accent";
+			case "filter":
+			case "confirm":
+				return "warning";
+			case "rename":
+			case "select":
+				return "accent";
+			default:
+				return "borderMuted";
+		}
+	}
+
+	private taskInputLines(width: number): string[] {
+		const editing = this.mode === "dispatch";
+		return this.renderEditorInputLines(width, {
+			prompt: this.theme.fg(editing ? "accent" : "muted", "› "),
+			continuation: "",
+			editing,
+			placeholder: editing ? "" : "type a task to start a session",
+		});
+	}
+
+	private renderEditorInputLines(
+		width: number,
+		opts: { prompt: string; continuation: string; editing: boolean; placeholder?: string; maxVisible?: number },
+	): string[] {
+		void opts.continuation;
+		void opts.maxVisible;
+		const text = this.input;
+		if (!text && !opts.editing) {
+			const contentWidth = Math.max(1, width - visibleWidth(opts.prompt));
+			return [clip(`${opts.prompt}${clip(this.theme.fg("muted", opts.placeholder ?? ""), contentWidth)}`, width)];
+		}
+		// Its first line and the one above any command menu are its own rules, and the frame already draws those.
+		const all = this.editor.render(width);
+		const menu = (this.editor as unknown as { renderedAutocompleteHeight: number }).renderedAutocompleteHeight;
+		const rendered = [...all.slice(1, all.length - menu - 1), ...all.slice(all.length - menu)];
+		return opts.editing ? rendered : rendered.map((line) => stripInactiveEditorCursor(line));
+	}
+
+	private renderRows(width: number): string[] {
+		const t = this.theme;
+		if (this.rows.length === 0) {
+			return [t.fg("muted", this.filterQuery ? "  No sessions match the filter." : "  No background sessions yet. Type below and press Enter.")];
+		}
+		const now = Date.now();
+		if (this.groupBy === "directory") return this.renderDirectories(width, now);
+		const groups = groupRowsByFolder(this.rows, now);
+		const out: string[] = [];
+		for (const g of groups) {
+			if (out.length > 0) out.push("");
+			out.push(this.renderStageHeader(g.state, g.label, g.rowCount, width));
+			const showFolderHeaders = g.showFolders;
+			for (const folder of g.folders) {
+				if (showFolderHeaders) out.push(this.renderFolderHeader(g.state, folder, width));
+				for (const rv of folder.rows) {
+					out.push(this.renderRow(rv, width, { showFolder: !showFolderHeaders, indent: showFolderHeaders ? 4 : 2 }));
+				}
+			}
+		}
+		return out;
+	}
+
+	private renderDirectories(width: number, now: number): string[] {
+		const t = this.theme;
+		const out: string[] = [];
+		for (const folder of groupRowsByDirectory(this.rows, now)) {
+			if (out.length > 0) out.push("");
+			const title = t.fg("accent", t.bold(`▾ ${folder.name}`));
+			const count = t.fg("dim", ` ${folder.rows.length}`);
+			const rule = Math.max(0, width - visibleWidth(`▾ ${folder.name} ${folder.rows.length}`) - 2);
+			out.push(clip(`${title}${count} ${t.fg("borderMuted", "─".repeat(rule))}`, width));
+			for (const rv of folder.rows) {
+				const summary = `${GROUP_LABELS[rv.state]} · ${rv.summary}`;
+				out.push(this.renderRow({ ...rv, summary }, width, { showFolder: false, indent: 2 }));
+			}
+		}
+		return out;
+	}
+
+	private renderStageHeader(state: keyof typeof GROUP_LABELS, label: string, count: number, width: number): string {
+		const t = this.theme;
+		const glyph = stateGlyph(state, state === "working");
+		const title = stageFg(state, t.bold(`${glyph} ${label.toUpperCase()}`));
+		const countText = t.fg("dim", ` ${count}`);
+		const ruleWidth = Math.max(0, width - visibleWidth(`${glyph} ${label.toUpperCase()} ${count}`) - 2);
+		return clip(`${title}${countText} ${t.fg("borderMuted", "─".repeat(ruleWidth))}`, width);
+	}
+
+	private renderFolderHeader(state: keyof typeof GROUP_LABELS, folder: ReturnType<typeof groupRowsByFolder>[number]["folders"][number], width: number): string {
+		const t = this.theme;
+		const count = folder.rows.length;
+		const selectedInside = folder.rows.some((row) => row.id === this.selectedId);
+		const rail = selectedInside ? stageFg(state, "▌") : t.fg("dim", " ");
+		const name = t.fg(selectedInside ? "text" : "muted", `▾ ${folder.name}`);
+		const countText = t.fg("dim", ` ${count}`);
+		const pathBudget = Math.max(0, width - visibleWidth(`${rail}   ▾ ${folder.name} ${count}`) - 2);
+		const path = pathBudget > 14 ? ` ${t.fg("dim", truncate(displayPath(folder.path), pathBudget))}` : "";
+		return clip(` ${rail} ${name}${countText}${path}`, width);
+	}
+
+	private renderRow(rv: ReturnType<typeof import("../core/rows.mjs")["rowView"]>, width: number, opts: { showFolder?: boolean; indent?: number } = {}): string {
+		const t = this.theme;
+		const selected = rv.id === this.selectedId;
+		const indent = opts.indent ?? 0;
+		const contentWidth = Math.max(20, width - indent);
+		const glyph = stateGlyph(rv.state, rv.alive, rv.hostAlive, rv.unread);
+		const marker = stageFg(rv.state, selected ? `›${glyph}` : ` ${glyph}`);
+		const statusBadges = `${rv.reviewReady ? "✓ " : ""}${rv.diagnosticStalled ? "⏳ " : ""}${rv.staleHost ? "⌁ " : ""}${rv.evidenceErrorCount || rv.diagnosticErrorCount ? "! " : ""}${rv.followUpCount ? `q${rv.followUpCount} ` : ""}${rv.steeringState && rv.steeringState !== "none" ? "π " : ""}`;
+		const refsBadge = rv.refsBadge ? (rv.refsLowConfidence ? t.fg("dim", rv.refsBadge) : rv.refsBadge) : "";
+		const badge = `${this.mode === "select" ? `${this.isSelectedForBatch(rv.id) ? "◉" : "○"} ` : ""}${rv.pinned ? "★ " : ""}${rv.worktree ? "⌥ " : ""}${statusBadges}${refsBadge ? `${refsBadge} ` : ""}`;
+		const ageRaw = ` ${rv.age}`;
+		const nameW = clamp(Math.floor(contentWidth * 0.34), 18, 30);
+		const folderW = opts.showFolder !== false ? (contentWidth >= 72 ? clamp(Math.floor(contentWidth * 0.16), 10, 22) : contentWidth >= 56 ? 10 : 0) : 0;
+		const availableName = Math.max(8, nameW - visibleWidth(badge));
+		const nameText = padTo(`${badge}${truncate(rv.name, availableName)}`, nameW);
+		const folderText = folderW > 0 ? padTo(truncate(rv.place, folderW), folderW) : "";
+		const folder = folderW > 0 ? ` ${t.fg("dim", folderText)}` : "";
+		const summaryW = Math.max(8, contentWidth - nameW - visibleWidth(folder) - visibleWidth(ageRaw) - 4);
+		const summary = truncate(rv.summary, summaryW);
+		let line = `${marker} ${t.fg(selected ? "text" : "muted", selected ? t.bold(nameText) : nameText)}${folder} ${t.fg(selected ? "text" : "muted", summary)}`;
+		line = padTo(line, contentWidth - visibleWidth(ageRaw));
+		line += t.fg("dim", ageRaw);
+		// Issue #231: paint `indent + body` so the background opens at column 0 and
+		// covers the trailing pad and the age column. `bg` closes inside the string,
+		// so a clipped row cannot leak into the next line.
+		const body = clip(line, contentWidth);
+		const painted = applyRowHighlight(t, selected, `${" ".repeat(indent)}${body}`);
+		return clip(painted, width);
+	}
+
+	private renderPeek(width: number): string[] {
+		const t = this.theme;
+		const row = this.selectedRow();
+		if (!row) return [t.fg("muted", "  (no session)")];
+		const st = rowState(row);
+		const out: string[] = [];
+		out.push(`${stageFg(st, stateGlyph(st, row.alive, row.hostAlive))} ${t.fg("accent", t.bold(row.meta.name))} ${t.fg("muted", `[${st}${row.alive ? " · alive" : ""}${row.hostAlive ? " · hosted" : ""}]`)}`);
+		out.push(t.fg("dim", `  ${row.meta.repoCwd}${row.meta.worktreeMode === "worktree" ? "  (worktree)" : ""}`));
+		out.push("");
+		out.push(t.fg("muted", "Summary"));
+		out.push(clip(`  ${normalizeGenericStatusText(st, row.state?.summary)}`, width));
+		if (row.state?.autoState) {
+			const auto = row.state.autoState;
+			out.push("");
+			out.push(t.fg("muted", "Auto-state"));
+			out.push(clip(`  ${auto.kind} · ${auto.confidence} · ${auto.source}${auto.reason ? ` — ${auto.reason}` : ""}`, width));
+		}
+		if (row.codeRefs && row.codeRefs.allRefs.length > 0) {
+			const codeRefs = row.codeRefs;
+			out.push("");
+			out.push(t.fg("muted", "Refs"));
+			if (codeRefs.provider) out.push(clip(`  ${codeRefs.provider}`, width));
+			for (const ref of codeRefs.allRefs) {
+				const prefix = ref.kind === "pr" ? (codeRefs.prPrefix ?? "▸#") : (codeRefs.issuePrefix ?? "#");
+				const line = `  ${ref.kind} ${prefix}${ref.number} · ${ref.confidence} · ${ref.source}${ref.url ? ` · ${ref.url}` : ""}`;
+				out.push(clip(line, width));
+			}
+		}
+		if (row.state?.question) {
+			out.push("");
+			out.push(t.fg("warning", "Question / blocker"));
+			out.push(...wrap(`  ${row.state.question}`, width));
+		}
+		out.push("");
+		out.push(t.fg("muted", "Latest output"));
+		out.push(...wrap(`  ${row.state?.latestAssistantPreview || "—"}`, width, 8));
+		if (row.state?.error) {
+			out.push("");
+			out.push(t.fg("error", "Error"));
+			out.push(...wrap(`  ${row.state.error}`, width, 4));
+		}
+		out.push(t.fg(this.mode === "reply" ? "success" : "dim", "─".repeat(width)));
+		if (this.mode === "reply") {
+			out.push(
+				...this.renderEditorInputLines(width, {
+					prompt: t.fg("accent", "› "),
+					continuation: t.fg("success", "reply┃ "),
+					editing: true,
+					placeholder: "",
+				}),
+			);
+			out.push(clip(this.hintLine("reply", "accent", ["enter send", "shift+enter newline", "esc back"]), width));
+			const notice = this.currentInputNotice();
+			if (notice) out.push(clip(t.fg(notice.color, `ⓘ ${notice.text}`), width));
+		} else {
+			out.push(clip(t.fg("dim", "type to reply   ↑↓ prev/next   ←/→ attach   ctrl+d done   ctrl+o transcript   ctrl+e evidence   esc back"), width));
+		}
+		return out;
+	}
+
+	private renderEvidence(width: number): string[] {
+		const t = this.theme;
+		const row = this.selectedRow();
+		if (!row) return [t.fg("muted", "  (no session)")];
+		const evidenceRes = this.deps.service.evidence?.(row.meta.id);
+		const diagnosticsRes = this.deps.service.diagnostics?.(row.meta.id, { limit: 50 });
+		const panel = buildEvidencePanel({
+			row,
+			evidence: evidenceRes?.ok ? evidenceRes.evidence : null,
+			diagnostics: diagnosticsRes?.ok ? (diagnosticsRes.events ?? []) : [],
+			paths: evidenceRes?.ok ? evidenceRes.paths : {},
+			width,
+		});
+		const out: string[] = [];
+		const capacity = Math.max(3, (this.tui.terminal?.rows ?? 24) - 5);
+		out.push(...panel.slice(this.evidenceScrollTop, this.evidenceScrollTop + capacity).map((line: string) => clip(line, width)));
+		out.push(t.fg("dim", "─".repeat(width)));
+		out.push(clip(t.fg("dim", "←/< back · ↑↓/j/k scroll · pgup/pgdn page · enter attach · r reply · v transcript · x clear diagnostics"), width));
+		return out;
+	}
+
+	private renderSession(width: number): string[] {
+		const t = this.theme;
+		const row = this.selectedRow();
+		if (!row) return [t.fg("muted", "  (no session)")];
+		const st = rowState(row);
+		const out: string[] = [];
+		const session = loadSessionView(row.meta.sessionFile);
+		out.push(`${stageFg(st, stateGlyph(st, row.alive, row.hostAlive))} ${t.fg("accent", t.bold(row.meta.name))} ${t.fg("muted", `[session view${row.alive ? " · live" : ""}${row.hostAlive ? " · hosted" : ""}]`)}`);
+		out.push(t.fg("dim", `  ${row.meta.repoCwd}${row.meta.worktreeMode === "worktree" ? "  (worktree)" : ""}`));
+		if (session.header?.cwd && session.header.cwd !== row.meta.repoCwd) {
+			out.push(t.fg("dim", `  session cwd: ${session.header.cwd}`));
+		}
+		out.push("");
+
+		const body: string[] = [];
+		if (session.error) {
+			body.push(t.fg("error", `  ${session.error}`));
+		} else if (session.items.length === 0) {
+			body.push(t.fg("muted", "  Session transcript empty yet."));
+		} else {
+			for (const item of session.items) {
+				body.push(this.renderSessionItemLabel(item, width));
+				body.push(...wrap(`  ${item.text}`, width, 10_000));
+				body.push("");
+			}
+			if (body[body.length - 1] === "") body.pop();
+		}
+
+		const capacity = Math.max(3, (this.tui.terminal?.rows ?? 24) - out.length - 3);
+		out.push(...this.windowSession(body, capacity));
+		out.push(t.fg("dim", "─".repeat(width)));
+		out.push(clip(t.fg("dim", "←/< back · ↑↓/j/k scroll · pgup/pgdn page · enter attach · d done · r reply · space peek"), width));
+		return out;
+	}
+
+	private renderSessionItemLabel(item: ReturnType<typeof loadSessionView>["items"][number], width: number): string {
+		const t = this.theme;
+		const label = `  ${item.label}`;
+		switch (item.role) {
+			case "user":
+				return clip(t.fg("accent", label), width);
+			case "assistant":
+				return clip(t.fg("success", label), width);
+			case "custom":
+				return clip(t.fg("warning", label), width);
+			default:
+				return clip(t.fg("muted", label), width);
+		}
+	}
+
+	private renderLaunch(width: number): string[] {
+		const t = this.theme;
+		const launch = this.launch;
+		if (!launch) return [t.fg("muted", "  Launch dialog unavailable.")];
+		const boxWidth = clamp(Math.min(width - 4, 88), 48, Math.max(48, width - 2));
+		const inner = Math.max(20, boxWidth - 4);
+		const lines: string[] = [];
+		lines.push(t.fg("accent", t.bold("Start session")));
+		lines.push("");
+		for (const line of wrap(`Prompt: ${this.input.trim()}`, inner, 3)) lines.push(line);
+		lines.push("");
+		lines.push(this.renderLaunchField(inner, 1, `cwd      ${displayPath(launch.cwd)}`, launch.picker === null && launch.fieldIndex === 1));
+		lines.push(this.renderLaunchField(inner, 2, `model    ${launch.model ? formatLaunchModel(launch.model) : "default"}`, launch.picker === null && launch.fieldIndex === 2));
+		lines.push(this.renderLaunchField(inner, 3, `thinking ${launch.thinking}`, launch.picker === null && launch.fieldIndex === 3));
+		lines.push(this.renderLaunchField(inner, 4, `action   ${launch.action === "attach" ? "start & attach" : "start in background"}`, launch.picker === null && launch.fieldIndex === 4));
+		lines.push("");
+		if (launch.picker === "cwd") {
+			lines.push(t.fg("warning", `cwd› ${singleLineInput(launch.cwdQuery)}${cursor()}`));
+			if (launch.cwdPickerMode === "favorites") {
+				const counts = new Map(launch.cwdRanked.map((entry) => [entry.path, entry.count]));
+				lines.push(...this.renderLaunchSuggestions(inner, launch.cwdSuggestions, launch.cwdSuggestionIndex, (value) => {
+					const count = counts.get(value) ?? 0;
+					return `${displayPath(value)}${count > 0 ? `  ${count}×` : ""}`;
+				}));
+				lines.push("");
+				lines.push(t.fg("dim", "常用目录 · type to search · tab complete · enter choose · esc back"));
+			} else {
+				lines.push(...this.renderLaunchSuggestions(inner, launch.cwdSuggestions, launch.cwdSuggestionIndex, (value) => displayPath(value)));
+				lines.push("");
+				lines.push(t.fg("dim", "type to filter folders · tab complete · enter choose · esc back"));
+			}
+		} else if (launch.picker === "model") {
+			lines.push(t.fg("warning", `model› ${singleLineInput(launch.modelQuery)}${cursor()}`));
+			lines.push(...this.renderLaunchSuggestions(inner, launch.modelFiltered, launch.modelIndex, (choice) => `${formatLaunchModel(choice.model)}${choice.thinkingLevel ? ` · ${choice.thinkingLevel}` : ""}`));
+			lines.push("");
+			lines.push(t.fg("dim", `showing ${launch.scopeSource === "scoped" ? "scoped" : "available"} models · type to filter · enter choose · esc back`));
+		} else if (launch.picker === "thinking") {
+			lines.push(t.fg("warning", "thinking"));
+			lines.push(...this.renderLaunchSuggestions(inner, launch.thinkingOptions, launch.thinkingIndex, (value) => value));
+			lines.push("");
+			lines.push(t.fg("dim", "↑↓ choose · enter select · esc back"));
+		} else {
+			lines.push(t.fg("dim", "↑↓ move · enter open/select/toggle · esc cancel"));
+		}
+		lines.push("");
+		lines.push(this.renderLaunchButton(inner, launch.picker === null && launch.fieldIndex === 0));
+		return renderCenteredBox(lines, width, this.tui.terminal?.rows ?? 24, t);
+	}
+
+	private renderLaunchField(width: number, _index: number, text: string, selected: boolean): string {
+		const prefix = selected ? this.theme.fg("accent", "› ") : this.theme.fg("dim", "  ");
+		const label = clip(text, Math.max(1, width - 2));
+		return padTo(`${prefix}${selected ? this.theme.fg("accent", label) : label}`, width);
+	}
+
+	private renderLaunchButton(width: number, selected: boolean): string {
+		const label = ` ${this.launch?.action === "attach" ? "Start & attach" : "Start session"} `;
+		const button = selected
+			? this.theme.bg("selectedBg", this.theme.fg("accent", this.theme.bold(label)))
+			: this.theme.fg("muted", label);
+		const pad = Math.max(0, width - visibleWidth(label));
+		return `${" ".repeat(pad)}${button}`;
+	}
+
+	private renderLaunchSuggestions<T>(width: number, items: T[], index: number, renderItem: (item: T) => string): string[] {
+		if (items.length === 0) return [this.theme.fg("muted", "  no matches")];
+		const start = Math.max(0, Math.min(index - 2, Math.max(0, items.length - 6)));
+		const end = Math.min(items.length, start + 6);
+		const out: string[] = [];
+		for (let i = start; i < end; i++) {
+			const selected = i === index;
+			const prefix = selected ? this.theme.fg("accent", "→ ") : this.theme.fg("dim", "  ");
+			const body = clip(renderItem(items[i]), Math.max(1, width - 2));
+			out.push(`${prefix}${selected ? this.theme.fg("accent", body) : body}`);
+		}
+		if (items.length > end) out.push(this.theme.fg("dim", `  ↓ ${items.length - end} more`));
+		return out;
+	}
+
+	private renderHelp(width: number): string[] {
+		const t = this.theme;
+		const rows: Array<[string, string]> = [
+			["type", "Start writing a task, with no key first"],
+			["enter", "With a task: start it. Empty: attach to the selected session"],
+			["ctrl+enter", "Start the task and attach to it"],
+			["shift+enter", "New line (ctrl+j too)"],
+			["ctrl+n", "While typing: choose the folder, model and thinking first"],
+			["← / →", "Attach to the selected session"],
+			["↑ / ↓", "Move between rows"],
+			["pgup / pgdn", "Move by a screenful"],
+			["home / end", "First or last row"],
+			["alt+↑ / alt+↓", "Previous or next group"],
+			["alt+1..9", "Attach to that row in this folder"],
+			["space", "Open or close the peek panel"],
+			["/", "Pi's commands. They run here; a template or skill starts a session"],
+			["ctrl+f", "Filter the list"],
+			["ctrl+s", "Group by state or by directory"],
+			["shift+↑ / ↓", "Move the row up or down its group"],
+			["ctrl+g", "Write the task in $VISUAL or $EDITOR"],
+			["ctrl+t", "Pin or unpin"],
+			["ctrl+r", "Rename"],
+			["ctrl+x", "Stop the session; press again within 2s to delete it"],
+			["ctrl+d", "Mark done"],
+			["ctrl+b", "Hold or unhold"],
+			["ctrl+a", "Select several rows"],
+			["ctrl+o", "Read-only transcript"],
+			["ctrl+e", "Evidence and diagnostics"],
+			["ctrl+k", "Delete every inactive session in this state"],
+			["esc", "Close, clear the input, or leave the board"],
+			["ctrl+c", "Clear the input; press twice to quit Pi, here or in a session"],
+			["!", "node-pty diagnostics"],
+			["?", "This help"],
+			["In select", "↑↓ move · space toggle · a all · u clear · d done · ctrl+x delete · esc cancel"],
+			["In peek", "type to reply · ←/→ attach · ↑↓ adjacent · ctrl+o transcript · ctrl+e evidence"],
+			["In session", "← back · ↑↓ scroll · e evidence · enter attach · r reply"],
+			["In evidence", "← back · ↑↓ scroll · → attach · r reply · v transcript · x clear diag"],
+		];
+		const dialog = [t.fg("accent", t.bold("Keys")), ""];
+		for (const [k, v] of rows) dialog.push(`  ${t.fg("accent", k.padEnd(14))} ${t.fg("muted", v)}`);
+		dialog.push("");
+		dialog.push(t.fg("dim", `  press any key to return to ${this.helpReturnMode}`));
+		return renderCenteredBox(dialog, width, this.tui.terminal?.rows ?? 24, t);
+	}
+
+	private renderPtyHelp(width: number, health: PtyHealth): string[] {
+		const t = this.theme;
+		const dialog: string[] = [t.fg("accent", t.bold("node-pty diagnostics")), ""];
+		const wrapWidth = Math.max(32, width - 16);
+		if (health.ok) {
+			dialog.push(t.fg("success", "  Status: healthy"));
+			dialog.push(t.fg("muted", `  Live hosts: ${health.liveHosts} · stale hosts: ${health.staleHosts}`));
+			dialog.push("");
+			dialog.push(t.fg("dim", `  press any key to return to ${this.ptyHelpReturnMode}`));
+			return renderCenteredBox(dialog, width, this.tui.terminal?.rows ?? 24, t);
+		}
+		const issue = health.issue;
+		dialog.push(t.fg("warning", `  Status: unavailable · ${issue?.statusLabel ?? "unknown cause"}`));
+		if (issue?.summary) {
+			dialog.push("");
+			dialog.push(...wrap(`  ${issue.summary}`, wrapWidth, 8));
+		}
+		if (issue?.fixHint) dialog.push(t.fg("warning", `  Fix: ${issue.fixHint}`));
+		if (issue?.steps?.length) {
+			dialog.push("");
+			dialog.push(t.fg("accent", "  Suggested steps"));
+			for (const step of issue.steps) {
+				if (!step.trim()) continue;
+				if (step.endsWith(":")) dialog.push(t.fg("muted", `  ${step}`));
+				else dialog.push(...wrap(`  ${step}`, wrapWidth, 10));
+			}
+		}
+		if (issue?.rawReason || health.reason) {
+			dialog.push("");
+			dialog.push(t.fg("accent", "  Raw reason"));
+			dialog.push(...wrap(`  ${issue?.rawReason ?? health.reason ?? "unknown"}`, wrapWidth, 8));
+		}
+		dialog.push("");
+		dialog.push(t.fg("dim", `  press any key to return to ${this.ptyHelpReturnMode}`));
+		return renderCenteredBox(dialog, width, this.tui.terminal?.rows ?? 24, t);
+	}
+
+	/** Keep the selected row visible within `capacity` lines, with scroll markers. */
+	private windowBody(body: string[], capacity: number): { lines: string[] } {
+		if (body.length <= capacity) {
+			this.scrollTop = 0;
+			return { lines: body };
+		}
+		// Find the line index of the selected row (best effort: match its rendered prefix).
+		let selLine = 0;
+		if (this.selectedId) {
+			const idx = body.findIndex((l) => l.includes("›"));
+			selLine = idx >= 0 ? idx : 0;
+		}
+		// The boundary lines can become scroll markers, so keep selection inside
+		// them. On tiny viewports, prioritize the selected row over markers.
+		const margin = capacity >= 3 ? 1 : 0;
+		if (selLine < this.scrollTop + margin) this.scrollTop = selLine - margin;
+		if (selLine >= this.scrollTop + capacity - margin) this.scrollTop = selLine - capacity + margin + 1;
+		this.scrollTop = Math.max(0, Math.min(this.scrollTop, body.length - capacity));
+		// The first session can follow both a stage and a folder header. Those
+		// lines aren't selectable, so reveal them when the first session fits.
+		if (this.selectedId === this.orderedIds[0] && selLine < capacity) this.scrollTop = 0;
+		const slice = body.slice(this.scrollTop, this.scrollTop + capacity);
+		const more = body.length - this.scrollTop - capacity;
+		if (this.scrollTop > 0 && selLine !== this.scrollTop) slice[0] = this.theme.fg("dim", `  ↑ ${this.scrollTop + 1} more`);
+		if (more > 0 && selLine !== this.scrollTop + capacity - 1) slice[slice.length - 1] = this.theme.fg("dim", `  ↓ ${more + 1} more`);
+		return { lines: slice };
+	}
+
+	private windowSession(body: string[], capacity: number): string[] {
+		if (body.length <= capacity) {
+			this.sessionScrollTop = 0;
+			return body;
+		}
+		this.sessionScrollTop = Math.max(0, Math.min(this.sessionScrollTop, body.length - capacity));
+		const slice = body.slice(this.sessionScrollTop, this.sessionScrollTop + capacity);
+		const more = body.length - this.sessionScrollTop - capacity;
+		if (this.sessionScrollTop > 0) slice[0] = this.theme.fg("dim", `  ↑ ${this.sessionScrollTop} more`);
+		if (more > 0) slice[slice.length - 1] = this.theme.fg("dim", `  ↓ ${more} more`);
+		return slice;
+	}
+}
+
+// ---- helpers --------------------------------------------------------------
+
+function sameLaunchModel(a: LaunchModel | null | undefined, b: LaunchModel | null | undefined): boolean {
+	return Boolean(a && b && a.provider === b.provider && a.id === b.id);
+}
+
+function formatLaunchModel(model: LaunchModel): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function filterLaunchChoices(choices: LaunchChoice[], query: string): LaunchChoice[] {
+	const q = query.trim().toLowerCase();
+	if (!q) return choices;
+	return choices.filter((choice) => {
+		const hay = `${choice.model.provider} ${choice.model.id} ${choice.model.name ?? ""} ${choice.model.provider}/${choice.model.id}`.toLowerCase();
+		return hay.includes(q);
+	});
+}
+
+function findLaunchModelByRef(models: LaunchModel[], ref: string): LaunchModel | null {
+	const target = String(ref || "").trim().toLowerCase();
+	if (!target) return null;
+	// Single source of truth with the service-side stale-model guard (issue #90):
+	// same case-insensitive exact "provider/id" rule.
+	return models.find((model) => modelRefAvailable(target, [model])) ?? null;
+}
+
+function stripBracketedPaste(data: string): string {
+	return data.replace(/\x1b\[200~|\x1b\[201~/g, "");
+}
+
+function renderCenteredBox(lines: string[], width: number, height: number, theme: ThemeLike): string[] {
+	const innerWidth = Math.max(20, Math.min(width - 6, Math.max(...lines.map((line) => visibleWidth(line)), 20)));
+	const boxWidth = Math.min(width, innerWidth + 4);
+	const left = Math.max(0, Math.floor((width - boxWidth) / 2));
+	const box = [
+		`${theme.fg("borderMuted", "╭")}${theme.fg("borderMuted", "─".repeat(Math.max(0, boxWidth - 2)))}${theme.fg("borderMuted", "╮")}`,
+		...lines.map((line) => `${theme.fg("borderMuted", "│")} ${padTo(clip(line, boxWidth - 4), boxWidth - 4)} ${theme.fg("borderMuted", "│")}`),
+		`${theme.fg("borderMuted", "╰")}${theme.fg("borderMuted", "─".repeat(Math.max(0, boxWidth - 2)))}${theme.fg("borderMuted", "╯")}`,
+	];
+	const top = Math.max(0, Math.floor((height - box.length) / 2) - 1);
+	const out: string[] = [];
+	for (let i = 0; i < top; i++) out.push("");
+	for (const line of box) out.push(`${" ".repeat(left)}${line}`);
+	return out;
+}
+
+const DELETE_DOUBLE_PRESS_MS = 2_000;
+
+const AGENTBOARD_VERSION = readAgentBoardVersion();
+function readAgentBoardVersion(): string {
+	try {
+		const raw = readFileSync(new URL("../../package.json", import.meta.url), "utf8");
+		const pkg = JSON.parse(raw) as { version?: string };
+		return pkg.version ? `v${pkg.version}` : "dev";
+	} catch {
+		return "dev";
+	}
+}
+// ANSI rendering of /Users/rutvik/Downloads/pi-logo-on-dark.svg.
+type HeaderCounts = { needs: number; working: number; completed: number; unread: number };
+
+/** Corners and edges as pi-frame draws them, with text set into the top and bottom edges. */
+function renderFrame(
+	theme: ThemeLike,
+	color: string,
+	width: number,
+	edges: { title?: string; right?: string; hints?: string },
+	body: string[],
+): string[] {
+	const paint = (text: string) => theme.fg(color as never, text);
+	const edge = (left: string, right: string, text: string, side: string) => {
+		const set = text ? ` ${text} ` : "";
+		const end = side ? ` ${side} ${paint("─")}` : "";
+		const room = width - 3 - visibleWidth(end);
+		const shown = visibleWidth(set) > room ? clip(set, Math.max(0, room)) : set;
+		return `${paint(`${left}─`)}${shown}${paint("─".repeat(Math.max(0, room - visibleWidth(shown))))}${end}${paint(right)}`;
+	};
+	const inner = Math.max(1, width - 4);
+	return [
+		edge("╭", "╮", edges.title ?? "", edges.right ?? ""),
+		...body.map((line) => `${paint("│")} ${padTo(clip(line, inner), inner)} ${paint("│")}`),
+		edge("╰", "╯", edges.hints ?? "", ""),
+	];
+}
+
+function renderAgentboardHeader(
+	width: number,
+	theme: ThemeLike,
+	counts: HeaderCounts,
+	ptyHealth: PtyHealth,
+	filterQuery: string,
+): string[] {
+	const title = `${theme.fg("accent", theme.bold("π-board"))} ${theme.fg("muted", AGENTBOARD_VERSION.replace(/^v/, ""))}`;
+	const narrow = width < 60;
+	return renderFrame(
+		theme,
+		"borderMuted",
+		width,
+		{ title, right: narrow ? "" : renderPtyHealth(theme, ptyHealth) },
+		[headerStageSummary(theme, counts, filterQuery, narrow)],
+	);
+}
+
+function headerStageSummary(theme: ThemeLike, counts: HeaderCounts, filterQuery: string, compact: boolean): string {
+	const joiner = theme.fg("dim", " · ");
+	const parts = [
+		headerStagePart(theme, "needs_input", counts.needs, compact ? "answer" : "needs answer"),
+		headerStagePart(theme, "working", counts.working, "running"),
+		headerUnreadPart(theme, counts.unread),
+		headerStagePart(theme, "completed", counts.completed, "done"),
+	];
+	if (filterQuery) parts.push(theme.fg("warning", `filter:${filterQuery}`));
+	return parts.join(joiner);
+}
+
+function headerUnreadPart(theme: ThemeLike, count: number): string {
+	return `${theme.fg(count > 0 ? "accent" : "dim", `•${count}`)} ${theme.fg("dim", "unread")}`;
+}
+
+function headerStagePart(theme: ThemeLike, state: keyof typeof GROUP_LABELS, count: number, label: string): string {
+	return `${stageFg(state, String(count))} ${theme.fg("dim", label)}`;
+}
+
+function renderPtyHealth(theme: ThemeLike, health: PtyHealth): string {
+	const text = ptyHealthText(health);
+	if (!health.ok) return theme.fg("error", text);
+	if (health.staleHosts > 0) return theme.fg("warning", text);
+	return theme.fg("success", text);
+}
+
+function renderPtyWarningBanner(_theme: ThemeLike, issue: PtyIssue, width: number): string[] {
+	return renderFlashBanner(
+		{ text: `${issue.summary} Fix: ${issue.fixHint} Press ! for exact steps.`, level: "warn" },
+		width,
+		{ bottomGap: true },
+	);
+}
+
+function ptyHealthText(health: PtyHealth): string {
+	if (!health.ok) return `node-pty unavailable${health.issue?.statusLabel ? ` · ${health.issue.statusLabel}` : health.reason ? ` (${compactPtyReason(health.reason)})` : ""}`;
+	if (health.staleHosts > 0) return `node-pty degraded · stale:${health.staleHosts}`;
+	return health.liveHosts > 0 ? `node-pty healthy · hosts:${health.liveHosts}` : "node-pty healthy";
+}
+
+function compactPtyReason(reason: string): string {
+	const cleaned = String(reason || "").replace(/\s+/g, " ").trim();
+	if (!cleaned) return "unknown";
+	const first = firstSentence(cleaned);
+	return truncate(first.length >= 12 ? first : cleaned, 44);
+}
+
+/** From the Pi theme, as pi-frame's colors are. */
+const STAGE_TOKENS: Record<keyof typeof GROUP_LABELS, string> = {
+	queued: "muted",
+	working: "accent",
+	needs_input: "warning",
+	idle: "syntaxType",
+	holding: "syntaxNumber",
+	completed: "success",
+	failed: "error",
+	stopped: "dim",
+};
+
+/** Set by the component: stageFg is called from places that aren't handed a theme. */
+let stageTheme: ThemeLike | null = null;
+
+
+function stageFg(state: keyof typeof GROUP_LABELS, text: string): string {
+	return stageTheme ? stageTheme.fg(STAGE_TOKENS[state] as never, text) : text;
+}
+
+/**
+ * Issue #231: the selected row's full-line background. Pure (the theme is
+ * injected) so the wrap/close contract is unit-testable, and an unselected row
+ * is returned byte-identical.
+ */
+export function applyRowHighlight(
+	theme: Pick<ThemeLike, "bg">,
+	selected: boolean,
+	text: string,
+): string {
+	return selected ? theme.bg("selectedBg", text) : text;
+}
+
+function isPrintable(data: string): boolean {
+	if (data.length === 0) return false;
+	// Accept multi-char paste of printable text; reject control/escape sequences.
+	return [...data].every((ch) => ch >= " " && ch !== "\x7f");
+}
+
+function isBracketedPaste(data: string): boolean {
+	return data.includes("\x1b[200~");
+}
+
+function cursor(): string {
+	return "\x1b[7m \x1b[27m";
+}
+
+function stripInactiveEditorCursor(line: string): string {
+	return line.replace(/\x1b\[7m([\s\S]*?)\x1b\[0m/, (_match, content: string) => (content === " " ? "" : content));
+}
+
+function singleLineInput(text: string): string {
+	return text.replace(/[\r\n]+/g, " ");
+}
+
+function clip(line: string, width: number): string {
+	return truncateToWidth(line, width, "");
+}
+
+function padTo(line: string, width: number): string {
+	const w = visibleWidth(line);
+	return w >= width ? line : line + " ".repeat(width - w);
+}
+
+function wrap(text: string, width: number, max = 6): string[] {
+	const words = text.split(/\s+/);
+	const lines: string[] = [];
+	let cur = "";
+	for (const word of words) {
+		if (visibleWidth(cur) + visibleWidth(word) + 1 > width) {
+			lines.push(cur);
+			cur = `  ${word}`;
+		} else {
+			cur = cur ? `${cur} ${word}` : word;
+		}
+		if (lines.length >= max) break;
+	}
+	if (cur && lines.length < max) lines.push(cur);
+	return lines.map((l) => clip(l, width));
+}
+
+function isAgentBusy(row: Row): boolean {
+	const st = row.state?.semanticState;
+	const waitingOnTool = Array.isArray(row.state?.pendingQuestions) && row.state.pendingQuestions.length > 0;
+	return Boolean(row.alive && (st === "queued" || st === "working" || waitingOnTool));
+}
+
+function displayPath(path: string): string {
+	const home = process.env.HOME;
+	if (home && path.startsWith(home)) return `~${path.slice(home.length)}` || "~";
+	return path;
+}
+
+function clamp(n: number, min: number, max: number): number {
+	return Math.max(min, Math.min(max, n));
+}
+
+function editorTheme(theme: ThemeLike): EditorTheme {
+	return {
+		borderColor: (text: string) => theme.fg("borderMuted", text),
+		selectList: {
+			selectedPrefix: (text: string) => theme.fg("accent", text),
+			selectedText: (text: string) => theme.fg("accent", text),
+			description: (text: string) => theme.fg("muted", text),
+			scrollInfo: (text: string) => theme.fg("muted", text),
+			noMatch: (text: string) => theme.fg("muted", text),
+		},
+	};
+}
+
+function renderFlashBanner(flash: { text: string; level: FlashLevel }, width: number, opts: { bottomGap?: boolean } = {}): string[] {
+	const [icon, token] = flash.level === "warn" ? ["!", "warning"] : flash.level === "error" ? ["×", "error"] : ["i", "accent"];
+	const text = ` ${icon} ${flash.text}`;
+	const line = clip(stageTheme ? stageTheme.fg(token as never, text) : text, width);
+	return opts.bottomGap ? [line, ""] : [line];
+}

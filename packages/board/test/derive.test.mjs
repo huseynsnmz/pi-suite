@@ -1,0 +1,110 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { deriveSummary, fallbackStatusText, finalizeSemanticState, isGenericStatusText, normalizeGenericStatusText } from "../src/core/derive.mjs";
+
+test("finalizeSemanticState matrix", () => {
+	assert.equal(
+		finalizeSemanticState({ exitCode: 0, stopReason: "stop", stoppedByUser: false, needsInput: false }),
+		"idle",
+	);
+	assert.equal(
+		finalizeSemanticState({ exitCode: 0, stopReason: "stop", stoppedByUser: false, needsInput: true }),
+		"needs_input",
+	);
+	assert.equal(
+		finalizeSemanticState({ exitCode: 1, stopReason: "stop", stoppedByUser: false, needsInput: false }),
+		"failed",
+	);
+	assert.equal(
+		finalizeSemanticState({ exitCode: 0, stopReason: "error", stoppedByUser: false, needsInput: false }),
+		"failed",
+	);
+	assert.equal(
+		finalizeSemanticState({ exitCode: 0, stopReason: "stop", stoppedByUser: true, needsInput: true }),
+		"stopped",
+	);
+	assert.equal(
+		finalizeSemanticState({ exitCode: 0, stopReason: "stop", stoppedByUser: false, needsInput: false, openEnded: true }),
+		"idle",
+	);
+});
+
+test("deriveSummary priority: active tool while alive", () => {
+	const s = {
+		processState: "alive",
+		semanticState: "working",
+		currentTool: { name: "edit", path: "src/a.ts", summary: "Editing a.ts" },
+		question: null,
+		error: null,
+		latestAssistantPreview: "blah",
+	};
+	assert.equal(deriveSummary(s), "Editing a.ts");
+});
+
+test("deriveSummary priority: blocker for needs_input", () => {
+	const s = {
+		processState: "exited",
+		semanticState: "needs_input",
+		currentTool: null,
+		question: "Which option?",
+		error: null,
+		latestAssistantPreview: "I did stuff",
+	};
+	assert.equal(deriveSummary(s), "Which option?");
+});
+
+test("deriveSummary priority: error for failed", () => {
+	const s = {
+		processState: "exited",
+		semanticState: "failed",
+		currentTool: null,
+		question: null,
+		error: "Provider exploded",
+		latestAssistantPreview: "",
+	};
+	assert.equal(deriveSummary(s), "Provider exploded");
+});
+
+test("deriveSummary falls back to preview then status text", () => {
+	assert.equal(
+		deriveSummary({
+			processState: "exited",
+			semanticState: "completed",
+			currentTool: null,
+			question: null,
+			error: null,
+			latestAssistantPreview: "All done here",
+		}),
+		"All done here",
+	);
+	assert.equal(
+		deriveSummary({
+			processState: "exited",
+			semanticState: "completed",
+			currentTool: null,
+			question: null,
+			error: null,
+			latestAssistantPreview: "",
+		}),
+		"Done",
+	);
+});
+
+test("fallbackStatusText", () => {
+	assert.equal(fallbackStatusText("queued"), "Queued");
+	assert.equal(fallbackStatusText("working"), "Running…");
+	assert.equal(fallbackStatusText("needs_input"), "Needs answer");
+	assert.equal(fallbackStatusText("idle"), "Needs instructions");
+});
+
+test("fallbackStatusText maps holding and recognizes it as generic (issue #145)", () => {
+	assert.equal(fallbackStatusText("holding"), "On hold");
+	assert.equal(isGenericStatusText("On hold"), true);
+});
+
+test("normalizeGenericStatusText maps legacy labels to current ones", () => {
+	assert.equal(normalizeGenericStatusText("idle", "Idle"), "Needs instructions");
+	assert.equal(normalizeGenericStatusText("idle", "In Progress"), "Needs instructions");
+	assert.equal(normalizeGenericStatusText("needs_input", "Needs input"), "Needs answer");
+	assert.equal(normalizeGenericStatusText("idle", "Custom summary"), "Custom summary");
+});

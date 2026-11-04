@@ -1,0 +1,85 @@
+{
+  "name": "@huseynsnmz/pi-board",
+  "version": "0.18.2",
+  "description": "A board for Pi's background sessions: start, watch, reply to and attach to them. A fork of @zhuxixi/pi-agent-board.",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": "./index.ts",
+  "files": [
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md",
+    "docs",
+    "index.ts",
+    "runner",
+    "src"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "pi-coding-agent",
+    "agent-board",
+    "background-agents",
+    "dashboard"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huseynsnmz/pi-board.git"
+  },
+  "bugs": {
+    "url": "https://github.com/huseynsnmz/pi-board/issues"
+  },
+  "homepage": "https://github.com/huseynsnmz/pi-board#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "test:coverage": "c8 node scripts/run-tests.mjs",
+    "test:perf": "node scripts/run-perf-gate.mjs",
+    "pack:dry": "npm pack --dry-run",
+    "verify": "npm run typecheck && npm run test:perf && npm test && npm run test:coverage && npm run pack:dry"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "@types/node": "26.6.6",
+    "c8": "12.0.0",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@xterm/headless": "6.0.0",
+    "node-pty": "1.1.0"
+  },
+  "overrides": {
+    "test-exclude": {
+      "glob": "14.0.3",
+      "minimatch": "11.0.4"
+    }
+  }
+}

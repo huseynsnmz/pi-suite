@@ -1,0 +1,3222 @@
+/**
+ * AgentViewService — the imperative actions behind the dashboard: dispatch a new
+ * background session, reply/resume, stop, pin/rename/archive, and the same-repo write
+ * safety rule. Pure node + core modules; the Pi-coupled bits (attach, dialogs) live in
+ * the command handler. The pi invocation + runner path are injected (resolved in index.ts).
+ */
+import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
+import { createConnection } from "node:net";
+import { resolve } from "node:path";
+import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualVerdict } from "../core/auto-state.mjs";
+import { CLOCK_EPSILON_MS, classifyRunsForRow, probeBackgroundRun, resolveWorkflowHome, scanBackgroundRuns } from "../core/background-runs.mjs";
+import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
+import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
+import { clearDiagnostics, appendDiagnostic, appendDiagnosticOnce, tailDiagnostics } from "../core/diagnostics.mjs";
+import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
+import { updateCodeRefsFromEvidence } from "../core/code-refs-store.mjs";
+import { claimNextFollowUp, completeFollowUp, enqueueFollowUp, failFollowUp, readFollowUpQueue, releaseFollowUp, summarizeFollowUpQueue, clearQueuedFollowUps, removeLastFollowUp } from "../core/follow-up-queue.mjs";
+import { foregroundPreviewCache } from "../core/foreground-preview-cache.mjs";
+import { foregroundProjectionCache } from "../core/foreground-projection-cache.mjs";
+import { approvePlan as approvePlanState, markExecutingApprovedPlan, readSteering, recordPlanReady, requestPlan as requestPlanState, requestPlanChanges as requestPlanChangesState, summarizeSteering } from "../core/steering.mjs";
+import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../core/steering-prompts.mjs";
+import { isGenericStatusText } from "../core/derive.mjs";
+import { firstSentence, truncate } from "../core/heuristics.mjs";
+import { newRunId, newViewId, slugifyTask } from "../core/ids.mjs";
+import { launchAutoState as launchAutoStateProcess, launchHost as launchHostProcess, launchRun, launchTitle as launchTitleProcess } from "../core/launch.mjs";
+import { gitRepoRoot } from "../core/repo.mjs";
+import { captureStartToken, isAlive, killProcess } from "../core/pid.mjs";
+import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
+import { canFinalizeLegacyHost, canReplaceHost, classifyUnverifiableProcess, processIdentityState } from "../core/host-coordination.mjs";
+import { readProcessIdentityProbe, readProcessStartToken } from "../core/process-identity-probe.mjs";
+import { modelRefAvailable } from "../core/launch-options.mjs";
+import { ensureCoordinator, sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
+import { createDesyncEpisodeThrottle, rereadPair, statusRevisionDesynced } from "../core/status-consistency.mjs";
+import { commandRejectDiagnostic } from "../core/state-commands.mjs";
+import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
+import * as P from "../core/paths.mjs";
+import {
+	claimHost,
+	createView,
+	listRows,
+	loadRow,
+	readHost,
+	readHostPid,
+	readLaunchPrefs,
+	readPid,
+	readState,
+	readStatus,
+	updateOwnedHost,
+	writeHost,
+	writeLaunchPrefs,
+	writeMeta,
+	writeState,
+	writeStatus,
+} from "../core/store.mjs";
+import { diagnoseNodePtyFailure, ensureNodePtySpawnHelperExecutable, nodePtyFallbackMessage, probeNodePtyEnvironment } from "../core/pty-support.mjs";
+import { normalizeScreenLogMaxBytes, pruneScreenLogs } from "../core/screen-log-gc.mjs";
+import { canAutoDrain, hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../core/warm-host-sweeper.mjs";
+import { resolveTestMs } from "../core/test-knobs.mjs";
+
+/** @typedef {import("../core/types.mjs").RunKind} RunKind */
+
+/** A fresh `starting` claim is a normal cold start for this long — never an orphan (issue #70). */
+export const HOST_START_GRACE_MS = 10_000;
+/** Bounded wait for the per-view host-start lease on explicit user actions (dispatch/reply). */
+export const HOST_START_LOCK_WAIT_MS = 500;
+/** Bounded wait for a revoked host's runner/child to end before recovery escalates (issue #70). */
+export const HOST_RECOVERY_GRACE_MS = 5_000;
+/** Poll cadence while waiting out a host recovery window. */
+const HOST_RECOVERY_POLL_MS = 150;
+/** Creation-time tolerance when a host role can only be corroborated by process creation time (issue #217). */
+export const HOST_IDENTITY_CREATION_TOLERANCE_MS = 5_000;
+/** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
+const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
+/**
+ * How long after a finalized host to keep re-probing a still-`running` run
+ * before treating it as a hard-kill artifact (issue #230). Finalization waits
+ * for the runner and child pids to die, not for the workflow engine's last
+ * write, so the `paused` head the engine writes while settling in-flight step
+ * children during SIGTERM shutdown can land after `host.state = exited`. A
+ * probe in that window reports `running` and, without this grace period, the
+ * interruption notice would be swallowed for that host incarnation.
+ */
+export const NOTICE_FLIP_GRACE_MS = 60_000;
+
+/**
+ * Dynamic readers for the ladder constants above (issue #95 F4). Module-load-time
+ * constants cannot see env set after import, so every ladder decision reads the
+ * knob at use time; unset env keeps the exact production default.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {number}
+ */
+export function resolveHostStartGraceMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_START_GRACE_MS", HOST_START_GRACE_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveHostRecoveryGraceMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS", HOST_RECOVERY_GRACE_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveHostRecoveryPollMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS", HOST_RECOVERY_POLL_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveIdentityCreationToleranceMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_IDENTITY_CREATION_TOLERANCE_MS", HOST_IDENTITY_CREATION_TOLERANCE_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveAttachResolveTimeoutMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS", ATTACH_RESOLVE_TIMEOUT_MS);
+}
+
+/**
+ * @param {{
+ *   root: string,
+ *   runnerScript: string,
+ *   ptyRunnerScript?: string,
+ *   piCommand: string,
+ *   piArgsPrefix: string[],
+ *   defaultCwd: string,
+ *   titleRunnerScript?: string,
+ *   autoStateRunnerScript?: string,
+ *   launch?: typeof launchRun,
+ *   launchHost?: typeof launchHostProcess,
+ *   launchTitle?: typeof launchTitleProcess,
+ *   launchAutoState?: typeof launchAutoStateProcess,
+ *   ptySupport?: (opts?: { refresh?: boolean, maxAgeMs?: number }) => { ok: boolean, reason?: string|null, issue?: any },
+ *   pruneScreenLogs?: typeof pruneScreenLogs,
+ *   randomId?: () => string,
+ *   now?: () => number,
+ *   acquireLock?: typeof acquireOwnedViewLock,
+ *   tryAcquireLock?: typeof tryAcquireOwnedViewLock,
+ *   observeProcess?: (identity: {pid: number, startToken: string|null}|null, observation: {spawnedAt: number|null, pid: number|null, tokenMemo: Map<number, Promise<string|null>>}) => "not_started"|"dead"|"owned"|"foreign"|"unknown"|Promise<"not_started"|"dead"|"owned"|"foreign"|"unknown">,
+ *   isAlive?: (pid: number) => boolean,
+ *   readStartToken?: (pid: number) => Promise<string|null>,
+ *   probeProcessIdentity?: (pid: number) => Promise<{creationTimeMs: number|null, commandLine: string|null}|null>,
+ *   signalOwnedProcess?: (identity: {pid: number, startToken: string|null}, signal: string) => void,
+ *   probeHostFn?: typeof probeHost,
+ *   sleepFn?: (ms: number) => Promise<void>,
+ *   sendStateCommand?: typeof sendStateCommand,
+ *   availableModels?: () => Array<{ provider: string, id: string }> | undefined,
+ *   workflowHome?: string,
+ *   backgroundRuns?: {
+ *     scanBackgroundRuns: typeof scanBackgroundRuns,
+ *     probeBackgroundRun: typeof probeBackgroundRun,
+ *   },
+ * }} opts
+ */
+/** A pending question that is an open dialog, such as a permission prompt. */
+const DIALOG = "dialog";
+
+export function createService(opts) {
+	const root = opts.root;
+	const launch = opts.launch ?? launchRun;
+	const launchHostImpl = opts.launchHost ?? launchHostProcess;
+	const launchTitleImpl = opts.launchTitle ?? launchTitleProcess;
+	const launchAutoStateImpl = opts.launchAutoState ?? launchAutoStateProcess;
+	const ptySupport = opts.ptySupport ?? ptyHostAvailability;
+	const ptyRunnerScript = opts.ptyRunnerScript ?? opts.runnerScript;
+	const titleRunnerScript = opts.titleRunnerScript ?? null;
+	const randomIdImpl = opts.randomId ?? (() => randomBytes(16).toString("hex"));
+	const nowImpl = opts.now ?? Date.now;
+	const acquireLockImpl = opts.acquireLock ?? acquireOwnedViewLock;
+	const tryAcquireLockImpl = opts.tryAcquireLock ?? tryAcquireOwnedViewLock;
+	const sendStateCommandImpl = opts.sendStateCommand ?? sendStateCommand;
+	const ensureCoordinatorImpl = opts.ensureCoordinator ?? ensureCoordinator;
+	// Desync episode throttle: a stuck (stateRev:statusRev) pair logs once per
+	// service, not once per reconcile pass — see createDesyncEpisodeThrottle().
+	const desyncThrottle = createDesyncEpisodeThrottle();
+	// Identity-aware observation/signalling for host recovery (issue #70). Callers must
+	// only signal after observeProcess returned "owned" for that exact identity.
+	// The default assembles the observation snapshot (issue #238 D4) and hands the
+	// judgment to the pure `processIdentityState`.
+	// Injected observers are also called when the role has no identity (the default
+	// handles that and falls through to the probe path), so an injection must not
+	// assume `identity.pid` is present.
+	const observeProcessImpl = opts.observeProcess ?? observeProcessIdentity;
+	const signalOwnedProcessImpl = opts.signalOwnedProcess ?? defaultSignalOwnedProcess;
+	// Process liveness and cross-platform start-token reads (issue #238). Both are
+	// injectable so token-path judgment is unit-testable without real processes.
+	const isAliveImpl = opts.isAlive ?? isAlive;
+	const readStartTokenImpl = opts.readStartToken ?? readProcessStartToken;
+	// Corroborating process identity probe for platforms without a start token
+	// (issue #217). Callers inject it in tests; the default reads platform-
+	// specific creation time + command line for one pid.
+	const probeProcessIdentityImpl = opts.probeProcessIdentity ?? readProcessIdentityProbe;
+	// Attach-resolver dependencies (issue #70 Task 12): a real socket probe and an
+	// awaitable sleep. The resolver runs on the UI thread, so its waits MUST go
+	// through sleepFn (never a blocking acquire / Atomics.wait).
+	const probeHostImpl = opts.probeHostFn ?? probeHost;
+	const sleepFnImpl = opts.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+	// Live model list for the stale-defaultModel launch guard (issue #90). Called
+	// at validation time (never cached at startup) and wrapped defensively by the
+	// caller; undefined/absent skips validation entirely.
+	const availableModelsImpl = opts.availableModels ?? null;
+	// Background-run protection (issue #230): the scan/probe pair and the workflow
+	// home are injectable for tests; the env guard flag is read at call time.
+	const backgroundRunsImpl = opts.backgroundRuns ?? { scanBackgroundRuns, probeBackgroundRun };
+	const workflowHomeImpl = opts.workflowHome ?? resolveWorkflowHome();
+	// Notice memo (issue #230): remember (viewId, host.endedAt) after a successful
+	// probe, except while it still reports any `running` run inside the flip grace
+	// window — the engine's last `paused` write can land after finalization, so
+	// that window stays un-memoized and re-probes next tick to catch the flip
+	// even when an older `paused` run coexists with the running one. `!probe.ok`
+	// stays un-memoized to retry transient read failures.
+	const noticeProbeMemo = new Set();
+	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
+	// the same view share one promise (issue #70 Task 12).
+	const inflightAttachResolvers = new Map();
+
+	const pruneScreenLogsImpl = opts.pruneScreenLogs ?? pruneScreenLogs;
+	// Reclaim replay logs of long-ended views on dashboard startup. Deferred via
+	// setImmediate so the first frame is unaffected; any failure must not break
+	// the dashboard.
+	setImmediate(() => {
+		try {
+			const stats = pruneScreenLogsImpl(root, { retentionDays: readLaunchPrefs(root).screenLogRetentionDays });
+			// One JSONL record per pass that actually reclaimed something. `removed` is a
+			// one-time event per file, so records stay proportional to real usage.
+			// Persistent conditions (a permanent foreign dir, a recurring unlink failure)
+			// ride along as record fields but never trigger a record on their own —
+			// otherwise this file would itself grow without bound from routine opens.
+			if (stats && stats.removed > 0) {
+				appendLine(P.gcHistoryPath(root), JSON.stringify({ at: Date.now(), ...stats }));
+			}
+		} catch {}
+	}).unref?.();
+
+	/**
+	 * Launch a run (dispatch or reply) against an existing view, updating its state to queued.
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @param {string} prompt
+	 * @param {RunKind} kind
+	 * @returns {Promise<{ runId: string, pid: number|null }>} resolves after
+	 *   mark_queued has landed and the detached runner is spawned (ordering
+	 *   contract: the row must be queued before the runner can boot, final-review F2).
+	 */
+	async function launchForView(meta, prompt, kind) {
+		const runId = newRunId();
+		/** @type {import("../core/types.mjs").RunConfig} */
+		const config = {
+			root,
+			viewId: meta.id,
+			runId,
+			kind,
+			sessionFile: meta.sessionFile,
+			cwd: meta.cwd,
+			prompt,
+			piCommand: opts.piCommand,
+			piArgsPrefix: opts.piArgsPrefix,
+			model: meta.defaultModel ?? null,
+			thinkingLevel: meta.defaultThinking ?? null,
+			tools: null,
+		};
+		// Final-review F2 residual (fix round 2): mark_queued must LAND before the
+		// runner can boot. A detached runner that boots faster than this round-trip
+		// used to send run_started while the row was still manual-completed → the
+		// command hit the manual fence → row stuck queued/alive with no status file
+		// → beats and run_finalized reject stale_run forever → permanent zombie.
+		// Spawn regardless of the result: with the coordinator unreachable the
+		// runner's own commands fail the same way either way — launch availability
+		// beats strict ordering.
+		await markQueued(meta.id, runId);
+		const { pid } = launch(root, config, { runnerScript: opts.runnerScript });
+		appendDiagnostic(root, meta.id, { source: "service", runId, code: "launch_run", message: "Detached runner launched", details: { kind, pid } });
+		return { runId, pid };
+	}
+
+	/**
+	 * Launch a durable interactive PTY host for a view — two-phase claim protocol
+	 * (issue #70). Everything (claim → spawn → runnerPid merge) happens while the
+	 * caller holds the per-view `host-start` lease, so concurrent service processes
+	 * can never stack a second host on top of a live claim.
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @param {string|null} initialPrompt
+	 * @returns {Promise<{ ok: true, status: "started"|"pending"|"reused", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }>}
+	 */
+	async function launchHost(meta, initialPrompt, launchOpts = {}) {
+		let lease;
+		try {
+			lease = acquireLockImpl(root, meta.id, "host-start", { waitMs: HOST_START_LOCK_WAIT_MS, identity: serviceIdentity() });
+		} catch {
+			// LOCK_TIMEOUT means lease contention (another live process holds it);
+			// an IO-class failure means the lock path itself is unusable. Both map
+			// to "cannot launch now": surface the existing claim as pending, never stack.
+			const existing = readHost(root, meta.id);
+			return pendingLaunchResult(existing);
+		}
+		try {
+			// Same ordering contract as launchForView (final-review F2 residual):
+			// the row must leave completed/fenced before the host can start work.
+			// `return await` (not `return`) keeps the host-start lease held until
+			// the two-phase claim transaction settles.
+			if (launchOpts.markQueued !== false) await markQueued(meta.id, null);
+			return await startHostUnderLease(meta, initialPrompt, launchOpts);
+		} finally {
+			try { lease.release(); } catch { /* best effort */ }
+		}
+	}
+
+	/** @param {import("../core/types.mjs").HostStatus|null} host */
+	function pendingLaunchResult(host) {
+		return { ok: true, status: "pending", pid: null, socketPath: host?.socketPath ?? null, instanceId: host?.instanceId ?? null };
+	}
+
+	/**
+	 * Actionable error when the view's defaultModel is provably unavailable
+	 * (issue #90): launching a child with a dead model id makes it exit 1 on
+	 * every start, so attach would loop cold starts forever. Only fires when a
+	 * model is configured AND a live model list is injectable; anything
+	 * uncertain (no list, list call failure) conservatively allows the launch.
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @returns {string|null}
+	 */
+	function validateViewModelMeta(meta) {
+		const model = meta.defaultModel ?? null;
+		if (!model || !availableModelsImpl) return null;
+		let available;
+		try {
+			available = availableModelsImpl();
+		} catch {
+			return null;
+		}
+		if (modelRefAvailable(model, available)) return null;
+		return `Model "${model}" configured for this session is no longer available — update the view's model (or clear defaultModel) and retry attach.`;
+	}
+
+	/**
+	 * Claim → spawn → merge flow. The CALLER must already hold the `host-start`
+	 * lease; this function never acquires or releases it.
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @param {string|null} initialPrompt
+	 * @returns {{ ok: true, status: "reused"|"pending"|"started", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }}
+	 */
+	function startHostUnderLease(meta, initialPrompt, launchOpts = {}) {
+		const existing = readHost(root, meta.id);
+		if (existing && (existing.state === "starting" || existing.state === "alive" || existing.state === "stopping")) {
+			// An active claim already exists — reuse it, never a second spawn.
+			return existing.state === "alive"
+				? { ok: true, status: "reused", pid: null, socketPath: existing.socketPath ?? null, instanceId: existing.instanceId ?? null }
+				: pendingLaunchResult(existing);
+		}
+		// No record is trivially replaceable; a terminal record only when nothing
+		// it names can still be alive (conservative: a live pid is "unknown" and blocks).
+		if (existing && !canReplaceHost(observeHostForReplace(existing))) {
+			return pendingLaunchResult(existing);
+		}
+
+		// Fail fast BEFORE claiming (issue #90): no claim record, no config file,
+		// no spawn — the resolver surfaces the error via its pending reason.
+		const modelError = validateViewModelMeta(meta);
+		if (modelError) return { ok: false, error: modelError };
+
+		const instanceId = randomIdImpl();
+		const configPath = P.hostConfigPathFor(root, meta.id, instanceId);
+		const socketPath = P.hostEndpointPathFor(process.platform, root, meta.id, instanceId);
+		/** @type {import("../core/types.mjs").HostConfig} */
+		const config = {
+			root,
+			viewId: meta.id,
+			sessionFile: meta.sessionFile,
+			cwd: meta.cwd,
+			initialPrompt,
+			piCommand: opts.piCommand,
+			piArgsPrefix: opts.piArgsPrefix,
+			model: meta.defaultModel ?? null,
+			thinkingLevel: meta.defaultThinking ?? null,
+			tools: null,
+			env: {},
+			cols: Number(process.env.COLUMNS || 120),
+			rows: Number(process.env.LINES || 36),
+			screenLogMaxBytes: normalizeScreenLogMaxBytes(readLaunchPrefs(root).screenLogMaxSize),
+			instanceId,
+			configPath,
+			socketPath,
+		};
+		const claimIdentity = serviceIdentity();
+		const claimed = claimHost(root, {
+			viewId: meta.id,
+			instanceId,
+			configPath,
+			socketPath,
+			claimAt: nowImpl(),
+			claimPid: process.pid,
+			claimIdentity,
+			cols: config.cols,
+			rows: config.rows,
+		});
+		if (!claimed.claimed) {
+			// Lost the host-meta race: another launch owns the claim now.
+			return pendingLaunchResult(claimed.host);
+		}
+
+		let pid = null;
+		let spawnError = null;
+		try {
+			({ pid } = launchHostImpl(root, config, { runnerScript: ptyRunnerScript }));
+		} catch (err) {
+			spawnError = err instanceof Error ? err.message : String(err);
+		}
+		if (pid == null) {
+			const message = spawnError ?? "PTY host runner failed to spawn";
+			updateOwnedHost(root, meta.id, instanceId, (h) => ({ ...h, state: "failed", endedAt: nowImpl(), exitCode: 1, error: message }));
+			removeFile(configPath);
+			return { ok: false, error: message, fallbackReason: message };
+		}
+		updateOwnedHost(root, meta.id, instanceId, (h) => ({ ...h, runnerPid: pid, runnerSpawnedAt: nowImpl() }));
+		appendDiagnostic(root, meta.id, { source: "service", code: "launch_host", message: "PTY host launched", details: { pid, instanceId, hasInitialPrompt: Boolean(initialPrompt) } });
+		return { ok: true, status: "started", pid, socketPath, instanceId };
+	}
+
+	/**
+	 * Best-effort detached title generation. If this fails or times out, the fallback slug
+	 * remains as the row name.
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @param {string} prompt
+	 */
+	function queueGeneratedTitle(meta, prompt) {
+		if (!titleRunnerScript) return;
+		/** @type {import("../core/types.mjs").TitleConfig} */
+		const config = {
+			root,
+			viewId: meta.id,
+			cwd: meta.cwd,
+			prompt,
+			fallbackName: meta.name,
+			piCommand: opts.piCommand,
+			piArgsPrefix: opts.piArgsPrefix,
+			model: null,
+		};
+		try {
+			launchTitleImpl(root, config, { runnerScript: titleRunnerScript });
+		} catch {
+			/* best effort */
+		}
+	}
+
+	/**
+	 * Apply immediate heuristic auto-state and, when configured, queue a detached
+	 * model pass to refine the row without blocking the live Pi child.
+	 *
+	 * Issue #91 (A8, service source): the classification lands through the View
+	 * State Coordinator — the single writer of state.json/status.json. On apply,
+	 * projection-relevant fields are refreshed from the materialized state so the
+	 * caller's foreground projection (writeForegroundState) cannot clobber the
+	 * patch with stale in-memory values. Ambiguous transport outcomes (timeout /
+	 * connection_reset) never fall back to a direct write — the command may
+	 * already be journaled, and the coordinator's boot replay is the recovery
+	 * path. coordinator_disabled keeps the pre-coordinator in-memory apply.
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @param {import("../core/types.mjs").RunStatus} status refreshed in place on apply
+	 * @param {import("../core/types.mjs").EvidenceSnapshot} evidence
+	 * @returns {Promise<boolean>} whether the classification was applied
+	 */
+	async function queueAutoState(meta, status, evidence) {
+		if (!autoStateEnabled()) return false;
+		if (status.processState === "alive" || status.semanticState === "failed" || status.semanticState === "stopped") return false;
+		const latest = latestEvidenceText(evidence) || status.latestAssistantPreview || status.summary || "";
+		if (!latest.trim()) return false;
+		const classification = heuristicAutoState(latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
+		const commandRunId = status.runId === "foreground" ? null : status.runId;
+		const result = await sendStateCommandImpl(root, {
+			type: "state_command",
+			viewId: meta.id,
+			runId: commandRunId,
+			source: "service",
+			kind: "auto_state_classified",
+			expectedRevision: null,
+			payload: { classification },
+		});
+		if (opts.autoStateRunnerScript) {
+			try {
+				launchAutoStateImpl(root, {
+					root,
+					viewId: meta.id,
+					runId: status.runId === "foreground" ? null : status.runId,
+					cwd: meta.cwd,
+					piCommand: opts.piCommand,
+					piArgsPrefix: opts.piArgsPrefix,
+				}, { runnerScript: opts.autoStateRunnerScript });
+			} catch (err) {
+				appendDiagnostic(root, meta.id, { source: "service", level: "warn", code: "auto_state_launch_failed", message: "Auto-state classifier could not be launched", details: { error: err instanceof Error ? err.message : String(err) } });
+			}
+		}
+		if (result.status === "applied") {
+			const fresh = readState(root, meta.id);
+			if (fresh) {
+				status.semanticState = fresh.semanticState;
+				status.summary = fresh.summary;
+				status.question = fresh.question;
+				status.autoState = fresh.autoState ?? null;
+			}
+			return true;
+		}
+		if (result.reason === "coordinator_disabled") {
+			return applyAutoStateToStatus(status, classification, Date.now());
+		}
+		// Unified decided/ambiguous classification (CR r2 issue-3): decided
+		// rejects (manual_fence/stale_run/…) log as info *_skipped — the
+		// coordinator's verdict is authoritative; only genuinely ambiguous
+		// outcomes (timeout/connection_reset) keep the recovery-path warn.
+		appendDiagnostic(root, meta.id, { source: "service", runId: commandRunId, ...commandRejectDiagnostic("auto_state", "Auto-state classification", result.reason, "otherwise the next classification pass will converge the row"), details: { reason: result.reason } });
+		return false;
+	}
+
+	/**
+	 * Fire a state command for a non-run lifecycle/metadata mutation and surface
+	 * non-applied outcomes. Ambiguity contract (issue #91): timeout /
+	 * connection_reset mean the command MAY already be journaled — never fall
+	 * back to a direct write on those; only the explicit
+	 * AGENT_BOARD_COORDINATOR=off escape hatch takes the legacy branch (the
+	 * caller checks `reason === "coordinator_disabled"`).
+	 * @param {object} command
+	 * @param {string} [viewId] defaults to command.viewId
+	 */
+	async function sendLifecycleCommand(command, viewId = command.viewId) {
+		const result = await sendStateCommandImpl(root, command);
+		if (result.status !== "applied" && result.reason !== "coordinator_disabled") {
+			appendDiagnostic(root, viewId, { source: "service", level: "warn", code: "state_command_not_applied", message: `${command.kind} ${result.status} (${result.reason})`, details: { kind: command.kind, reason: result.reason } });
+		}
+		return result;
+	}
+
+	/** Legacy direct write for mark_queued — coordinator_disabled escape hatch only. */
+	function markQueuedDirect(viewId, runId) {
+		const state = readState(root, viewId) ?? blankState(viewId);
+		state.currentRunId = runId;
+		state.semanticState = "queued";
+		state.processState = "alive";
+		state.summary = "Queued";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
+	/** @param {string} viewId @param {string|null} runId @returns {Promise<{status: string, reason: string|null, materializedRevision?: number}>} */
+	function markQueued(viewId, runId) {
+		if (coordinatorDisabled()) {
+			markQueuedDirect(viewId, runId);
+			return Promise.resolve({ status: "applied", reason: "coordinator_disabled" });
+		}
+		// Fire-and-forget: legacy issued this write right after launch() without
+		// waiting on the runner, and the coordinator serializes arrival order the
+		// same way. N1 (Task 1): command.runId stays null — the new run's id rides
+		// in the payload and the decision branch pins currentRunId, so the generic
+		// stale-run guard cannot fire against the PREVIOUS run.
+		//
+		// source is "dashboard-user" on purpose (final-review F1): launching a run
+		// from these flows is ALWAYS user intent (reply / dispatch / attach), and
+		// the manual fence exists to protect the user's verdict from AUTOMATED late
+		// writes — a user-initiated re-launch IS the user changing the verdict, so
+		// mark_queued must lift the fence for the rest of the new run (otherwise a
+		// reply on a done row would execute invisibly while the row stays
+		// completed). Automated re-launch stays guarded upstream: the job-runner's
+		// post-exit follow-up claim refuses rows carrying a manual verdict
+		// (drainQueuedFollowUp: `if (isManualVerdict(readState(...))) return;`),
+		// and the service-side drain path delivers already-queued user follow-ups
+		// with no fence by design (prompt-not-lost, issue #70 — its live-host input
+		// path never fenced either).
+		// Fix round 2 (launch ordering): this promise is now AWAITED by launchForView
+		// / launchHost before they spawn — see the ordering notes there.
+		return sendLifecycleCommand({
+			type: "state_command",
+			viewId,
+			runId: null,
+			source: "dashboard-user",
+			kind: "mark_queued",
+			expectedRevision: null,
+			payload: { runId },
+		}).catch(() => ({ status: "rejected", reason: "connection_reset" }));
+	}
+
+	/** Legacy direct write for markVisited — coordinator_disabled escape hatch only. */
+	function markVisitedDirect(row) {
+		const state = readState(root, row.meta.id) ?? row.state ?? blankState(row.meta.id);
+		state.lastVisitedAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
+	/**
+	 * @param {string} viewId
+	 * @returns {Promise<{ ok: boolean, error?: string }>}
+	 */
+	async function markVisited(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		if (coordinatorDisabled()) {
+			markVisitedDirect(row);
+			return { ok: true };
+		}
+		// dashboard-user (not "service"): visiting is a user action, and the
+		// manual fence must not stop visit-recency tracking on completed rows —
+		// legacy stamped lastVisitedAt unconditionally. Whitelist: lastVisitedAt only.
+		const result = await sendLifecycleCommand({
+			type: "state_command",
+			viewId,
+			source: "dashboard-user",
+			kind: "patch_fields",
+			expectedRevision: null,
+			payload: { state: { lastVisitedAt: Date.now() } },
+		}, viewId);
+		if (result.reason === "coordinator_disabled") markVisitedDirect(row);
+		// Visit tracking is best-effort metadata — never fail the UI action.
+		return { ok: true };
+	}
+
+	/** Legacy direct write for adoptSession — coordinator_disabled escape hatch only. */
+	function adoptStateDirect(viewId, state) {
+		const target = state ?? readState(root, viewId) ?? blankState(viewId);
+		target.semanticState = "idle";
+		target.processState = "exited";
+		target.needsInput = false;
+		target.hasError = false;
+		target.question = null;
+		target.pendingQuestions = [];
+		target.error = null;
+		target.summary = "Backgrounded session";
+		target.updatedAt = Date.now();
+		target.lastActivityAt = Date.now();
+		writeState(root, target);
+	}
+
+	/** Route the adopt-idle transition through the coordinator (fenced, journaled). */
+	async function adoptIdleState(viewId, state) {
+		const result = await sendLifecycleCommand({
+			type: "state_command",
+			viewId,
+			runId: null,
+			source: "dashboard-user",
+			kind: "adopt_session",
+			expectedRevision: null,
+			payload: {},
+		}, viewId);
+		if (result.reason === "coordinator_disabled") adoptStateDirect(viewId, state);
+	}
+
+	/** Legacy direct-write completion — only reachable when the coordinator is
+	 *  explicitly disabled (AGENT_BOARD_COORDINATOR=off tests/escape hatch). */
+	function completeViewDirect(state) {
+		state.semanticState = "completed";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.summary = completionSummary(state);
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		// Also clear autoState in the run status so in-flight model passes
+		// (job-runner / state-runner) see the manual verdict and skip refinement.
+		if (state.currentRunId) {
+			const status = readStatus(root, state.viewId, state.currentRunId);
+			if (status) {
+				status.autoState = null;
+				writeStatus(root, status);
+			}
+		}
+		writeState(root, state);
+	}
+
+	/** Direct write for holdView — coordinator_disabled escape hatch only. */
+	function holdViewDirect(state) {
+		state.semanticState = "holding";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
+	/** Direct write for clearHoldView — coordinator_disabled escape hatch only. */
+	function clearHoldViewDirect(state) {
+		state.semanticState = "idle";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
+	/**
+	 * Explicitly mark an inactive session as done via the View State Coordinator
+	 * (issue #91): the command is journaled and materialized by the single owner,
+	 * which also rejects stale-run and fenced manual-verdict overwrites.
+	 * @param {string} viewId
+	 * @returns {Promise<{ ok: boolean, error?: string }>}
+	 */
+	async function completeView(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		// Fast local pre-check for instant UI feedback; the coordinator's decision
+		// stays authoritative (its "busy" rejection maps to the same wording).
+		if (isAgentBusy(row)) return { ok: false, error: "Wait for the active run to finish before marking done" };
+		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+		const result = await sendStateCommandImpl(root, {
+			type: "state_command",
+			viewId,
+			runId: state.currentRunId ?? null,
+			source: "dashboard-user",
+			kind: "mark_completed",
+			expectedRevision: null,
+			payload: {},
+		});
+		if (result.status === "applied") return { ok: true };
+		if (result.reason === "busy") return { ok: false, error: "Wait for the active run to finish before marking done" };
+		if (result.reason === "coordinator_disabled") {
+			completeViewDirect(state);
+			return { ok: true };
+		}
+		// Ambiguous outcomes (timeout / connection_reset: the command MAY already be
+		// journaled) and real rejections surface verbatim — never fall back to a
+		// direct write here, it would bypass the single-writer fence.
+		return { ok: false, error: result.reason ?? "state_command_failed" };
+	}
+
+	/** Place an inactive session on hold (issue #145; template: completeView). */
+	async function holdView(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		if (isAgentBusy(row)) return { ok: false, error: "Wait for the active run to finish before placing on hold" };
+		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+		const result = await sendStateCommandImpl(root, {
+			type: "state_command",
+			viewId,
+			runId: state.currentRunId ?? null,
+			source: "dashboard-user",
+			kind: "mark_holding",
+			expectedRevision: null,
+			payload: {},
+		});
+		if (result.status === "applied") return { ok: true };
+		if (result.reason === "busy") return { ok: false, error: "Wait for the active run to finish before placing on hold" };
+		if (result.reason === "coordinator_disabled") {
+			holdViewDirect(state);
+			return { ok: true };
+		}
+		return { ok: false, error: result.reason ?? "state_command_failed" };
+	}
+
+	/** Resume an on-hold session back to Needs-instructions (issue #145). */
+	async function clearHoldView(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+		const result = await sendStateCommandImpl(root, {
+			type: "state_command",
+			viewId,
+			runId: state.currentRunId ?? null,
+			source: "dashboard-user",
+			kind: "clear_holding",
+			expectedRevision: null,
+			payload: {},
+		});
+		if (result.status === "applied") return { ok: true };
+		if (result.reason === "no_change") return { ok: true };
+		if (result.reason === "coordinator_disabled") {
+			clearHoldViewDirect(state);
+			return { ok: true };
+		}
+		return { ok: false, error: result.reason ?? "state_command_failed" };
+	}
+
+	/** Legacy direct write for archiveView's busy-row stop — coordinator_disabled escape hatch only. */
+	function archiveStateDirect(row) {
+		const state = readState(root, row.meta.id) ?? row.state ?? blankState(row.meta.id);
+		state.semanticState = "stopped";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.summary = "Stopped";
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
+	/**
+	 * @param {string} viewId
+	 * @returns {Promise<{ ok: boolean, error?: string }>}
+	 */
+	async function archiveView(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		if (row.host?.instanceId) stopHostRow(row, "archive");
+		else if (row.hostAlive) sendHostMessage(row, { type: "terminate" });
+		if (row.alive && row.state?.currentRunId) {
+			const pid = readPid(root, viewId, row.state.currentRunId);
+			if (pid) killProcess(pid);
+		}
+		if (isAgentBusy(row)) {
+			// dashboard-user: archiving is a user action. Busy rows are allowed by
+			// the decision kind (archiving a working row stops it — legacy parity).
+			const result = await sendLifecycleCommand({
+				type: "state_command",
+				viewId,
+				source: "dashboard-user",
+				kind: "archive_view",
+				expectedRevision: null,
+				payload: {},
+			}, viewId);
+			if (result.reason === "coordinator_disabled") archiveStateDirect(row);
+		}
+		foregroundPreviewCache.forget(viewId);
+		foregroundProjectionCache.forget(viewId);
+		row.meta.archived = true;
+		writeMeta(root, row.meta);
+		return { ok: true };
+	}
+
+	/** @param {string} viewId @returns {import("../core/types.mjs").ViewState} */
+	function blankState(viewId) {
+		return {
+			version: 1,
+			viewId,
+			currentRunId: null,
+			semanticState: "queued",
+			processState: "exited",
+			summary: "Queued",
+			lastActivityAt: Date.now(),
+			updatedAt: Date.now(),
+			needsInput: false,
+			hasError: false,
+			latestAssistantPreview: "",
+			latestTool: null,
+			question: null,
+			pendingQuestions: [],
+			error: null,
+			lastVisitedAt: null,
+			lastAgentActivityAt: null,
+			autoState: null,
+		};
+	}
+
+	/** @param {string} a @param {string} b */
+	function samePath(a, b) {
+		return resolve(a) === resolve(b);
+	}
+
+	/**
+	 * @param {import("../core/store.mjs").Row} row
+	 * @returns {import("../core/types.mjs").RunStatus}
+	 */
+	function statusFromRow(row) {
+		const now = Date.now();
+		const s = row.state ?? blankState(row.meta.id);
+		return {
+			version: 1,
+			runId: s.currentRunId ?? "foreground",
+			viewId: row.meta.id,
+			pid: null,
+			startedAt: s.lastActivityAt ?? now,
+			endedAt: null,
+			exitCode: null,
+			kind: "reply",
+			prompt: "",
+			model: row.meta.defaultModel ?? null,
+			semanticState: s.semanticState,
+			processState: s.processState,
+			summary: s.summary,
+			lastActivityAt: s.lastActivityAt,
+			// Issue #225: freshness signal for the projection cache. Absent on legacy rows.
+			updatedAt: typeof s.updatedAt === "number" ? s.updatedAt : 0,
+			currentTool: s.latestTool ? { name: s.latestTool.name, path: s.latestTool.path, summary: s.summary } : null,
+			latestAssistantPreview: s.latestAssistantPreview,
+			question: s.question,
+			pendingQuestions: Array.isArray(s.pendingQuestions) ? s.pendingQuestions : [],
+			error: s.error,
+			lastAgentActivityAt: s.lastAgentActivityAt ?? null,
+			stopReason: null,
+			stoppedByUser: false,
+			turns: 0,
+			toolCount: 0,
+			autoState: s.autoState ?? null,
+		};
+	}
+
+	/**
+	 * @param {import("../core/store.mjs").Row} row
+	 * @param {import("../core/types.mjs").RunStatus} status
+	 * @param {{ source?: string }} [opts] F-lift (issue #145): pass "dashboard-user"
+	 *   when the mirror was triggered by a human submitting input — the manual
+	 *   fence must not outlive the user speaking to the row.
+	 * @returns {Promise<void>}
+	 */
+	async function writeForegroundState(row, status, opts = {}) {
+		// Issue #225: a strictly increasing stamp lets the next disk rebuild tell a stale
+		// snapshot from this write, even when both land in the same millisecond.
+		const stamp = foregroundProjectionCache.nextStamp(row.meta.id);
+		const projected = projectViewState(status, stamp, readState(root, row.meta.id) ?? row.state ?? null);
+		foregroundProjectionCache.remember(row.meta.id, status, stamp);
+		// Foreground turns are driven by the interactive Pi process, not a detached
+		// runner, so keep currentRunId null. This prevents reconcile()/stop() from
+		// treating a foreground turn as a managed background runner pid. (The
+		// decision kind force-nulls it too; the caller-side null keeps the
+		// coordinator_disabled direct write at legacy parity.)
+		projected.currentRunId = null;
+		// Issue #113: remember the freshest known foreground fields before the
+		// coordinator round trip — syncRowEvent rebuilds from disk on the next
+		// event and must not read an older projection than this one.
+		foregroundPreviewCache.remember(row.meta.id, projected);
+		if (coordinatorDisabled()) {
+			writeState(root, projected);
+			return;
+		}
+		const result = await sendLifecycleCommand({
+			type: "state_command",
+			viewId: row.meta.id,
+			runId: null,
+			source: opts.source ?? "service",
+			kind: "sync_foreground",
+			expectedRevision: null,
+			payload: { projection: projected },
+		}, row.meta.id);
+		if (result.reason === "coordinator_disabled") writeState(root, projected);
+	}
+
+	/** @param {string} sessionFile */
+	function rowForSession(sessionFile) {
+		return listRows(root, { includeArchived: true }).find((r) => samePath(r.meta.sessionFile, sessionFile)) ?? null;
+	}
+
+	/**
+	 * Evict idle warm PTY hosts past TTL / over the warm pool cap.
+	 * Idle = host alive, not agent-busy, no attached clients.
+	 * Called lazily from dispatch/ensureHost (keepViewId = the view being used)
+	 * and periodically / on shutdown by the warm-host sweeper (issue #75).
+	 * @param {{ keepViewId?: string|null }} [pruneOpts]
+	 */
+	function pruneWarmHosts(pruneOpts = {}) {
+		const maxWarm = envInt("AGENT_BOARD_MAX_WARM_HOSTS", 4, 0, 50, "AGENT_VIEW_MAX_WARM_HOSTS");
+		const ttlMs = envInt("AGENT_BOARD_WARM_HOST_TTL_MS", 10 * 60 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_TTL_MS");
+		if (maxWarm === 0 && ttlMs === 0) return;
+		const graceMs = envInt("AGENT_BOARD_WARM_HOST_GRACE_MS", 30 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_GRACE_MS");
+		const keepViewId = pruneOpts.keepViewId ?? null;
+		const now = Date.now();
+		const rows = listRows(root);
+		const guardDisabled = process.env.AGENT_BOARD_NO_BACKGROUND_RUN_GUARD === "1";
+
+		// Phase 1 (dry): select without background-run protection. No candidates
+		// means no IO at all, preserving today's fast path for a full warm pool.
+		const dry = selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs, keepViewId });
+		const candidates = [...dry.ttlEvicted, ...dry.excessEvicted];
+		if (candidates.length === 0) return;
+
+		// One scan for the whole pass; the protection predicate stays pure
+		// in-memory (spec D5). minMtimeMs prefilters to heads that could belong
+		// to a live candidate host (spec D4); a candidate without startedAt
+		// falls back to 0, which disables the prefilter.
+		let scan = { ok: true, heads: [], error: null };
+		if (!guardDisabled) {
+			const candidateStartedAts = candidates.map((viewId) => rows.find((r) => r.meta.id === viewId)?.host?.startedAt ?? null);
+			const minStartedAt = candidateStartedAts.some((v) => v == null) ? 0 : Math.min(...candidateStartedAts);
+			scan = backgroundRunsImpl.scanBackgroundRuns({
+				workflowHome: workflowHomeImpl,
+				minMtimeMs: minStartedAt - CLOCK_EPSILON_MS,
+			});
+		}
+		const isProtected = (row) => {
+			if (guardDisabled) return false;
+			return classifyRunsForRow(scan.heads, {
+				sessionFile: row.meta.sessionFile,
+				hostStartedAt: row.host?.startedAt,
+			}).state === "protecting";
+		};
+
+		// Phase 2: re-select with the protection predicate so both eviction
+		// branches (TTL and maxWarm) exempt hosts running a background workflow.
+		const selected = selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs, keepViewId, isProtected });
+		for (const viewId of [...selected.ttlEvicted, ...selected.excessEvicted]) {
+			// Re-verify against fresh state before terminating: the selection ran
+			// on a listRows snapshot, and the host may have been dispatched (busy)
+			// or attached (attachedClients > 0) since. Never kill a busy/attached
+			// host; graceMs also re-checked in case the host was just restarted.
+			const row = loadRow(root, viewId);
+			if (!row?.hostAlive) continue;
+			if (isAgentBusy(row)) continue;
+			if ((row.host?.attachedClients ?? 0) !== 0) continue;
+			if (graceMs > 0 && row.host?.startedAt != null && Date.now() - row.host.startedAt < graceMs) continue;
+			if (isProtected(row)) continue;
+
+			if (guardDisabled) {
+				stopHostRow(row, "warm_prune");
+				continue;
+			}
+			// Fresh protection probe (A9): a run started between the snapshot and
+			// this stop decision still blocks the eviction. Fail-open: a probe
+			// error logs a deduped warning and proceeds without protection (D6).
+			const fresh = backgroundRunsImpl.probeBackgroundRun({
+				sessionFile: row.meta.sessionFile ?? null,
+				hostStartedAt: row.host?.startedAt ?? null,
+				workflowHome: workflowHomeImpl,
+			});
+			if (fresh.running) {
+				const runId = fresh.running.runId;
+				appendDiagnosticOnce(root, viewId, {
+					source: "service",
+					level: "warn",
+					code: "warm_prune_during_background_run",
+					message: `Skipped warm-host eviction: background workflow ${runId} started after selection`,
+					details: { runId, hostStartedAt: row.host?.startedAt ?? null },
+				}, { match: ["runId"] });
+				continue;
+			}
+			if (!fresh.ok) {
+				appendDiagnosticOnce(root, viewId, {
+					source: "service",
+					level: "warn",
+					code: "warm_prune_probe_failed",
+					message: "Could not read the workflow run store; warm-host eviction proceeded without background-run protection",
+					details: { error: String(fresh.error ?? "unknown") },
+				}, { match: ["error"] });
+				stopHostRow(row, "warm_prune");
+				continue;
+			}
+			stopHostRow(row, "warm_prune");
+		}
+	}
+
+	/** Stop a host row by policy (issue #70): new-protocol hosts get the authoritative
+	 *  file-based revoke (works even when the control socket is dead); legacy hosts
+	 *  without an instanceId keep the old socket-terminate fallback. */
+	function stopHostRow(row, reason) {
+		const instanceId = row.host?.instanceId ?? null;
+		if (instanceId) return requestHostStop(row.meta.id, instanceId, reason);
+		return sendHostMessage(row, { type: "terminate" });
+	}
+
+	/**
+	 * File-based host revoke (issue #70): marks the host record `stopping` with a
+	 * fresh revoke token so the runner's heartbeat shuts it down cooperatively.
+	 * Never signals, never spawns a replacement. Idempotent: terminal or
+	 * already-stopping states are left untouched (`requested: false`).
+	 * @param {string} viewId
+	 * @param {string|null} expectedInstanceId
+	 * @param {string} reason
+	 * @returns {{ ok: boolean, requested?: boolean, error?: string }}
+	 */
+	function requestHostStop(viewId, expectedInstanceId, reason) {
+		let wasRequested = false;
+		const res = updateOwnedHost(root, viewId, expectedInstanceId, (h) => {
+			if (h.state === "exited" || h.state === "failed" || h.state === "stopping") return h;
+			wasRequested = true;
+			return { ...h, state: "stopping", stopRequestedAt: nowImpl(), revokeToken: randomIdImpl(), stopReason: reason };
+		});
+		if (!res.updated) return { ok: false, error: "owner_changed" };
+		return { ok: true, requested: wasRequested };
+	}
+
+	/**
+	 * Assemble one host-role observation snapshot and let the pure state machine
+	 * judge it (issue #238 D4). The recorded start token is only read when the
+	 * record carries one, so legacy records (token `null`, or platforms without a
+	 * token) keep the zero-token-read path. `tokenMemo` deduplicates the (async,
+	 * expensive on win32) token read per pid, so one recovery pass reads each
+	 * process at most once.
+	 * @param {{pid:number,startToken:string|null}|null} identity recorded identity
+	 * @param {{spawnedAt:number|null, pid:number|null, tokenMemo:Map<number, Promise<string|null>>}} observation
+	 * @returns {Promise<"not_started"|"dead"|"owned"|"foreign"|"unknown">}
+	 */
+	async function observeProcessIdentity(identity, { spawnedAt, pid, tokenMemo }) {
+		if (identity == null && spawnedAt == null) return "not_started";
+		if (pid == null) return "unknown";
+		const alive = isAliveImpl(pid);
+		const observed = { alive, startToken: null };
+		if (alive && identity != null && identity.startToken != null) {
+			if (!tokenMemo.has(pid)) tokenMemo.set(pid, readStartTokenImpl(pid));
+			observed.startToken = await tokenMemo.get(pid);
+		}
+		return processIdentityState(identity, observed, spawnedAt);
+	}
+
+	/**
+	 * Observe one host role: a recorded identity goes through identity-aware
+	 * observation (token comparison first); a missing identity means `not_started`
+	 * (never spawned). An `unknown` observation (no stable token, or the token
+	 * path unavailable) is then corroborated by the process identity probe before
+	 * recovery decides (issue #217). The caller's `memo` deduplicates probes per
+	 * pid and `tokenMemo` deduplicates token reads per pid so one recovery pass
+	 * never observes the same process twice.
+	 * @param {any} host host record holding this role's identity/pid/spawn fields
+	 * @param {"runner"|"child"} role which host process to observe
+	 * @param {{ sessionFile: string|null, memo: Map<number, any>, tokenMemo: Map<number, Promise<string|null>> }} opts
+	 *   session file used as the child command fragment, and the per-call
+	 *   probe/token memos (kept separate: probe values are objects, token values
+	 *   are strings or null)
+	 */
+	async function observeHostRole(host, role, { sessionFile, memo, tokenMemo }) {
+		const identity = host?.[`${role}Identity`] ?? null;
+		const spawnedAt = host?.[`${role}SpawnedAt`] ?? null;
+		if (identity == null && spawnedAt == null) return "not_started";
+		const pid = identity?.pid ?? host?.[`${role}Pid`] ?? null;
+		if (pid == null) return "unknown";
+		const observation = await observeProcessImpl(identity, { spawnedAt, pid, tokenMemo });
+		if (observation !== "unknown") return observation;
+		if (!memo.has(pid)) memo.set(pid, await probeProcessIdentityImpl(pid));
+		return classifyUnverifiableProcess({
+			spawnedAt,
+			probe: memo.get(pid),
+			expectedCommandFragment: role === "child" ? sessionFile : host?.configPath ?? null,
+			toleranceMs: resolveIdentityCreationToleranceMs(),
+		});
+	}
+
+	/** Re-validate an "owned" identity immediately before signalling: a pid reused
+	 *  mid-recovery must never receive an escalation signal (#240 CR). A recorded
+	 *  start token is re-read live, bypassing the observation memo — on win32 the
+	 *  observed token may be ~400 ms old, leaving a pid-reuse window — and any
+	 *  mismatch or unreadable token refuses the signal, which leaves the recovery
+	 *  pending (safe: never foreign, never signalled). Records without a token keep
+	 *  the probe-derived re-validation. */
+	async function revalidateProbeOwned(host, role, sessionFile, memo) {
+		const identity = host?.[`${role}Identity`] ?? null;
+		const pid = identity?.pid ?? host?.[`${role}Pid`] ?? null;
+		if (pid == null) return false;
+		if (identity?.startToken != null) {
+			const token = await readStartTokenImpl(pid);
+			return token != null && token === identity.startToken;
+		}
+		const probe = await probeProcessIdentityImpl(pid);
+		memo.set(pid, probe);
+		return classifyUnverifiableProcess({
+			spawnedAt: host?.[`${role}SpawnedAt`] ?? null,
+			probe,
+			expectedCommandFragment: role === "child" ? sessionFile : host?.configPath ?? null,
+			toleranceMs: resolveIdentityCreationToleranceMs(),
+		}) === "owned";
+	}
+
+	/** A host role observation is "ended" when it is provably not running:
+	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
+	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
+
+	/**
+	 * Record the host roles that stranded a recovery (issue #217 D4).
+	 * Only roles whose identity is unverifiable (`"unknown"`) are recorded: an
+	 * `"owned"` role is alive and verified, so flagging it as unverifiable would
+	 * contradict the observation that stranded recovery. Only the producing side
+	 * writes: one event per instance+role, so repeated attach clicks on the same
+	 * stranded host never flood the diagnostics tail.
+	 * @param {string} viewId
+	 * @param {any} host host record the observations came from
+	 * @param {{ runner: string, child?: string|null }} observations `null` = not observed
+	 * @param {Map<number, any>} memo probe memo of the pass that produced `observations`
+	 * @param {"recover"|"attach"} path which call site stranded
+	 */
+	function noteRecoveryPending(viewId, host, observations, memo, path) {
+		for (const role of ["runner", "child"]) {
+			const observation = observations[role];
+			if (observation !== "unknown") continue;
+			const pid = host?.[`${role}Identity`]?.pid ?? host?.[`${role}Pid`] ?? null;
+			appendDiagnosticOnce(
+				root,
+				viewId,
+				{
+					source: "service",
+					level: "warn",
+					code: "host_recovery_pending",
+					message: "Host recovery is pending: process identity unverifiable",
+					details: {
+						instanceId: host?.instanceId ?? null,
+						role,
+						observation,
+						probe: (pid == null ? null : memo.get(pid)) ? "available" : "unavailable",
+						path,
+					},
+				},
+				{ match: ["instanceId", "role"] },
+			);
+		}
+	}
+
+	/**
+	 * Revoke + wait + replace a broken host (issue #70). The caller (attach
+	 * resolver) has already probed and decided the instance is unrecoverable.
+	 * Escalation signals go ONLY to identities observed as "owned" at that
+	 * moment, each guarded by an instance re-read; unknown identities leave the
+	 * host pending instead of guessing. The replacement claim is created only
+	 * after runner and child are both confirmed ended.
+	 * @param {string} viewId
+	 * @param {string} expectedInstanceId
+	 * @param {string|null} [sessionFile] session whose file identifies the child
+	 *   process; defaults to the row's meta session file
+	 * @returns {Promise<{ ok: boolean, recovered?: boolean, instanceId?: string, socketPath?: string|null, error?: string }>}
+	 */
+	async function recoverHost(viewId, expectedInstanceId, sessionFile = loadRow(root, viewId)?.meta.sessionFile ?? null) {
+		const ended = hostRoleEnded;
+		const probeMemo = new Map();
+		// Token reads are memoized separately from probes: probe values are objects,
+		// token values are strings/null. One recovery pass reads each pid once.
+		const tokenMemo = new Map();
+		const instanceStillExpected = () => {
+			const h = readHost(root, viewId);
+			return h != null && h.instanceId === expectedInstanceId;
+		};
+
+		// Gate: another launch/recovery in flight, or the instance already moved on.
+		const gate = tryAcquireLockImpl(root, viewId, "host-start", { identity: serviceIdentity() });
+		if (!gate.acquired) return { ok: false, error: "busy_retry_later" };
+		try {
+			const current = readHost(root, viewId);
+			if (!current || current.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
+			if (current.state === "exited" || current.state === "failed") return { ok: false, error: "already_recovered" };
+		} finally {
+			try { gate.lease.release(); } catch { /* best effort */ }
+		}
+
+		// File-based revoke under the lease is done; release before waiting so the
+		// dying runner's own finish path is never blocked by this recovery.
+		requestHostStop(viewId, expectedInstanceId, "recovery");
+
+		// Bounded wait for runner/child to end, with identity-checked escalation.
+		const startedAt = nowImpl();
+		let runnerTermSent = false;
+		let runnerKillSent = false;
+		let childTermSent = false;
+		let childKillSent = false;
+		let childTermAt = 0;
+		while (nowImpl() - startedAt < resolveHostRecoveryGraceMs()) {
+			const host = readHost(root, viewId);
+			if (!host || host.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
+			const runnerObservation = await observeHostRole(host, "runner", { sessionFile, memo: probeMemo, tokenMemo });
+			const childObservation = await observeHostRole(host, "child", { sessionFile, memo: probeMemo, tokenMemo });
+			if (ended(runnerObservation) && ended(childObservation)) break;
+			// Alive-but-unverifiable: never signal, never claim — stay pending.
+			if (runnerObservation === "unknown" || childObservation === "unknown") {
+				noteRecoveryPending(viewId, host, { runner: runnerObservation, child: childObservation }, probeMemo, "recover");
+				return { ok: false, error: "recovery_pending" };
+			}
+			if (!instanceStillExpected()) return { ok: false, error: "already_recovered" };
+			const elapsed = nowImpl() - startedAt;
+			if (runnerObservation === "owned") {
+				if (!runnerTermSent) {
+					if (await revalidateProbeOwned(host, "runner", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
+						runnerTermSent = true;
+					}
+				} else if (elapsed >= resolveHostRecoveryGraceMs() / 2 && !runnerKillSent) {
+					if (await revalidateProbeOwned(host, "runner", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
+						runnerKillSent = true;
+					}
+				}
+			}
+			// The child is only escalated once its runner is confirmed gone.
+			if (childObservation === "owned" && runnerObservation !== "owned") {
+				if (!childTermSent) {
+					if (await revalidateProbeOwned(host, "child", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.childIdentity, "SIGTERM");
+						childTermSent = true;
+						childTermAt = elapsed;
+					}
+				} else if (elapsed - childTermAt >= 1_000 && !childKillSent) {
+					if (await revalidateProbeOwned(host, "child", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.childIdentity, "SIGKILL");
+						childKillSent = true;
+					}
+				}
+			}
+			await sleepFnImpl(resolveHostRecoveryPollMs());
+		}
+		// Grace exhausted or loop broke — verify both roles are confirmed ended before claiming.
+		const finalHost = readHost(root, viewId);
+		if (!finalHost || finalHost.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
+		const finalRunnerObservation = await observeHostRole(finalHost, "runner", { sessionFile, memo: probeMemo, tokenMemo });
+		// Decision order preserved: the child is observed only once the runner is ended,
+		// and `null` means "not observed" so no diagnostic claims an unlooked-at role.
+		const finalChildObservation = ended(finalRunnerObservation) ? await observeHostRole(finalHost, "child", { sessionFile, memo: probeMemo, tokenMemo }) : null;
+		if (!ended(finalRunnerObservation) || !ended(finalChildObservation)) {
+			noteRecoveryPending(viewId, finalHost, { runner: finalRunnerObservation, child: finalChildObservation }, probeMemo, "recover");
+			return { ok: false, error: "recovery_pending" };
+		}
+
+		// Claim the replacement under the host-start lease: finalize the old record
+		// (clearing its process fields — they are confirmed gone) and claim fresh.
+		let claimLease;
+		try {
+			claimLease = acquireLockImpl(root, viewId, "host-start", { waitMs: HOST_START_LOCK_WAIT_MS, identity: serviceIdentity() });
+		} catch {
+			return { ok: false, error: "busy_retry_later" };
+		}
+		try {
+			const current = readHost(root, viewId);
+			if (!current || current.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
+			const finalized = updateOwnedHost(root, viewId, expectedInstanceId, (h) => ({
+				...h,
+				state: "exited",
+				endedAt: h.endedAt ?? nowImpl(),
+				exitCode: h.exitCode ?? 0,
+				runnerPid: null,
+				runnerIdentity: null,
+				runnerSpawnedAt: null,
+				childPid: null,
+				childIdentity: null,
+				childSpawnedAt: null,
+			}));
+			if (!finalized.updated) return { ok: false, error: "owner_changed" };
+			const instanceId = randomIdImpl();
+			// claimPid stays null: this recovery transaction is COMPLETE once the claim
+			// is on disk (nothing of ours is still between claim and spawn — spawning is
+			// deliberately the adopter's job). A live claimPid would make ensureHost /
+			// the resolver treat the replacement as a launcher mid-transaction and wait
+			// out HOST_START_GRACE_MS before adopting, which starves the recovery chain
+			// on slow machines (PR #84 A10 CI flake). Null = no launcher to protect:
+			// claimerGone holds immediately, so adoption can fire on the next tick.
+			const claimed = claimHost(root, {
+				viewId,
+				instanceId,
+				configPath: P.hostConfigPathFor(root, viewId, instanceId),
+				socketPath: P.hostEndpointPathFor(process.platform, root, viewId, instanceId),
+				claimAt: nowImpl(),
+				claimPid: null,
+				claimIdentity: null,
+				cols: Number(process.env.COLUMNS || 120),
+				rows: Number(process.env.LINES || 36),
+			});
+			if (!claimed.claimed) return { ok: false, error: "claim_lost", socketPath: claimed.host?.socketPath ?? null };
+			appendDiagnostic(root, viewId, { source: "service", code: "host_recovered", message: "PTY host recovered after revoke", details: { oldInstanceId: expectedInstanceId, instanceId } });
+			return { ok: true, recovered: true, instanceId, socketPath: claimed.host?.socketPath ?? null };
+		} finally {
+			try { claimLease.release(); } catch { /* best effort */ }
+		}
+	}
+
+	/**
+	 * ensureHost implementation (issue #70 Task 10 + Task 12 adopt branch).
+	 * @param {string} viewId
+	 * @returns {{ ok: boolean, pending?: boolean, started?: boolean, socketPath?: string|null, instanceId?: string|null, error?: string, fallbackReason?: string }}
+	 */
+	function ensureHostImpl(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		const host = row.host ?? null;
+		// Adopt-and-spawn (issue #70 Task 12): a `starting` claim whose runner was never
+		// spawned (the launcher crashed between claim and spawn, or recoverHost claimed
+		// a replacement without spawning) would pend forever. Take it over ONLY when the
+		// claim is provably stale or its claimer is gone. Recovery-created claims carry
+		// claimPid:null (their transaction is complete; spawning is the adopter's job),
+		// so claimerGone holds immediately and they adopt without a grace wait. Fresh
+		// claims with a live claimPid stay untouched: their launcher may legitimately be
+		// between claim and spawn inside the grace window.
+		if (host?.state === "starting" && host.runnerSpawnedAt == null && host.instanceId != null) {
+			const claimStale = nowImpl() - (host.claimAt ?? 0) > resolveHostStartGraceMs();
+			const claimerGone = !isAlive(host.claimPid ?? null);
+			if (claimStale || claimerGone) return adoptClaimedHost(viewId, row.meta, host);
+		}
+		if (row.hostActive) {
+			return { ok: true, pending: true, socketPath: row.host?.socketPath ?? null, instanceId: row.host?.instanceId ?? null };
+		}
+
+		// Default probe semantics: success is cached for the process lifetime and a
+		// failed probe retries on a short TTL. Forcing refresh here would spawn a
+		// probe process on every keypress-driven prewarm when PTY support is broken.
+		const pty = ptySupport();
+		if (!pty.ok) return { ok: false, error: "PTY unavailable", fallbackReason: nodePtyFallbackMessage(pty) };
+		if (isAgentBusy(row)) return { ok: false, error: "A non-live background run is active for this session" };
+		// A missing file is a session that was put on the board before its first message. Pi starts
+		// it at that path, as it would have.
+
+		const lock = tryAcquireLockImpl(root, viewId, "host-start", { identity: serviceIdentity() });
+		if (!lock.acquired) {
+			// Someone else (another board/service process) is mid-launch — its claim
+			// will appear on disk; treat that as an in-flight start, not a failure.
+			return { ok: true, pending: true, socketPath: null, instanceId: null };
+		}
+		try {
+			const inner = readHost(root, viewId);
+			if (inner && (inner.state === "starting" || inner.state === "alive" || inner.state === "stopping")) {
+				return { ok: true, pending: true, socketPath: inner.socketPath ?? null, instanceId: inner.instanceId ?? null };
+			}
+			const res = startHostUnderLease(row.meta, null, { markQueued: false });
+			if (res.ok && res.status === "started") pruneWarmHosts({ keepViewId: viewId });
+			return res.ok
+				? { ok: true, started: res.status === "started", pending: res.status !== "started", socketPath: res.socketPath, instanceId: res.instanceId }
+				: res;
+		} finally {
+			try { lock.lease.release(); } catch { /* best effort */ }
+		}
+	}
+
+	/**
+	 * Finish an abandoned host claim: spawn its runner under the `host-start` lease
+	 * (issue #70 Task 12). The claim's config was never written (the claimer died
+	 * before spawn, or recoverHost claims without writing one — Task 11 rider a), so
+	 * it is rebuilt from the view meta here. A failed spawn marks the claim failed
+	 * fenced (clearing the dead claimer's fields) so the next ensure can claim anew.
+	 * @param {string} viewId
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @param {import("../core/types.mjs").HostStatus} host
+	 */
+	function adoptClaimedHost(viewId, meta, host) {
+		const instanceId = host.instanceId;
+		const lock = tryAcquireLockImpl(root, viewId, "host-start", { identity: serviceIdentity() });
+		if (!lock.acquired) {
+			// Another adopter/spawner is mid-transaction — its result lands on disk.
+			return { ok: true, pending: true, socketPath: host.socketPath ?? null, instanceId };
+		}
+		try {
+			const current = readHost(root, viewId);
+			if (!current || current.instanceId !== instanceId || current.state !== "starting" || current.runnerSpawnedAt != null) {
+				// The record moved on (adopted elsewhere, revoked, or replaced) — surface it.
+				return { ok: true, pending: true, socketPath: current?.socketPath ?? host.socketPath ?? null, instanceId: current?.instanceId ?? instanceId };
+			}
+			// Stale-model guard (issue #90): the claim is an abandoned record, so mark
+			// it failed fenced (same shape as the spawn-failure path below — the next
+			// ensure can claim anew) instead of spawning a child doomed to exit 1.
+			const modelError = validateViewModelMeta(meta);
+			if (modelError) {
+				updateOwnedHost(root, viewId, instanceId, (h) => ({ ...h, state: "failed", endedAt: nowImpl(), exitCode: 1, error: modelError, claimPid: null, claimIdentity: null }));
+				return { ok: true, pending: true, socketPath: null, instanceId };
+			}
+			const configPath = current.configPath ?? P.hostConfigPathFor(root, viewId, instanceId);
+			const socketPath = current.socketPath ?? P.hostEndpointPathFor(process.platform, root, viewId, instanceId);
+			/** @type {import("../core/types.mjs").HostConfig} */
+			const config = {
+				root,
+				viewId,
+				sessionFile: meta.sessionFile,
+				cwd: meta.cwd,
+				initialPrompt: null,
+				piCommand: opts.piCommand,
+				piArgsPrefix: opts.piArgsPrefix,
+				model: meta.defaultModel ?? null,
+				thinkingLevel: meta.defaultThinking ?? null,
+				tools: null,
+				env: {},
+				cols: current.cols || 120,
+				rows: current.rows || 36,
+				screenLogMaxBytes: normalizeScreenLogMaxBytes(readLaunchPrefs(root).screenLogMaxSize),
+				instanceId,
+				configPath,
+				socketPath,
+			};
+			if (!existsSync(configPath)) atomicWriteJson(configPath, config);
+			let pid = null;
+			let spawnError = null;
+			try {
+				({ pid } = launchHostImpl(root, config, { runnerScript: ptyRunnerScript }));
+			} catch (err) {
+				spawnError = err instanceof Error ? err.message : String(err);
+			}
+			if (pid == null) {
+				const message = spawnError ?? "PTY host runner failed to spawn (adopted claim)";
+				// Clear the dead claimer's fields (failed fenced — keeps the record
+				// replaceable without depending on claimer liveness; canReplaceHost no
+				// longer consults claim fields, see issue #99).
+				updateOwnedHost(root, viewId, instanceId, (h) => ({ ...h, state: "failed", endedAt: nowImpl(), exitCode: 1, error: message, claimPid: null, claimIdentity: null }));
+				removeFile(configPath);
+				return { ok: true, pending: true, socketPath: null, instanceId };
+			}
+			updateOwnedHost(root, viewId, instanceId, (h) => ({ ...h, runnerPid: pid, runnerSpawnedAt: nowImpl() }));
+			appendDiagnostic(root, viewId, { source: "service", code: "host_adopted", message: "Abandoned host claim adopted; runner spawned", details: { pid, instanceId } });
+			return { ok: true, started: true, socketPath, instanceId };
+		} finally {
+			try { lock.lease.release(); } catch { /* best effort */ }
+		}
+	}
+
+	/**
+	 * The single attach authority (issue #70 Task 12): resolves a view to a PTY
+	 * target via REAL socket probes, waiting out cold starts, adopting abandoned
+	 * claims, and running one bounded recovery per invocation. Never downgrades to
+	 * `session` while a host claim is active. All waits go through sleepFn — the
+	 * resolver runs on the UI thread and must never block on a lock.
+	 * @param {string} viewId
+	 * @param {number} timeoutMs
+	 * @returns {Promise<{kind:"pty",socketPath:string|null,sessionFile:string,instanceId:string|null}|{kind:"session",sessionFile:string}|{kind:"pending",sessionFile:string,reason:string}|{kind:"missing"}>}
+	 */
+	async function resolveAttachTargetInner(viewId, timeoutMs) {
+		const deadline = nowImpl() + timeoutMs;
+		let ensured = false;
+		let recovered = false;
+		// Last adopt-and-spawn attempt (issue #70 CI wave 2): adoption is retried
+		// across loop iterations while the stale-claim conditions hold — a single
+		// failed/contended attempt must not pend the resolver to its deadline. The
+		// host-start lease inside adoptClaimedHost serializes attempts (idempotent:
+		// a successful adoption flips runnerSpawnedAt and the conditions stop
+		// holding), and this timestamp rate-limits post-adopt re-ensures.
+		let lastAdoptAt = 0;
+		/** @param {string} reason @param {string} sessionFile */
+		const pending = (sessionFile, reason) => ({ kind: "pending", sessionFile, reason });
+		for (;;) {
+			const row = loadRow(root, viewId);
+			if (!row) return { kind: "missing" };
+			const sessionFile = row.meta.sessionFile;
+			if (nowImpl() >= deadline) return pending(sessionFile, "host start timed out");
+			const host = row.host ?? null;
+
+			// No active claim: live JSON runners pend (no parallel PTY child); otherwise
+			// ensure exactly one host start per invocation, then fall through to probing.
+			if (!host || !row.hostActive) {
+				if (isAgentBusy(row)) return pending(sessionFile, "background run active");
+				// A claim that turned terminal AFTER our adopt attempt (spawn failed —
+				// adoptClaimedHost marks it failed fenced) may be re-claimed, at most
+				// once per grace window: the fresh claim's own grace period spaces the
+				// attempts out and the resolver deadline bounds the total, preserving the
+				// once-per-invocation ensure guarantee as a rate limit rather than a
+				// pend-forever on one bad attempt.
+				if (
+					(host?.state === "exited" || host?.state === "failed") &&
+					lastAdoptAt > 0 &&
+					nowImpl() - lastAdoptAt >= resolveHostStartGraceMs()
+				) {
+					ensured = false;
+				}
+				if (!ensured) {
+					ensured = true;
+					const res = ensureHostImpl(viewId);
+					if (!res.ok) {
+						if (res.fallbackReason != null) {
+							// PTY unavailable and nothing active — safe to fall back to session attach.
+							const fresh = loadRow(root, viewId);
+							return fresh && !fresh.hostActive ? { kind: "session", sessionFile: fresh.meta.sessionFile } : pending(sessionFile, res.error ?? "host ensure failed");
+						}
+						return pending(sessionFile, res.error ?? "host ensure failed");
+					}
+				}
+				await sleepFnImpl(HOST_PROBE_RETRY_MS);
+				continue;
+			}
+
+			// A revoke is in flight — wait it out; never revoke twice. But a stale
+			// `stopping` record whose processes are provably gone is a stranded
+		// deadlock (SIGKILLed runner never finalizes; nothing else covers stopping)
+			// — finalize it through the same bounded recovery path (CR r1 f2).
+			if (host.state === "stopping") {
+				const staleStop = host.instanceId != null && nowImpl() - (host.stopRequestedAt ?? host.claimAt ?? 0) >= resolveHostRecoveryGraceMs();
+				if (staleStop && !recovered) {
+					const probeMemo = new Map();
+					// Fresh token memo per branch entry; never shared with probeMemo.
+					const tokenMemo = new Map();
+					const runnerObs = await observeHostRole(host, "runner", { sessionFile, memo: probeMemo, tokenMemo });
+					const childObs = await observeHostRole(host, "child", { sessionFile, memo: probeMemo, tokenMemo });
+					if (runnerObs === "unknown" || childObs === "unknown") {
+						// Unverifiable processes on a stranded record — never force.
+						noteRecoveryPending(viewId, host, { runner: runnerObs, child: childObs }, probeMemo, "attach");
+						return pending(sessionFile, "recovery_pending: host identity unverifiable");
+					}
+					if (hostRoleEnded(runnerObs) && hostRoleEnded(childObs)) {
+						recovered = true;
+						try {
+							const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId), sessionFile);
+							if (!rec.ok && rec.error === "recovery_pending") {
+								return pending(sessionFile, "recovery_pending: host identity unverifiable");
+							}
+						} catch {
+							// recoverHost rethrows non-ESRCH signal failures — surface, don't crash.
+						}
+						await sleepFnImpl(HOST_PROBE_RETRY_MS);
+						continue;
+					}
+				}
+				await sleepFnImpl(HOST_PROBE_RETRY_MS);
+				continue;
+			}
+
+			const legacy = host.instanceId == null;
+			const withinGrace = host.state === "starting" && (legacy || (host.claimPid != null && nowImpl() - (host.claimAt ?? 0) < resolveHostStartGraceMs()));
+			const probe = await probeHostImpl(host.socketPath ?? "", { expectedViewId: viewId, expectedInstanceId: host.instanceId ?? null });
+			if (probe.classification === "ready") {
+				return { kind: "pty", socketPath: host.socketPath ?? null, sessionFile, instanceId: host.instanceId ?? null };
+			}
+
+			if (host.state === "starting") {
+				// Gap-closer: a claim whose runner was never spawned (recovery claim or an
+				// abandoned launch) is adopted past grace. Recovery-created claims carry
+				// claimPid:null — no launcher to protect — so they are NOT within grace and
+				// adopt immediately; claims with a live claimPid wait out the window like
+				// any launcher mid-transaction (contract §6).
+				// Retried per iteration: a contended or failed attempt must not pend
+				// the resolver to its deadline (issue #70 CI wave 2).
+			if (!legacy && host.runnerSpawnedAt == null && probe.classification === "missing" && !withinGrace) {
+					lastAdoptAt = nowImpl();
+					ensureHostImpl(viewId);
+					await sleepFnImpl(HOST_PROBE_RETRY_MS);
+					continue;
+				}
+				if (withinGrace || legacy) {
+					// A legacy starting host whose runner is provably dead would wait out
+					// the grace window forever (withinGrace is always true for legacy) —
+					// finalize it now instead (issue #87).
+					if (legacy && finalizeDeadLegacyHost(root, viewId, host, probe.classification, nowImpl(), tryAcquireLockImpl)) {
+						await sleepFnImpl(HOST_PROBE_RETRY_MS);
+						continue;
+					}
+					// Normal cold start (or a legacy starting host — legacy is never recovered,
+				// spec §10.1): wait out the grace window.
+				await sleepFnImpl(HOST_PROBE_RETRY_MS);
+					continue;
+				}
+			} else if (probe.classification === "starting" || probe.classification === "occupied") {
+				// Alive record, mid-transition or a foreign listener — wait, don't touch.
+				await sleepFnImpl(HOST_PROBE_RETRY_MS);
+				continue;
+			} else if (legacy) {
+				// Legacy host unreachable. spec §10.1 says never recover — unless the
+				// runner pid is provably dead, in which case finalize and self-heal
+				// (issue #87).
+				if (finalizeDeadLegacyHost(root, viewId, host, probe.classification, nowImpl(), tryAcquireLockImpl)) {
+					await sleepFnImpl(HOST_PROBE_RETRY_MS);
+					continue;
+				}
+				return pending(sessionFile, "legacy host unreachable — manual restart needed");
+			}
+
+			// Unhealthy new-protocol host past grace: one bounded recovery per invocation.
+			if (!recovered) {
+				recovered = true;
+				try {
+					const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId), sessionFile);
+					if (!rec.ok && rec.error === "recovery_pending") {
+						return pending(sessionFile, "recovery_pending: host identity unverifiable");
+					}
+					// recovered / busy_retry_later / already_recovered — loop and re-evaluate.
+					await sleepFnImpl(HOST_PROBE_RETRY_MS);
+					continue;
+				} catch {
+					// recoverHost rethrows non-ESRCH signal failures (Task 11 rider b) — never
+					// guess at process state; surface as pending for the next attempt.
+					return pending(sessionFile, "recovery signal failed");
+				}
+			}
+			await sleepFnImpl(HOST_PROBE_RETRY_MS);
+		}
+	}
+
+	/** @param {import("../core/types.mjs").FollowUpKind|import("../core/types.mjs").RunKind|string} kind */
+	function runKindForKind(kind) {
+		switch (kind) {
+			case "plan_request":
+				return "plan";
+			case "plan_change":
+				return "plan_change";
+			case "plan_approval":
+				return "plan_approval";
+			case "plan":
+			case "reply":
+			case "dispatch":
+				return kind;
+			default:
+				return "reply";
+		}
+	}
+
+	/** @param {import("../core/types.mjs").FollowUpItem} item */
+	function runKindForFollowUp(item) {
+		return runKindForKind(item.kind);
+	}
+
+	/** @param {string} viewId @param {import("../core/types.mjs").FollowUpItem} item */
+	function promptForFollowUp(viewId, item) {
+		const steering = readSteering(root, viewId);
+		switch (item.kind) {
+			case "plan_request":
+				return buildPlanRequestPrompt(item.text);
+			case "plan_approval":
+				return buildApprovePlanPrompt(steering.planText);
+			case "plan_change":
+				return buildPlanChangesPrompt(steering.planText, item.text);
+			default:
+				return item.text;
+		}
+	}
+
+	/**
+	 * Claim the next queued follow-up and deliver it. Host-path delivery is
+	 * async: the item is only completed on input_ack; any failure releases it
+	 * back to queued for a later retry (issue #70 A13).
+	 * @param {string} viewId
+	 * @returns {Promise<{ ok: boolean, error?: string, sent?: boolean, started?: boolean, pending?: boolean, failed?: boolean, item?: any }>} (failed=true: §10 accepted_unknown — marked failed, never re-sent)
+	 */
+	async function drainNextFollowUp(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		if (!canAutoDrain(row)) return { ok: false, error: "Session is not ready to drain queued follow-ups" };
+		const claimed = claimNextFollowUp(root, viewId);
+		if (!claimed.ok || !claimed.item) return claimed;
+		const item = claimed.item;
+		const prompt = promptForFollowUp(viewId, item);
+		try {
+			if (item.kind === "plan_approval") markExecutingApprovedPlan(root, viewId);
+			if (row.hostActive) {
+				const socketPath = row.host?.socketPath;
+				// Legacy host (pre-upgrade runner, no instanceId): it never sends
+				// input_ack, so the ack path would loop forever. Deliver with the
+				// old fire-and-forget semantics and complete on connect (final
+				// review finding 1).
+				if (row.host?.instanceId == null) {
+					const sent = sendHostMessage(row, { type: "input", data: `${prompt}\r` });
+					if (sent.ok) {
+						completeFollowUp(root, viewId, item.id);
+						appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind: item.kind, legacy: true } });
+						return { ok: true, sent: true, item };
+					}
+					releaseFollowUp(root, viewId, item.id);
+					appendDiagnostic(root, viewId, { source: "queue", level: "warn", code: "follow_up_send_failed", message: "Queued follow-up could not be delivered to the host", details: { kind: item.kind, error: sent.error ?? "unknown", legacy: true } });
+					return { ok: true, pending: true, item };
+				}
+				const sent = socketPath
+					? await sendHostInput(socketPath, `${prompt}\r`, {
+						requestId: item.id,
+						commandId: item.id,
+						viewId,
+						instanceId: row.host.instanceId,
+					})
+					: { ok: false, error: "No host socket", retryable: true };
+				if (sent.ok) {
+					completeFollowUp(root, viewId, item.id);
+					appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind: item.kind } });
+					return { ok: true, sent: true, item };
+				}
+				if (sent.ambiguous) {
+					// §10: the prompt was accepted by a host that restarted before
+					// delivering it — a re-send can only return cached stages, so the
+					// honest terminal state is failed-with-reason (mirrors the queue's
+					// existing failure marking; the item keeps its text for re-send).
+					failFollowUp(root, viewId, item.id, "accepted_unknown: accepted but never applied; outcome unknowable (§10); not re-sent");
+					appendDiagnostic(root, viewId, { source: "queue", level: "error", code: "follow_up_ambiguous", message: "Queued follow-up accepted_unknown after host restart — marked failed, not re-sent", details: { kind: item.kind, commandId: item.id } });
+					return { ok: true, failed: true, item };
+				}
+				releaseFollowUp(root, viewId, item.id);
+				appendDiagnostic(root, viewId, { source: "queue", level: "warn", code: "follow_up_send_failed", message: "Queued follow-up could not be delivered to the host", details: { kind: item.kind, error: sent.error ?? "unknown", retryable: sent.retryable !== false } });
+				return { ok: true, pending: true, item };
+			}
+			// Poll-path drain (reconcile): cached probe semantics — success cached for
+			// process lifetime, failures retried on a 2s TTL; never force a real
+			// pty.spawn on every 700ms cycle when a follow-up keeps failing to start.
+			const pty = ptySupport();
+			let runId = null;
+			let hostMode = "pty";
+			if (!pty.ok) hostMode = "json-runner";
+			if (pty.ok) {
+				const launched = await launchHost(row.meta, prompt);
+				if (launched.ok && launched.status !== "started") {
+					// An existing claim owns the view; the item stays queued and retries
+					// after that host becomes ready (issue #70 prompt-not-lost invariant).
+					releaseFollowUp(root, viewId, item.id);
+					return { ok: true, pending: true };
+				}
+				if (!launched.ok) hostMode = "json-runner";
+			}
+			if (hostMode === "json-runner" && isExternalSession(row.meta)) {
+				// Adopted (external) sessions must never continue via the json runner —
+				// only a PTY host can resume them safely (pre-existing guard).
+				releaseFollowUp(root, viewId, item.id);
+				appendDiagnostic(root, viewId, { source: "queue", level: "warn", code: "follow_up_waiting_for_pty", message: "Adopted session follow-up is waiting for PTY support", details: {} });
+				return { ok: false, error: "PTY is required to drain adopted session follow-ups safely" };
+			}
+			if (hostMode === "json-runner") {
+				({ runId } = await launchForView(row.meta, prompt, runKindForFollowUp(item)));
+			}
+			completeFollowUp(root, viewId, item.id, { runId });
+			appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_started", message: "Queued follow-up started", details: { kind: item.kind, hostMode } });
+			return { ok: true, started: true, item };
+		} catch (err) {
+			releaseFollowUp(root, viewId, item.id);
+			appendDiagnostic(root, viewId, { source: "queue", level: "error", code: "follow_up_drain_failed", message: "Queued follow-up failed to start", details: { error: err instanceof Error ? err.message : String(err) } });
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	}
+
+	/**
+	 * Mirror a foreground/hosted session event into the row state. Async since
+	 * issue #91: the terminal classification routes through the View State
+	 * Coordinator command socket (fire-and-forget callers are fine — the returned
+	 * promise resolves after the classification outcome is known).
+	 * @param {import("../core/store.mjs").Row} row @param {any} event
+	 * @returns {Promise<boolean>} whether a managed row was updated
+	 */
+	async function syncRowEvent(row, event) {
+		const now = Date.now();
+		const status = statusFromRow(row);
+		// Issue #113: the previous event's projection may still be in flight (the
+		// coordinator journals + fsyncs before materializing), so a disk rebuild
+		// can lag the freshest known preview/activity. Restore read-your-writes
+		// before any event branch touches the status.
+		foregroundPreviewCache.backfill(row.meta.id, status);
+		// Issue #225: correct a stale disk rebuild before the new event is reduced.
+		foregroundProjectionCache.adopt(row.meta.id, status);
+		let evidence = readEvidence(root, row.meta.id);
+		if (!evidence.viewId) evidence = emptyEvidenceSnapshot({ viewId: row.meta.id, source: "hosted" });
+		try {
+			reduceEvidence(evidence, event, now);
+			writeEvidence(root, evidence);
+			updateCodeRefsFromEvidence(root, row.meta.id, evidence, row.meta);
+		} catch (err) {
+			appendDiagnostic(root, row.meta.id, { source: "evidence", level: "warn", code: "evidence_reduce_failed", message: "Could not reduce hosted evidence", details: { error: err instanceof Error ? err.message : String(err) } });
+		}
+
+		if (event.type === "agent_board_waiting") {
+			status.semanticState = event.waiting ? "needs_input" : "working";
+			status.processState = "alive";
+			status.question = event.waiting ? "Waiting on a prompt. Attach to answer it." : null;
+			// Counts as pending so the host isn't evicted, and so a reply can tell it's there.
+			status.pendingQuestions = event.waiting ? [{ kind: DIALOG, question: status.question }] : [];
+			status.summary = event.waiting ? "Waiting on a prompt" : "Running…";
+			status.lastActivityAt = now;
+			void writeForegroundState(row, status);
+			return true;
+		}
+
+		if (event.type === "input" || event.type === "before_agent_start" || event.type === "agent_start") {
+			status.semanticState = "working";
+			status.processState = "alive";
+			status.currentTool = null;
+			status.question = null;
+			status.pendingQuestions = [];
+			status.error = null;
+			status.summary = "Running…";
+			status.lastActivityAt = now;
+			// F-lift (issue #145): pi's InputEvent carries source; "interactive"
+			// means a human submitted this text (attach keystrokes, a dashboard
+			// reply injected into a live host, or an auto-drained follow-up — all
+			// arrive as PTY bytes, which pi classifies as interactive). A manual
+			// verdict must not outlive the user speaking to the row, so this one
+			// mirror travels as dashboard-user and passes the manual_fence guard.
+			// Safe by construction: stale_run cannot fire (runId stays null) and
+			// the coordinator shell never reads source — manual_fence is the only
+			// guard this crosses. rpc/extension injections keep source "service".
+			const userSpoke = event.type === "input" && event.source === "interactive";
+			// Throughput path: periodic self-healing mirror, fire-and-forget.
+			void writeForegroundState(row, status, userSpoke ? { source: "dashboard-user" } : {});
+			return true;
+		}
+
+		if (event.type === "agent_end") {
+			status.pendingQuestions = status.pendingQuestions.filter((question) => question?.kind !== DIALOG);
+			// #46-class fence (issue #91): a manual verdict is a user judgment that
+			// outlives the turn. A late/duplicate agent_end after markCompleted must
+			// not resurrect the row via finalizeRun + projection — skip all semantic
+			// writes (baseline, steering, classification) and keep evidence only.
+			// The fence read is repeated after the classification await below; the
+			// window between the two reads is covered by the coordinator's own
+			// manual_fence rejection plus the guarded tail write.
+			if (isManualVerdict(readState(root, row.meta.id))) {
+				status.evidenceSummary = summarizeEvidence(evidence);
+				writeEvidence(root, evidence);
+				return false;
+			}
+			finalizeRun(status, { exitCode: 0 }, now);
+			finalizeEvidence(evidence, status, now);
+			const steering = readSteering(root, row.meta.id);
+			let classificationQueued = false;
+			if (steering.status === "plan_requested" || steering.status === "changes_requested") {
+				recordPlanReady(root, row.meta.id, { planText: latestEvidenceText(evidence) || status.latestAssistantPreview || evidence.summary || "Plan ready", runId: status.runId });
+				status.semanticState = "needs_input";
+				status.question = "Approve this plan?";
+				status.summary = "Plan ready for approval";
+			} else {
+				// Baseline the exited projection BEFORE the classification command:
+				// the coordinator's delegated auto-state rules key on processState,
+				// and its materialized patch lands after this write and wins. When
+				// the coordinator applies, the projection write below is skipped so
+				// the stale in-memory fields cannot clobber the patch (#46 class).
+				// The legacy coordinator_disabled path applies in-memory instead and
+				// still needs the tail projection write (pre-coordinator behavior).
+				// Awaited: this ordering IS the fence — the classification command
+				// must observe processState "exited" or its delegated rules skip.
+				await writeForegroundState(row, status);
+				classificationQueued = await queueAutoState(row.meta, status, evidence);
+				if (classificationQueued) finalizeEvidence(evidence, status, now);
+			}
+			status.evidenceSummary = summarizeEvidence(evidence);
+			writeEvidence(root, evidence);
+			updateCodeRefsFromEvidence(root, row.meta.id, evidence, row.meta);
+			// Re-read the fence after the classification await: a manual verdict landing
+			// between the baseline write and the coordinator's decision read gets
+			// manual_fence back (classificationQueued=false), and writing the stale
+			// in-memory projection here would clobber it (#46 class).
+			if (!isManualVerdict(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) await writeForegroundState(row, status);
+			pruneWarmHosts({ keepViewId: row.meta.id });
+			// Async delivery (ack-gated, issue #70 A13): fire-and-forget here — the
+			// queue item's own state records the outcome, ordering is preserved by
+			// the queue lock, and requestId dedup makes late retries harmless.
+			void drainNextFollowUp(row.meta.id);
+			return true;
+		}
+
+		if (reduceEvent(status, event, now, { interactive: true })) {
+			status.processState = "alive";
+			// Throughput path: periodic self-healing mirror, fire-and-forget.
+			void writeForegroundState(row, status);
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Reconcile pre-pass (issue #230): when a warm host has died (state
+	 * `exited`/`failed` and no longer alive) while its session owns a paused
+	 * background workflow run, the row otherwise stays silent. Announce the
+	 * interruption by patching `summary` (through patch_fields so the manual
+	 * fence still governs) and record one diagnostic per run.
+	 *
+	 * The memo key is `(viewId, host.endedAt)`. A successful probe is memoized
+	 * except for the grace window right after the host ended: the workflow
+	 * engine writes the `paused` head while settling in-flight step children
+	 * during SIGTERM shutdown, and that write can land after the board finalizes
+	 * `host.state = exited` (finalization waits for the runner and child pids to
+	 * die, not for the engine's last write). A probe in that window reports
+	 * `running`, so any still-`running` result inside `NOTICE_FLIP_GRACE_MS`
+	 * stays un-memoized and re-probes next tick to catch the flip — including
+	 * when it coexists with an older `paused` run, which stays idempotent to
+	 * announce. Re-probing stops after `NOTICE_FLIP_GRACE_MS`; a `running` record
+	 * that survives the grace window is treated as a hard-kill artifact with no
+	 * notice (issue #230 follow-up). `!probe.ok` stays un-memoized so a transient
+	 * read failure retries next tick. Notice fires only for `paused`.
+	 *
+	 * An already-announced row still costs one probe per reconcile so a later
+	 * host incarnation can surface a new interrupted run; the summary write is
+	 * skipped only when it already names this same runId, and diagnostics stay
+	 * deduped per runId.
+	 *
+	 * This pre-pass deliberately sits outside the looksActive-gated loop below:
+	 * the target rows are already at `processState: "exited"`.
+	 * @param {number} now
+	 */
+	async function noticeInterruptedBackgroundRuns(now) {
+		for (const row of listRows(root)) {
+			const host = row.host;
+			if (!host || (host.state !== "exited" && host.state !== "failed") || row.hostAlive) continue;
+			const viewId = row.meta.id;
+			const key = `${viewId}:${host.endedAt ?? 0}`;
+			if (noticeProbeMemo.has(key)) continue;
+			const probe = backgroundRunsImpl.probeBackgroundRun({
+				sessionFile: row.meta.sessionFile ?? null,
+				hostStartedAt: host.startedAt ?? null,
+				workflowHome: workflowHomeImpl,
+			});
+			if (!probe.ok) continue; // incomplete scan: retry next tick, memo not written
+			const runningWithinGrace = probe.running != null && now - (host.endedAt ?? 0) < NOTICE_FLIP_GRACE_MS;
+			if (!runningWithinGrace) {
+				noticeProbeMemo.add(key);
+			}
+			if (!probe.paused) continue;
+			const runId = probe.paused.runId;
+			const summary = `Background workflow ${runId} was interrupted — resume it from this session`;
+			const alreadyAnnounced = typeof row.state?.summary === "string" && row.state.summary.startsWith(`Background workflow ${runId} `);
+			if (!alreadyAnnounced) {
+				const result = await sendLifecycleCommand({
+					type: "state_command",
+					viewId,
+					runId: null,
+					source: "service",
+					kind: "patch_fields",
+					expectedRevision: null,
+					payload: { state: { summary } },
+				}, viewId);
+				if (result.reason === "coordinator_disabled") {
+					const fresh = readState(root, viewId) ?? blankState(viewId);
+					fresh.summary = summary;
+					fresh.updatedAt = now;
+					writeState(root, fresh);
+				}
+			}
+			appendDiagnosticOnce(root, viewId, {
+				source: "service",
+				level: "warn",
+				code: "background_run_interrupted",
+				message: `Background workflow ${runId} was interrupted when its host died`,
+				details: { runId, hostState: host.state, exitCode: host.exitCode ?? null },
+			}, { match: ["runId"] });
+		}
+	}
+
+	return {
+		root,
+		/**
+		 * Create a new background session and launch its first run.
+		 * Worktree mode is currently disabled, but the dashboard no longer blocks
+		 * concurrent same-repo sessions on its own.
+		 * @param {string} text
+		 * @param {{
+		 *   cwd?: string,
+		 *   worktree?: boolean,
+		 *   writeCapable?: boolean,
+		 *   model?: string|null,
+		 *   thinkingLevel?: "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|null,
+		 * }} [dispatchOpts]
+		 * @returns {Promise<{ ok: boolean, viewId?: string, error?: string, hostMode?: "pty"|"json-runner", fallbackReason?: string }>}
+		 */
+		async dispatch(text, dispatchOpts = {}) {
+			const prompt = String(text || "").trim();
+			if (!prompt) return { ok: false, error: "Empty task" };
+
+			const cwd = dispatchOpts.cwd ?? opts.defaultCwd;
+			const writeCapable = dispatchOpts.writeCapable ?? true;
+			const defaultModel = dispatchOpts.model ?? null;
+			const defaultThinking = dispatchOpts.thinkingLevel ?? null;
+			const repoRoot = gitRepoRoot(cwd);
+
+			if (dispatchOpts.worktree) {
+				return { ok: false, error: "Worktree mode is currently disabled." };
+			}
+
+			const id = newViewId();
+			const meta = createView(root, {
+				id,
+				name: slugifyTask(prompt),
+				cwd,
+				repoCwd: cwd,
+				repoRoot,
+				worktreeMode: "off",
+				worktreePath: null,
+				defaultModel,
+				defaultThinking,
+				writeCapable,
+			});
+			const pty = ptySupport({ refresh: true });
+			let hostMode = "json-runner";
+			let fallbackReason;
+			let queued;
+			if (pty.ok) {
+				const launched = await launchHost(meta, prompt);
+				if (launched.ok) {
+					hostMode = "pty";
+					if (launched.status !== "started") {
+						// An existing claim owns the prompt now; keep it durably queued
+						// instead of dropping it (issue #70 prompt-not-lost invariant).
+						const q = enqueueFollowUp(root, id, prompt, { kind: "reply", delivery: "auto", source: "user" });
+						if (!q.ok) return q;
+						queued = true;
+					}
+				} else {
+					fallbackReason = launched.fallbackReason ?? launched.error;
+					await launchForView(meta, prompt, "dispatch");
+				}
+			} else {
+				fallbackReason = nodePtyFallbackMessage(pty);
+				await launchForView(meta, prompt, "dispatch");
+			}
+			queueGeneratedTitle(meta, prompt);
+			return {
+				ok: true,
+				viewId: id,
+				hostMode,
+				...(queued ? { queued: true } : {}),
+				...(hostMode === "json-runner" ? { fallbackReason } : {}),
+			};
+		},
+
+		/**
+		 * Append a reply to an existing session. Host-path delivery is
+		 * ack-gated: the prompt is first persisted as a follow-up item, then
+		 * attempted over the control socket; only input_ack completes the item,
+		 * anything else leaves it queued for the drain loop (issue #70 A13).
+		 * @param {string} viewId
+		 * @param {string} text
+		 * @returns {Promise<{ ok: boolean, error?: string, queued?: boolean, sent?: boolean, summary?: any, hostMode?: "pty"|"json-runner", fallbackReason?: string }>}
+		 */
+		async reply(viewId, text, replyOpts = {}) {
+			const prompt = String(text || "").trim();
+			if (!prompt) return { ok: false, error: "Empty reply" };
+			const row = loadRow(root, viewId);
+			if (!row) return { ok: false, error: "Unknown session" };
+			// Text and Enter sent to the terminal would go to the open dialog, and could approve what it
+			// asks. So it waits its turn, and answering the dialog takes attaching.
+			if (row.state?.pendingQuestions?.some((question) => question?.kind === DIALOG)) {
+				const queued = enqueueFollowUp(root, viewId, prompt, { kind: replyOpts.kind ?? "reply", delivery: "queue", source: "user" });
+				return queued.ok ? { ok: true, queued: true, summary: queued.summary } : queued;
+			}
+			if (hasPendingQuestions(row)) return { ok: false, error: "Attach to answer the pending question" };
+			const delivery = replyOpts.delivery ?? "auto";
+			const kind = replyOpts.kind ?? "reply";
+			if (delivery === "queue" || (delivery === "auto" && isAgentBusy(row))) {
+				const queued = enqueueFollowUp(root, viewId, prompt, { kind, delivery, source: "user" });
+				if (queued.ok) appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_queued", message: "Follow-up queued", details: { kind, queuedCount: queued.summary?.queuedCount } });
+				return queued.ok ? { ok: true, queued: true, summary: queued.summary } : queued;
+			}
+			if (row.hostActive) {
+				// Durable queue-first delivery: the item id is the requestId, so a
+				// lost ack after a child write de-dupes on retry instead of duplicating.
+				const queued = enqueueFollowUp(root, viewId, prompt, { kind, delivery: "auto", source: "user" });
+				if (!queued.ok) return queued;
+				appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_queued", message: "Follow-up queued", details: { kind, queuedCount: queued.summary?.queuedCount } });
+				// Legacy host: no instanceId → no input_ack → fire-and-forget (final
+				// review finding 1); connect success completes the item.
+				if (row.host?.instanceId == null) {
+					const sent = sendHostMessage(row, { type: "input", data: `${prompt}\r` });
+					if (sent.ok) {
+						completeFollowUp(root, viewId, queued.item.id);
+						appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind, legacy: true } });
+						return { ok: true, sent: true, item: queued.item };
+					}
+					return { ok: true, queued: true, summary: queued.summary };
+				}
+				const socketPath = row.host?.socketPath;
+				const sent = socketPath
+					? await sendHostInput(socketPath, `${prompt}\r`, {
+						requestId: queued.item.id,
+						commandId: queued.item.id,
+						viewId,
+						instanceId: row.host.instanceId,
+					})
+					: { ok: false, error: "No host socket", retryable: true };
+				if (sent.ok) {
+					completeFollowUp(root, viewId, queued.item.id);
+					appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind } });
+					return { ok: true, sent: true, item: queued.item };
+				}
+				if (sent.ambiguous) {
+					// §10: see drainNextFollowUp — never re-queue, never complete.
+					failFollowUp(root, viewId, queued.item.id, "accepted_unknown: accepted but never applied; outcome unknowable (§10); not re-sent");
+					appendDiagnostic(root, viewId, { source: "queue", level: "error", code: "follow_up_ambiguous", message: "Queued follow-up accepted_unknown after host restart — marked failed, not re-sent", details: { kind, commandId: queued.item.id } });
+					return { ok: true, failed: true, item: queued.item };
+				}
+				// Not an error: starting host, busy socket or lost ack — the drain
+				// loop retries once the host acks (issue #70 prompt-not-lost).
+				return { ok: true, queued: true, summary: queued.summary };
+			}
+			if (row.alive) return { ok: false, error: "A run is already active for this session" };
+			const pty = ptySupport({ refresh: true });
+			let hostMode = null;
+			let fallbackReason;
+			if (pty.ok) {
+				const launched = await launchHost(row.meta, prompt);
+				if (launched.ok) {
+					if (launched.status !== "started") {
+						// The existing claim will consume the prompt later — keep it queued
+						// instead of dropping it (issue #70 prompt-not-lost invariant).
+						const q = enqueueFollowUp(root, viewId, prompt, { kind, delivery: "auto", source: "user" });
+						if (q.ok) {
+							appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_queued", message: "Follow-up queued", details: { kind, queuedCount: q.summary?.queuedCount } });
+							return { ok: true, queued: true, summary: q.summary };
+						}
+						return q;
+					}
+					hostMode = "pty";
+				} else {
+					fallbackReason = launched.fallbackReason ?? launched.error;
+				}
+			} else {
+				fallbackReason = nodePtyFallbackMessage(pty);
+			}
+			if (!hostMode) {
+				if (isExternalSession(row.meta)) return { ok: false, error: "PTY is required to continue an adopted foreground session safely" };
+				await launchForView(row.meta, prompt, runKindForKind(kind));
+				hostMode = "json-runner";
+			}
+			return { ok: true, hostMode, ...(hostMode === "json-runner" ? { fallbackReason } : {}) };
+		},
+
+		/**
+		 * Stop the active run for a view (SIGTERM the runner → it finalizes as `stopped`).
+		 * @param {string} viewId
+		 * @returns {{ ok: boolean, error?: string }}
+		 */
+		stop(viewId) {
+			const row = loadRow(root, viewId);
+			if (row?.hostActive) {
+				// Interrupt is turn-abort, not host-stop; an already-stopping host has nothing to abort.
+				if (row.host?.state === "stopping") return { ok: true };
+				return sendHostMessage(row, { type: "interrupt" });
+			}
+			const state = readState(root, viewId);
+			if (!state?.currentRunId) return { ok: false, error: "No active run" };
+			const pid = readPid(root, viewId, state.currentRunId);
+			if (!pid) return { ok: false, error: "No runner pid" };
+			killProcess(pid);
+			return { ok: true };
+		},
+
+		/** @param {string} viewId */
+		terminateHost(viewId) {
+			const row = loadRow(root, viewId);
+			if (!row?.host) return { ok: false, error: "No live host" };
+			if (row.host.instanceId) return requestHostStop(viewId, row.host.instanceId, "user");
+			if (!row.hostAlive) return { ok: false, error: "No live host" };
+			return sendHostMessage(row, { type: "terminate" });
+		},
+
+		/**
+		 * File-based host revoke (issue #70). See the closure doc above; exposed for
+		 * the attach resolver and lifecycle callers.
+		 * @param {string} viewId @param {string|null} expectedInstanceId @param {string} reason
+		 */
+		requestHostStop,
+
+		/**
+		 * Revoke + wait + replace a broken host (issue #70). Only the attach
+		 * resolver / recovery-aware reconcile should call this.
+		 * @param {string} viewId @param {string} expectedInstanceId
+		 */
+		recoverHost,
+
+		/**
+		 * The single async attach authority (issue #70 Task 12): real-probes the
+		 * current claim, waits out cold starts, adopts abandoned claims, and runs one
+		 * bounded recovery per invocation. Concurrent calls for the same view share
+		 * one in-flight promise. `attachTarget()` remains a pure sync hint.
+		 * @param {string} viewId
+		 * @param {{ timeoutMs?: number }} [resolveOpts]
+		 * @returns {Promise<{kind:"pty",socketPath:string|null,sessionFile:string,instanceId:string|null}|{kind:"session",sessionFile:string}|{kind:"pending",sessionFile:string,reason:string}|{kind:"missing"}>}
+		 */
+		async resolveAttachTarget(viewId, resolveOpts = {}) {
+			const existing = inflightAttachResolvers.get(viewId);
+			if (existing) return existing;
+			const run = resolveAttachTargetInner(viewId, resolveOpts.timeoutMs ?? resolveAttachResolveTimeoutMs())
+				.finally(() => { inflightAttachResolvers.delete(viewId); });
+			inflightAttachResolvers.set(viewId, run);
+			return run;
+		},
+
+	/**
+	 * Ensure there is an interactive PTY host for this session. Used for fast attach
+	 * and dashboard prewarm. Idempotent (issue #70): an existing active claim — even
+	 * a fresh `starting` one with no runner pid yet — is surfaced as `pending`, never
+	 * replaced or double-spawned; a provably abandoned claim is adopted and spawned
+	 * (Task 12) instead of pending forever. Real socket health is the attach
+	 * resolver's job; this path never probes, kills, or spawns past an active claim.
+	 * @param {string} viewId
+	 * @returns {{ ok: boolean, pending?: boolean, started?: boolean, socketPath?: string|null, instanceId?: string|null, error?: string, fallbackReason?: string }}
+	 */
+	ensureHost(viewId) {
+		return ensureHostImpl(viewId);
+	},
+
+		/** @param {string} viewId */
+		prewarmHost(viewId) {
+			const row = loadRow(root, viewId);
+			if (!row || isAgentBusy(row)) return { ok: false, error: row ? "Session is busy" : "Unknown session" };
+			return this.ensureHost(viewId);
+		},
+
+		/** @param {string} viewId */
+		attachTarget(viewId) {
+			const row = loadRow(root, viewId);
+			if (!row) return { kind: "missing" };
+			if (row.hostAlive && row.host?.socketPath) {
+				return { kind: "pty", socketPath: row.host.socketPath, sessionFile: row.meta.sessionFile };
+			}
+			return { kind: "session", sessionFile: row.meta.sessionFile };
+		},
+
+		async adoptSession(adoptOpts = {}) {
+			const sessionFile = String(adoptOpts.sessionFile || "").trim();
+			if (!sessionFile) return { ok: false, error: "No session file to adopt" };
+			const existing = rowForSession(sessionFile);
+			if (existing) {
+				existing.meta.archived = false;
+				if (adoptOpts.name) existing.meta.name = String(adoptOpts.name).trim() || existing.meta.name;
+				writeMeta(root, existing.meta);
+				if (!isAgentBusy(existing)) {
+					await adoptIdleState(existing.meta.id, readState(root, existing.meta.id) ?? existing.state ?? blankState(existing.meta.id));
+				}
+				appendDiagnostic(root, existing.meta.id, { source: "service", code: "session_adopted", message: "Existing session adopted into Agent Board", details: { reused: true } });
+				return { ok: true, viewId: existing.meta.id, reused: true };
+			}
+			const cwd = adoptOpts.cwd ?? opts.defaultCwd;
+			const id = newViewId();
+			const repoRoot = gitRepoRoot(cwd);
+			const meta = createView(root, {
+				id,
+				name: adoptOpts.name ?? "background-session",
+				cwd,
+				repoCwd: cwd,
+				repoRoot,
+				worktreeMode: "off",
+				worktreePath: null,
+				defaultModel: adoptOpts.model ?? null,
+				defaultThinking: adoptOpts.thinkingLevel ?? null,
+				writeCapable: true,
+				sessionFile,
+			});
+			const state = readState(root, id) ?? blankState(id);
+			await adoptIdleState(id, state);
+			appendDiagnostic(root, id, { source: "service", code: "session_adopted", message: "Current session adopted into Agent Board", details: { reused: false } });
+			return { ok: true, viewId: meta.id, reused: false };
+		},
+
+		getRoot() {
+			return root;
+		},
+
+		getLaunchPrefs() {
+			return readLaunchPrefs(root);
+		},
+
+		saveLaunchPrefs(prefs) {
+			writeLaunchPrefs(root, prefs ?? {});
+			return { ok: true };
+		},
+
+		/** @param {string} viewId @param {boolean} pinned */
+		setPinned(viewId, pinned) {
+			const meta = loadRow(root, viewId)?.meta;
+			if (!meta) return { ok: false, error: "Unknown session" };
+			meta.pinned = pinned;
+			writeMeta(root, meta);
+			return { ok: true };
+		},
+
+		/**
+		 * Gives these rows this order, numbered from the lowest they had: rows created in the same
+		 * millisecond have no order between them to swap.
+		 * @param {string[]} viewIds
+		 */
+		setRowOrder(viewIds) {
+			const metas = viewIds.map((id) => loadRow(root, id)?.meta);
+			if (metas.some((meta) => !meta)) return { ok: false, error: "Unknown session" };
+			const base = Math.min(...metas.map((meta) => meta.order ?? meta.createdAt ?? 0));
+			metas.forEach((meta, index) => {
+				meta.order = base + index;
+				writeMeta(root, meta);
+			});
+			return { ok: true };
+		},
+
+		/** @param {string} viewId @param {string} name */
+		rename(viewId, name) {
+			const clean = String(name || "").trim();
+			if (!clean) return { ok: false, error: "Empty name" };
+			const meta = loadRow(root, viewId)?.meta;
+			if (!meta) return { ok: false, error: "Unknown session" };
+			meta.name = clean;
+			writeMeta(root, meta);
+			return { ok: true };
+		},
+
+		/** @param {string} viewId @returns {Promise<{ ok: boolean, error?: string }>} */
+		markVisited(viewId) {
+			return markVisited(viewId);
+		},
+
+		/**
+		 * Explicitly mark an inactive session as done. Successful runs settle as
+		 * `idle` until the user reviews and confirms this action from the dashboard.
+		 * @param {string} viewId
+		 * @returns {Promise<{ ok: boolean, error?: string }>}
+		 */
+		markCompleted(viewId) {
+			return completeView(viewId);
+		},
+
+		/** @param {string} viewId @returns {Promise<{ ok: boolean, error?: string }>} */
+		holdView(viewId) {
+			return holdView(viewId);
+		},
+
+		/** @param {string} viewId @returns {Promise<{ ok: boolean, error?: string }>} */
+		clearHoldView(viewId) {
+			return clearHoldView(viewId);
+		},
+
+		/**
+		 * Bulk mark sessions done, skipping live/already-done rows.
+		 * @param {string[]} viewIds
+		 * @returns {{ ok: boolean, completed: number, skipped: number, completedIds: string[] }}
+		 */
+		queueFollowUp(viewId, text, queueOpts = {}) {
+			const res = enqueueFollowUp(root, viewId, text, queueOpts);
+			if (res.ok) appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_queued", message: "Follow-up queued", details: { kind: queueOpts.kind ?? "reply" } });
+			return res;
+		},
+
+		clearFollowUps(viewId) {
+			const res = clearQueuedFollowUps(root, viewId);
+			if (res.ok) appendDiagnostic(root, viewId, { source: "queue", code: "follow_ups_cleared", message: "Queued follow-ups cleared", details: { cancelled: res.cancelled } });
+			return res;
+		},
+
+		removeLastFollowUp(viewId) {
+			const res = removeLastFollowUp(root, viewId);
+			if (res.ok) appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_removed", message: "Last queued follow-up removed", details: { itemId: res.item?.id } });
+			return res;
+		},
+
+		followUps(viewId) {
+			const queue = readFollowUpQueue(root, viewId);
+			return { queue, summary: summarizeFollowUpQueue(queue) };
+		},
+
+		/** Async (ack-gated) since issue #70 A13; see the internal implementation above. @param {string} viewId */
+		drainNextFollowUp(viewId) {
+			return drainNextFollowUp(viewId);
+		},
+
+		async requestPlan(viewId, text = "") {
+			const row = loadRow(root, viewId);
+			if (!row) return { ok: false, error: "Unknown session" };
+			requestPlanState(root, viewId, { note: text || null });
+			if (isAgentBusy(row)) return this.queueFollowUp(viewId, text, { kind: "plan_request", delivery: "queue", source: "steering" });
+			return this.reply(viewId, buildPlanRequestPrompt(text), { delivery: "now", kind: "plan_request" });
+		},
+
+		async approvePlan(viewId) {
+			const row = loadRow(root, viewId);
+			const state = readSteering(root, viewId);
+			const approved = approvePlanState(root, viewId);
+			if (!approved.ok) return approved;
+			if (row && isAgentBusy(row)) return this.queueFollowUp(viewId, "approved", { kind: "plan_approval", delivery: "queue", source: "steering" });
+			markExecutingApprovedPlan(root, viewId);
+			return this.reply(viewId, buildApprovePlanPrompt(state.planText), { delivery: "now", kind: "plan_approval" });
+		},
+
+		async requestPlanChanges(viewId, feedback) {
+			const row = loadRow(root, viewId);
+			const state = readSteering(root, viewId);
+			const changed = requestPlanChangesState(root, viewId, feedback);
+			if (!changed.ok) return changed;
+			if (row && isAgentBusy(row)) return this.queueFollowUp(viewId, feedback, { kind: "plan_change", delivery: "queue", source: "steering" });
+			return this.reply(viewId, buildPlanChangesPrompt(state.planText, feedback), { delivery: "now", kind: "plan_change" });
+		},
+
+		steering(viewId) {
+			const state = readSteering(root, viewId);
+			return { state, summary: summarizeSteering(state) };
+		},
+
+		/**
+		 * Bulk mark sessions done, skipping live/already-done rows.
+		 * @param {string[]} viewIds
+		 * @returns {Promise<{ ok: boolean, completed: number, skipped: number, completedIds: string[] }>}
+		 */
+		async markCompletedMany(viewIds) {
+			const ids = [...new Set((viewIds ?? []).filter(Boolean))];
+			let completed = 0;
+			let skipped = 0;
+			const completedIds = [];
+			for (const viewId of ids) {
+				const row = loadRow(root, viewId);
+				if (!row || row.state?.semanticState === "completed") {
+					skipped += 1;
+					continue;
+				}
+				const res = await completeView(viewId);
+				if (res.ok) {
+					completed += 1;
+					completedIds.push(viewId);
+				} else skipped += 1;
+			}
+			return { ok: true, completed, skipped, completedIds };
+		},
+
+		/**
+		 * Soft-delete a row: archive it (removed from the dashboard) but preserve the session
+		 * file.
+		 * @param {string} viewId
+		 */
+		archive(viewId) {
+			return archiveView(viewId);
+		},
+
+		/**
+		 * Bulk archive explicit row ids, skipping live/missing rows.
+		 * @param {string[]} viewIds
+		 * @returns {Promise<{ ok: boolean, archived: number, skipped: number }>}
+		 */
+		async archiveMany(viewIds) {
+			const ids = [...new Set((viewIds ?? []).filter(Boolean))];
+			let archived = 0;
+			let skipped = 0;
+			for (const viewId of ids) {
+				const row = loadRow(root, viewId);
+				if (!row || isAgentBusy(row)) {
+					skipped += 1;
+					continue;
+				}
+				const res = await archiveView(viewId);
+				if (res.ok) archived += 1;
+				else skipped += 1;
+			}
+			return { ok: true, archived, skipped };
+		},
+
+		/**
+		 * Archive every non-live visible row in a semantic state. Live rows are skipped
+		 * so bulk cleanup cannot accidentally kill work.
+		 * @param {import("../core/types.mjs").SemanticState} state
+		 * @returns {{ ok: boolean, archived: number, skipped: number, error?: string }}
+		 */
+		archiveByState(state) {
+			let archived = 0;
+			let skipped = 0;
+			for (const row of listRows(root)) {
+				if (row.state?.semanticState !== state) continue;
+				if (isAgentBusy(row)) {
+					skipped += 1;
+					continue;
+				}
+				if (row.host?.instanceId) stopHostRow(row, "archive");
+				else if (row.hostAlive) sendHostMessage(row, { type: "terminate" });
+				foregroundPreviewCache.forget(row.meta.id);
+				foregroundProjectionCache.forget(row.meta.id);
+				row.meta.archived = true;
+				writeMeta(root, row.meta);
+				archived += 1;
+			}
+			return { ok: true, archived, skipped };
+		},
+
+		/**
+		 * Recovery: reconcile rows whose runner died without finalizing (e.g. machine crash
+		 * or the runner was killed). If a terminal status exists, project it; otherwise mark
+		 * the row failed/stale. Safe to call on every dashboard open and on session_start.
+		 * @returns {Promise<number>} number of rows reconciled.
+		 */
+		async reconcile() {
+			const now = Date.now();
+			await noticeInterruptedBackgroundRuns(now);
+			let fixed = 0;
+			for (const row of listRows(root)) {
+				const s = row.state;
+				const looksActive = s?.processState === "alive" || s?.semanticState === "queued" || s?.semanticState === "working";
+				if (!s || !looksActive) continue;
+				if (!s.currentRunId) {
+				if (row.host && !row.hostAlive && (row.host.state === "starting" || row.host.state === "alive" || row.host.state === "exited" || row.host.state === "failed")) {
+					// A starting claim inside the launch grace is a normal cold start (issue #70):
+					// its runner pid may legitimately be absent — never finalize it to failed yet.
+					if (row.host.state === "starting" && now - (row.host.claimAt ?? row.host.startedAt ?? 0) < resolveHostStartGraceMs()) continue;
+						const failed = row.host.state === "starting" || row.host.state === "alive" || row.host.state === "failed" || Boolean(row.host.error) || (row.host.exitCode !== null && row.host.exitCode !== 0);
+						// F6: failed verdicts must carry a reason (legacy guaranteed an
+						// error string). The row has no currentRunId here, so only the
+						// state half participates (no status.json to sync).
+						const result = await sendLifecycleCommand({
+							type: "state_command",
+							viewId: row.meta.id,
+							runId: null,
+							source: "service",
+							kind: "reconcile_finalize",
+							expectedRevision: null,
+							payload: {
+								semanticState: failed ? "failed" : "idle",
+								summary: failed ? "Failed (PTY host exited)" : "Needs instructions",
+								reason: failed ? (s.error ?? row.host.error ?? "PTY host exited unexpectedly") : null,
+							},
+						}, row.meta.id);
+						if (result.status !== "applied") {
+							if (result.reason === "coordinator_disabled") {
+								s.semanticState = failed ? "failed" : "idle";
+								s.processState = "exited";
+								s.hasError = failed;
+								s.needsInput = false;
+								s.question = null;
+								s.pendingQuestions = [];
+								s.error = failed ? (s.error ?? row.host.error ?? "PTY host exited unexpectedly") : null;
+								s.summary = failed ? "Failed (PTY host exited)" : "Needs instructions";
+								s.updatedAt = now;
+								writeState(root, s);
+							} else continue; // rejected/ambiguous: nothing mutated, not fixed
+						}
+						appendDiagnostic(root, row.meta.id, { source: "service", level: failed ? "error" : "info", code: "host_reconciled", message: failed ? "PTY host exited before final event" : "PTY host finalized without final event", details: { hostState: row.host.state, exitCode: row.host.exitCode } });
+						fixed += 1;
+					}
+					continue;
+				}
+				if (row.alive) continue;
+				let status = readStatus(root, row.meta.id, s.currentRunId);
+				if (statusRevisionDesynced(s, status)) {
+					// TOCTOU guard: `s` is a listRows snapshot, and earlier rows'
+					// awaited commands may have let the on-disk pair advance past
+					// it — re-read BOTH files fresh and act only on a pair that
+					// still disagrees. (The residual window between the two fresh
+					// reads is sub-ms under the coordinator's view-lock pairing
+					// invariant.)
+					const reread = rereadPair(root, row.meta.id, s.currentRunId);
+					if (reread.desynced) {
+						// Half-materialized pair (a coordinator crashed between its paired
+						// writes): don't combine the mismatched halves into one decision —
+						// record it and kick a coordinator so boot replay repairs the pair.
+						// The row is skipped this pass (not fixed); the next pass sees the
+						// repaired stamps and proceeds normally.
+						// Episode throttle: a stuck pair logs once, not once per 700ms
+						// reconcile pass — diagnostics must stay bounded for unrepairable
+						// pairs (torn transient beat has no journal record; coordinator off).
+						// Episode throttle gates the DIAGNOSTIC (a stuck pair logs once —
+						// CR r1); the repair KICK is retried independently while it keeps
+						// failing (CR r2 issue-4): a transient ensureCoordinator failure
+						// (spawn window exhausted) must not consume the recovery path —
+						// an idle dashboard would otherwise never run boot replay. A
+						// successful kick stops the retries: the coordinator is up, boot
+						// replay already repaired a repairable pair, and an
+						// unrepairable-torn pair gains nothing from re-kicking.
+						// (shouldLog records the episode — evaluate it exactly once.)
+						const logEpisode = desyncThrottle.shouldLog(row.meta.id, reread.state.materializedRevision, reread.status.materializedRevision);
+						if (logEpisode) {
+							appendDiagnostic(root, row.meta.id, { source: "service", level: "warn", code: "state_status_revision_desync", message: "state.json and status.json revisions disagree; skipping reconcile projection and requesting coordinator repair", details: { stateRevision: reread.state.materializedRevision, statusRevision: reread.status.materializedRevision, runId: s.currentRunId } });
+						}
+						if (logEpisode || desyncThrottle.shouldRetryKick(row.meta.id)) {
+							void ensureCoordinatorImpl(root).then((res) => {
+								if (res?.ok) desyncThrottle.clearKickFailed(row.meta.id);
+								else desyncThrottle.markKickFailed(row.meta.id);
+							}).catch(() => desyncThrottle.markKickFailed(row.meta.id));
+						}
+						continue;
+					}
+					// Snapshot was stale but the fresh pair agrees — project from it.
+					status = reread.status;
+				}
+				if (status?.endedAt) {
+					// The run's terminal status exists but the row was never materialized
+					// from it (crash between the two writes, or a pre-coordinator row).
+					// Project mode lets the status's own verdict govern (completed rows
+					// must not be forced to failed/idle).
+					const result = await sendLifecycleCommand({
+						type: "state_command",
+						viewId: row.meta.id,
+						runId: s.currentRunId,
+						source: "service",
+						kind: "reconcile_finalize",
+						expectedRevision: null,
+						payload: { project: true },
+					}, row.meta.id);
+					if (result.status !== "applied" && result.reason !== "coordinator_disabled") {
+						// Fix round 2 (F5 leftover): a rejected/ambiguous project-mode
+						// row (manual fence, no_change, stale_run, timeout) mutated
+						// nothing — it must not count toward the fixed tally.
+						continue;
+					}
+					if (result.reason === "coordinator_disabled") writeState(root, projectViewState(status, now, readState(root, row.meta.id) ?? row.state ?? null));
+				} else {
+					const result = await sendLifecycleCommand({
+						type: "state_command",
+						viewId: row.meta.id,
+						runId: s.currentRunId,
+						source: "service",
+						kind: "reconcile_finalize",
+						expectedRevision: null,
+						payload: {
+							semanticState: "failed",
+							summary: "Failed (runner exited)",
+							reason: s.error ?? "Runner exited unexpectedly",
+						},
+					}, row.meta.id);
+					if (result.status !== "applied") {
+						if (result.reason === "coordinator_disabled") {
+							s.semanticState = "failed";
+							s.processState = "exited";
+							s.hasError = true;
+							s.needsInput = false;
+							s.error = s.error ?? "Runner exited unexpectedly";
+							s.summary = "Failed (runner exited)";
+							s.updatedAt = now;
+							writeState(root, s);
+						} else continue;
+					}
+				}
+				fixed += 1;
+			}
+			for (const row of listRows(root)) {
+				if ((row.state?.followUps?.queuedCount ?? 0) > 0 && canAutoDrain(row)) {
+					// Delivery is ack-gated and async now (issue #70 A13); the queue
+					// item state, not this counter, records the outcome.
+					void drainNextFollowUp(row.meta.id);
+					fixed += 1;
+				}
+			}
+			return fixed;
+		},
+
+		/**
+		 * Mirror lifecycle/events from a managed session that is currently attached in
+		 * the foreground. Without this, a row that was completed/needs_input can keep
+		 * looking stale after the user types a follow-up in the real Pi session.
+		 * @param {string|undefined} sessionFile
+		 * @param {any} event
+		 * @returns {Promise<boolean>} whether a managed row was updated
+		 */
+		syncForegroundEvent(sessionFile, event) {
+			if (!sessionFile || !event?.type) return Promise.resolve(false);
+			const row = rowForSession(sessionFile);
+			if (!row) return Promise.resolve(false);
+			return syncRowEvent(row, event);
+		},
+
+		/** @param {string|undefined} viewId @param {any} event */
+		syncHostedEvent(viewId, event) {
+			if (!viewId || !event?.type) return Promise.resolve(false);
+			const row = loadRow(root, viewId);
+			if (!row) return Promise.resolve(false);
+			return syncRowEvent(row, event);
+		},
+
+		/** @returns {import("../core/store.mjs").Row[]} all visible rows. */
+		rows() {
+			return listRows(root);
+		},
+
+		/**
+		 * Live node-pty / PTY host health snapshot for dashboard chrome.
+		 * - `ok` reflects whether this process can currently launch PTY hosts.
+		 * - `staleHosts` counts rows whose last persisted host claimed `alive` but the
+		 *   runner pid is gone, which often explains attach prompts / degraded UX.
+		 */
+		ptyHealth() {
+			const support = ptySupport();
+			const rows = listRows(root);
+			const staleHosts = rows.filter((row) => row.host?.state === "alive" && !row.hostAlive).length;
+			const liveHosts = rows.filter((row) => row.hostAlive).length;
+			const stalled = rows.filter((row) => row.state?.diagnostics?.stalled).length;
+			const diagnosticErrors = rows.reduce((sum, row) => sum + (row.state?.diagnostics?.errorCount ?? 0), 0);
+			return {
+				ok: Boolean(support.ok),
+				reason: support.ok ? null : support.reason ?? "PTY unavailable",
+				issue: support.ok ? null : (support.issue ?? diagnoseNodePtyFailure(support.reason ?? null)),
+				staleHosts,
+				liveHosts,
+				stalled,
+				diagnosticErrors,
+			};
+		},
+
+		evidence(viewId) {
+			const row = loadRow(root, viewId);
+			if (!row) return { ok: false, error: "Unknown session" };
+			return {
+				ok: true,
+				evidence: readEvidence(root, viewId),
+				paths: {
+					evidence: P.evidencePath(root, viewId),
+					diagnostics: P.diagnosticsPath(root, viewId),
+					session: row.meta.sessionFile,
+					screenLog: P.screenLogPath(root, viewId),
+				},
+			};
+		},
+
+		diagnostics(viewId, diagOpts = {}) {
+			const row = loadRow(root, viewId);
+			if (!row) return { ok: false, error: "Unknown session" };
+			return { ok: true, events: tailDiagnostics(root, viewId, { limit: diagOpts.limit ?? 50 }) };
+		},
+
+		clearDiagnostics(viewId) {
+			const row = loadRow(root, viewId);
+			if (!row) return { ok: false, error: "Unknown session" };
+			return clearDiagnostics(root, viewId);
+		},
+
+		/** @param {string} viewId @returns {import("../core/store.mjs").Row|null} */
+		row(viewId) {
+			return loadRow(root, viewId);
+		},
+
+		/**
+		 * Evict idle warm PTY hosts (TTL / warm-pool cap). Safe to call anytime:
+		 * busy and attached hosts are never touched.
+		 * @param {{ keepViewId?: string|null }} [pruneOpts]
+		 */
+		pruneWarmHosts(pruneOpts = {}) {
+			// Delegates to the createService-closure pruneWarmHosts (same name; NOT recursive).
+			pruneWarmHosts(pruneOpts);
+		},
+	};
+}
+
+/** @param {import("../core/types.mjs").ViewMeta} meta */
+function isExternalSession(meta) {
+	const normalized = resolve(meta.sessionFile).replace(/\\/g, "/");
+	return !normalized.endsWith(`/sessions/${meta.id}.jsonl`);
+}
+
+/** @param {import("../core/types.mjs").EvidenceSnapshot} evidence */
+function latestEvidenceText(evidence) {
+	return evidence.assistantEvidence?.[evidence.assistantEvidence.length - 1]?.text ?? "";
+}
+
+/** @param {import("../core/types.mjs").ViewState} state */
+function completionSummary(state) {
+	if (!isGenericStatusText(state.summary)) return compactSummary(state.summary);
+	return "Done";
+}
+
+/** @param {string} text */
+function compactSummary(text) {
+	const cleaned = String(text || "").replace(/\s+/g, " ").trim();
+	if (!cleaned) return "Done";
+	const first = firstSentence(cleaned);
+	return truncate(first.length >= 12 ? first : cleaned, 80);
+}
+
+/** Launch-time identity this service process stamps on leases and claims. */
+function serviceIdentity() {
+	return { pid: process.pid, startToken: captureStartToken(process.pid) };
+}
+
+/**
+ * Finalize a provably-dead legacy host as `exited` so the resolver loop's next
+ * iteration sees hostActive=false and claims a fresh new-protocol host
+ * (issue #87). The gate is `canFinalizeLegacyHost` — anything unverifiable
+ * stays pending (spec §10.1 conservatism). The write itself is serialized
+ * under the host-start lease (same gate as recoverHost/claim) with a
+ * live-record re-check: a concurrent resolver may have already finalized and
+ * claimed a new-protocol host, and a stale `alive` snapshot must never clobber
+ * that replacement's record (issue #87 CR r1).
+ * @param {string} root
+ * @param {string} viewId
+ * @param {import("../core/types.mjs").HostStatus} host
+ * @param {string} probeClassification
+ * @param {number} now
+ * @param {(r: string, v: string, name: string, o?: object) => ({ acquired: true, lease: { release: () => void } } | { acquired: false, reason: string })} acquireHostStartLock
+ * @returns {boolean} true when finalized (caller should `continue` the loop).
+ */
+function finalizeDeadLegacyHost(root, viewId, host, probeClassification, now, acquireHostStartLock) {
+	// Same pid fallback as loadRow: legacy records carry no runnerPid property —
+	// the pid lives only in the host-pid.json mirror.
+	const hostPid = Object.hasOwn(host, "runnerPid") ? host.runnerPid : readHostPid(root, viewId);
+	if (!canFinalizeLegacyHost({ host, hostPid, hostPidAlive: isAlive(hostPid), probeClassification })) return false;
+	// Serialize with claims: only write while the live record still matches our
+	// (possibly stale) snapshot.
+	const gate = acquireHostStartLock(root, viewId, "host-start", { identity: serviceIdentity() });
+	if (!gate.acquired) return false; // busy — record left untouched; caller pends/waits this attempt, a later one finalizes
+	try {
+		const cur = readHost(root, viewId);
+		if (!cur || cur.instanceId != null) return false; // already claimed by a new-protocol host
+		if (cur.state !== "starting" && cur.state !== "alive") return false; // already finalized
+		if (cur.socketPath !== host.socketPath || cur.state !== host.state) return false; // snapshot drifted
+		const finalizedAt = now;
+		writeHost(root, { ...cur, state: "exited", endedAt: finalizedAt, lastSeenAt: finalizedAt, error: "legacy host finalized: runner pid dead" });
+	} finally {
+		try { gate.lease.release(); } catch { /* best effort */ }
+	}
+	try {
+		appendDiagnostic(root, viewId, {
+			source: "service",
+			level: "info",
+			code: "legacy_host_finalized",
+			message: `Finalized stale legacy host (pid ${hostPid} dead, probe ${probeClassification}) — next attach claims a fresh host`,
+			details: { hostPid, probeClassification, previousState: host.state },
+		});
+	} catch { /* best effort */ }
+	return true;
+}
+
+/** Conservative pre-identity observation (issue #70 Task 10): a recorded pid that
+ *  is still alive is always `unknown` — never safe to release; not recorded or
+ *  provably gone is `dead`. Task 11 replaces this with identity-aware observation. */
+function conservativeObservation(pid) {
+	if (pid == null) return "dead";
+	return isAlive(pid) ? "unknown" : "dead";
+}
+
+/** Signal an identity previously observed as "owned". ESRCH is tolerated (the
+ *  process may exit between observation and signal); anything else rethrows. */
+function defaultSignalOwnedProcess(identity, signal) {
+	try {
+		process.kill(identity.pid, signal);
+	} catch (err) {
+		if (/** @type {NodeJS.ErrnoException} */ (err).code !== "ESRCH") throw err;
+	}
+}
+
+/** @param {import("../core/types.mjs").HostStatus|null} host */
+function observeHostForReplace(host) {
+	return {
+		host,
+		runnerObservation: conservativeObservation(host?.runnerPid ?? null),
+		childObservation: conservativeObservation(host?.childPid ?? null),
+		launchLeaseActive: false,
+	};
+}
+
+/**
+ * Send a one-shot JSONL command to a live host socket.
+ * @param {import("../core/store.mjs").Row} row
+ * @param {Record<string, unknown>} message
+ * @returns {{ ok: boolean, error?: string }}
+ */
+function sendHostMessage(row, message) {
+	const socketPath = row.host?.socketPath;
+	if (!socketPath) return { ok: false, error: "No host socket" };
+	// On Windows the control socket is a named pipe, which never exists as a
+	// filesystem entry, so existsSync can't be used as a readiness probe there.
+	// A missing pipe surfaces as a connection error on the socket below.
+	if (process.platform !== "win32" && !existsSync(socketPath)) return { ok: false, error: "Host socket is not ready" };
+	try {
+		const socket = createConnection(socketPath);
+		socket.on("connect", () => {
+			socket.write(JSON.stringify(message) + "\n");
+			socket.end();
+		});
+		socket.on("error", () => {});
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+/**
+ * Default window service waits for the runner's input_ack (or, on the staged
+ * path, `cmd_ack applied`) before treating a host input as undelivered
+ * (issue #70 A13; phase 5 D4).
+ */
+const HOST_INPUT_ACK_TIMEOUT_MS = 2_000;
+
+/**
+ * Reconcile-query one commandId against a host control socket (§10 discipline:
+ * a timeout must be resolved by query, never by a blind retry).
+ * @returns {Promise<"accepted_unknown"|"reconciled_clean"|"unavailable">}
+ */
+function reconcileQueryCommand(socketPath, commandId, opts = {}) {
+	const { viewId, instanceId, clientId = "service", connect = createConnection, timeoutMs = HOST_INPUT_ACK_TIMEOUT_MS } = opts;
+	return new Promise((resolve) => {
+		let settled = false;
+		let buffer = "";
+		/** @type {import("node:net").Socket|null} */
+		let socket = null;
+		const finish = (verdict) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			try { socket?.destroy(); } catch { /* best effort */ }
+			resolve(verdict);
+		};
+		const timer = setTimeout(() => finish("unavailable"), timeoutMs);
+		timer.unref?.();
+		try {
+			socket = connect(socketPath);
+		} catch {
+			finish("unavailable");
+			return;
+		}
+		socket.on("connect", () => {
+			try {
+				socket.write(JSON.stringify({ type: "reconcile", commandId: `reconcile-${commandId}`, clientId, seq: 1, viewId, instanceId }) + "\n");
+			} catch {
+				finish("unavailable");
+			}
+		});
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				let msg;
+				try { msg = JSON.parse(line); } catch { continue; }
+				if (msg?.type !== "reconcile_result") continue;
+				const unresolved = Array.isArray(msg.unresolved) ? msg.unresolved : [];
+				finish(unresolved.some((u) => u?.commandId === commandId) ? "accepted_unknown" : "reconciled_clean");
+				return;
+			}
+		});
+		socket.on("error", () => finish("unavailable"));
+		socket.on("close", () => finish("unavailable"));
+	});
+}
+
+/**
+ * Staged durable-input delivery (phase 5 D4): enveloped `{durable:true}` input
+ * expecting `cmd_ack accepted → applied` against a generation-capable runner,
+ * with the §10 reconcile-query on timeout. Runners whose hello lacks a
+ * `generation` token predate the control lifecycle: the SAME connection falls
+ * back to the legacy requestId/input_ack contract (byte-identical bytes), so
+ * phase-4 owned hosts (instanceId known, envelope-ignorant) keep their dedup
+ * instead of double-writing.
+ *
+ * Result shapes (never rejects):
+ * - `{ok:true, applied:true}` — the runner wrote the child.
+ * - `{ok:false, ambiguous:true, error:"accepted_unknown", retryable:false}` —
+ *   accepted but never applied (restart/write-failure window); the caller must
+ *   NOT re-send (§10) and must NOT treat the prompt as delivered.
+ * - `{ok:false, error, retryable}` — everything else (starting window, dead
+ *   socket, legacy timeout); re-send is safe (journal dedup or requestId dedup).
+ * @param {string} socketPath
+ * @param {string} text
+ * @param {{ requestId?: string|null, commandId?: string|null, viewId?: string, instanceId?: string|null, clientId?: string, timeoutMs?: number, connect?: (path: string) => import("node:net").Socket }} [opts]
+ */
+function sendHostInputStaged(socketPath, text, opts = {}) {
+	const commandId = opts.commandId ?? opts.requestId;
+	const clientId = opts.clientId ?? "service";
+	const timeoutMs = opts.timeoutMs ?? HOST_INPUT_ACK_TIMEOUT_MS;
+	const connect = opts.connect ?? createConnection;
+	const { viewId, instanceId } = opts;
+	return new Promise((resolve) => {
+		let settled = false;
+		let buffer = "";
+		let helloSeen = false;
+		let sawAccepted = false;
+		/** @type {import("node:net").Socket|null} */
+		let socket = null;
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			try { socket?.destroy(); } catch { /* best effort */ }
+			resolve(result);
+		};
+		/** §10: resolve the deadline by query, never by a blind retry. */
+		const resolveByReconcile = (fallbackError) => {
+			if (settled) return;
+			reconcileQueryCommand(socketPath, commandId, { viewId, instanceId, clientId, connect, timeoutMs }).then((verdict) => {
+				if (verdict === "accepted_unknown") finish({ ok: false, ambiguous: true, error: "accepted_unknown", retryable: false });
+				else if (verdict === "reconciled_clean") finish({ ok: false, error: fallbackError, retryable: true });
+				else finish({ ok: false, error: fallbackError, retryable: true });
+			});
+		};
+		const timer = setTimeout(() => resolveByReconcile("timeout"), timeoutMs);
+		timer.unref?.();
+		try {
+			socket = connect(socketPath);
+		} catch (err) {
+			finish({ ok: false, error: err instanceof Error ? err.message : String(err), retryable: true });
+			return;
+		}
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				let msg;
+				try { msg = JSON.parse(line); } catch { continue; }
+				if (!helloSeen) {
+					if (msg?.type !== "hello") continue; // wait for the capability answer
+					helloSeen = true;
+					try {
+						if (typeof msg.generation === "string" && msg.generation) {
+							socket.write(JSON.stringify({ type: "input", durable: true, commandId, clientId, seq: 1, viewId, instanceId, data: text }) + "\n");
+						} else {
+							// Pre-lifecycle runner: legacy requestId contract, same bytes.
+							socket.write(JSON.stringify({ type: "input", requestId: commandId, data: text }) + "\n");
+						}
+					} catch (err) {
+						finish({ ok: false, error: err instanceof Error ? err.message : String(err), retryable: true });
+					}
+					continue;
+				}
+				if (msg?.type === "cmd_ack" && msg.commandId === commandId) {
+					if (msg.stage === "applied") finish({ ok: true, applied: true });
+					if (msg.stage === "accepted") {
+						sawAccepted = true;
+						// accepted → applied is synchronous runner-side (Task 2 ruling 4);
+						// a dropped socket between them is resolved by the deadline's query.
+					}
+					continue;
+				}
+				if (msg?.type === "input_ack" && msg.requestId === commandId) {
+					// Legacy fallback answer on this same connection.
+					finish({ ok: true });
+					return;
+				}
+				if (msg?.type === "error") {
+					const code = msg.code ?? msg.message ?? "host_error";
+					if (code === "command_failed") {
+						// Taxonomy: reconcile by commandId before any retry decision.
+						resolveByReconcile(code);
+						return;
+					}
+					finish({ ok: false, error: code, retryable: code !== "envelope_invalid" });
+					return;
+				}
+				// hello/status/output lines are ignored — keep waiting.
+			}
+		});
+		socket.on("error", (err) => {
+			const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+			finish({ ok: false, error: code ?? (err instanceof Error ? err.message : String(err)), retryable: true });
+		});
+		socket.on("close", () => {
+			// A close after an accepted ack is the §10 window — resolve by query.
+			if (sawAccepted) resolveByReconcile("socket_closed");
+			else finish({ ok: false, error: "socket_closed", retryable: true });
+		});
+	});
+}
+
+/**
+ * Send one input line to a host control socket and wait for the runner's
+ * input_ack (issue #70 A13). Fire-and-forget "connected" no longer counts as
+ * delivered: only `{type:"input_ack", requestId}` does.
+ *
+ * Delivery contract is durable at-least-once, coordinated through the queue
+ * item id used as requestId:
+ * - If an ack is lost AFTER the runner wrote the child, a re-send with the
+ *   same requestId hits the runner's dedup table and re-acks without a second
+ *   child write.
+ * - If the host instance restarted, the new instance never saw the requestId
+ *   and writes the prompt once.
+ * Legacy (pre-instanceId) runners ignore requestId and never ack: this helper
+ * then times out and reports a retryable failure, leaving the prompt queued —
+ * legacy hosts are attach-only by spec, so queued prompts surface on attach.
+ * Never rejects: every failure resolves `{ok:false, error, retryable:true}`.
+ * @param {string} socketPath
+ * @param {string} text
+ * @param {{ requestId?: string|null, timeoutMs?: number, connect?: (path: string) => import("node:net").Socket }} [opts]
+ * @returns {Promise<{ ok: boolean, error?: string, retryable?: boolean }>}
+ */
+export function sendHostInput(socketPath, text, opts = {}) {
+	// Staged durable path (phase 5 D4): the caller knows the host fence
+	// (viewId + instanceId) and a stable commandId — envelope it and expect
+	// accepted → applied with the §10 reconcile-query on timeout. Runners whose
+	// hello lacks a generation fall back to the legacy requestId contract on
+	// the same connection, so the legacy branch below stays for callers that
+	// have no fence (pre-instanceId hosts).
+	if (opts.viewId && opts.instanceId != null && (opts.commandId || opts.requestId)) {
+		return sendHostInputStaged(socketPath, text, opts);
+	}
+	const requestId = opts.requestId ?? null;
+	const timeoutMs = opts.timeoutMs ?? HOST_INPUT_ACK_TIMEOUT_MS;
+	const connect = opts.connect ?? createConnection;
+	return new Promise((resolve) => {
+		let settled = false;
+		let buffer = "";
+		/** @type {import("node:net").Socket|null} */
+		let socket = null;
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			try { socket?.destroy(); } catch { /* best effort */ }
+			resolve(result);
+		};
+		const timer = setTimeout(() => finish({ ok: false, error: "timeout", retryable: true }), timeoutMs);
+		timer.unref?.();
+		try {
+			socket = connect(socketPath);
+		} catch (err) {
+			finish({ ok: false, error: err instanceof Error ? err.message : String(err), retryable: true });
+			return;
+		}
+		socket.on("connect", () => {
+			try {
+				socket.write(JSON.stringify({ type: "input", requestId, data: text }) + "\n");
+			} catch (err) {
+				finish({ ok: false, error: err instanceof Error ? err.message : String(err), retryable: true });
+			}
+		});
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				let msg;
+				try { msg = JSON.parse(line); } catch { continue; }
+				if (msg?.type === "input_ack" && (requestId == null || msg.requestId === requestId)) {
+					finish({ ok: true });
+					return;
+				}
+				if (msg?.type === "error") {
+					// e.g. {type:"error", code:"host_starting", requestId} while the child boots.
+					finish({ ok: false, error: msg.code ?? msg.message ?? "host_error", retryable: true });
+					return;
+				}
+				// hello/status/output lines are ignored — keep waiting for the ack.
+			}
+		});
+		socket.on("error", (err) => {
+			const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+			finish({ ok: false, error: code ?? (err instanceof Error ? err.message : String(err)), retryable: true });
+		});
+		socket.on("close", () => finish({ ok: false, error: "socket_closed", retryable: true }));
+	});
+}
+
+let cachedPtySupport;
+const requireForPty = createRequire(import.meta.url);
+const PTY_SUPPORT_ERROR_TTL_MS = 2_000;
+
+function ptyHostAvailability(opts = {}) {
+	if (process.env.AGENT_BOARD_DISABLE_PTY === "1" || process.env.AGENT_VIEW_DISABLE_PTY === "1") {
+		return { ok: false, reason: "AGENT_BOARD_DISABLE_PTY=1", issue: diagnoseNodePtyFailure("AGENT_BOARD_DISABLE_PTY=1") };
+	}
+	if (process.env.AGENT_BOARD_FORCE_PTY === "1" || process.env.AGENT_VIEW_FORCE_PTY === "1") return { ok: true };
+	return ptySpawnSupported(opts);
+}
+
+export function envInt(name, fallback, min, max, legacyName) {
+	const raw = process.env[name] ?? (legacyName ? process.env[legacyName] : undefined);
+	if (raw === undefined || raw === "") return fallback;
+	const n = Number(raw);
+	if (!Number.isFinite(n)) return fallback;
+	return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+export function shouldProbePtySupport(cached, opts = {}, now = Date.now()) {
+	if (!cached) return true;
+	if (cached.ok) return false;
+	if (opts.refresh) return true;
+	const ttlMs = opts.maxAgeMs ?? PTY_SUPPORT_ERROR_TTL_MS;
+	return now - (cached.checkedAt ?? 0) >= ttlMs;
+}
+
+function ptySpawnSupported(opts = {}) {
+	const now = Date.now();
+	if (!shouldProbePtySupport(cachedPtySupport, opts, now)) return cachedPtySupport;
+	try {
+		ensureNodePtySpawnHelperExecutable(requireForPty);
+		const pty = requireForPty("node-pty");
+		const proc = pty.spawn(process.execPath, ["-e", "process.exit(0)"], {
+			name: "xterm-256color",
+			cols: 20,
+			rows: 5,
+			cwd: process.cwd(),
+			env: process.env,
+		});
+		proc.kill?.();
+		cachedPtySupport = { ok: true, checkedAt: now };
+	} catch (err) {
+		cachedPtySupport = { ok: false, reason: err instanceof Error ? err.message : String(err), checkedAt: now };
+		cachedPtySupport.issue = diagnoseNodePtyFailure(cachedPtySupport.reason, { probe: probeNodePtyEnvironment(requireForPty) });
+	}
+	return cachedPtySupport;
+}
+

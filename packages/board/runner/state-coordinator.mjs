@@ -1,0 +1,673 @@
+#!/usr/bin/env node
+/**
+ * Detached View State Coordinator (issue #91, spec D3) — the single logical
+ * writer of state.json/status.json for one board root.
+ *
+ * Usage: node state-coordinator.mjs <root>
+ *
+ * Design contract:
+ * - Exactly one instance per root: a token-fenced lease (acquireOwnedViewLock on
+ *   the pseudo-view "_coordinator") is grabbed before anything else; a second
+ *   instance exits 0 immediately ("busy" is an expected, idempotent outcome).
+ * - Every semantic mutation arrives as a `state_command` over the JSONL control
+ *   socket and is decided by the pure layer (state-commands.mjs). This process
+ *   owns ALL side effects: durable journal append (fsync BEFORE materialize, so
+ *   boot replay can repair the crash window), materialization under a per-view
+ *   file lock, checkpoint + journal GC, and socket lifecycle.
+ * - Transient kinds (TRANSIENT_KINDS, run_progress) bypass the durable
+ *   machinery: validate → decide → materialize → reply, with no journal
+ *   append, no dedupe, and no checkpoint trigger — a periodic snapshot whose
+ *   next beat supersedes it. They still bump materializedRevision.
+ * - Idempotency: a processed commandId returns its original result forever —
+ *   from the in-memory ring first (bounded, covers the post-GC window), then
+ *   from the journal (findProcessedCommand). Duplicates never re-append.
+ * - Revisions: one global monotonic materializedRevision counter, initialized at
+ *   boot to max(checkpoint, max journal revision, max revision across views'
+ *   state.json), incremented once per applied command, and stamped identically
+ *   on state.json and the command's run status.json (spec 根治条件 5 scope).
+ * - Boot replay re-materializes every applied journal record from its stored
+ *   patches; per-file guards stamp only files strictly behind the recorded
+ *   revision, so a half-materialized pair (state.json written, status.json not)
+ *   repairs just the lagging half without moving the other one backwards. The
+ *   decision-time status binding (statusRunId) is recorded in the journal, so
+ *   replay is deterministic — no re-decision, no re-binding.
+ * - Legacy adoption: a view without materializedRevision is stamped as part of
+ *   its first applied command's single materialization write (no extra write).
+ * - Root guard (issue #241): a board root that disappears — or is REPLACED by a
+ *   write that recreates it in the delete window — makes the supervised
+ *   heartbeat step down with exit 0 and one stderr line. Neither path writes a
+ *   diagnostic or state: every append helper ensureDirs its parent and would
+ *   recreate the deleted root skeleton.
+ * - AGENT_BOARD_COORDINATOR=off makes the process exit 0 immediately (tests and
+ *   the client's degradation path).
+ */
+import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { createServer } from "node:net";
+import { readJson } from "../src/core/atomic.mjs";
+import {
+	appendCommand,
+	findProcessedCommand,
+	gcJournal,
+	readCheckpoint,
+	readJournal,
+	repairJournalTail,
+	writeCheckpoint,
+} from "../src/core/coordinator-journal.mjs";
+import { classifyEndpointHealth, shouldUnlinkEndpoint, socketIdentityObservation } from "../src/core/host-coordination.mjs";
+import { appendDiagnostic } from "../src/core/diagnostics.mjs";
+import { acquireOwnedViewLock, describeLeaseConflict, heartbeatFailureAction, withViewLockSync } from "../src/core/locks.mjs";
+import { captureStartToken } from "../src/core/pid.mjs";
+import { resolveTestMs } from "../src/core/test-knobs.mjs";
+import * as P from "../src/core/paths.mjs";
+import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
+import { TRANSIENT_KINDS, decideStateTransition, validateCommand } from "../src/core/state-commands.mjs";
+import { COORDINATOR_PROTOCOL_VERSION } from "../src/core/coordinator-protocol.mjs";
+
+/** In-memory processed-command ring size (FIFO). Beyond the journal, this covers
+ *  idempotency when the journal prefix has already been GC'd away. */
+const PROCESSED_RING_MAX = 1000;
+/** Journal growth (bytes) that triggers checkpoint + GC. Keeps boot replay bounded. */
+const CHECKPOINT_THRESHOLD_BYTES = 262_144;
+/** Lease heartbeat — matches pty-runner's host-start lease cadence. */
+const HEARTBEAT_MS = 1000;
+/** Lifecycle kinds whose legacy write sites stamped state.lastActivityAt on
+ *  every persist (service markQueued/archive/adopt, job-runner plan-ready,
+ *  reconcile terminal sites). The decision layer stays clock-free, so the
+ *  shell adds the wall-clock stamp — into the patch BEFORE the journal
+ *  append, so boot replay re-applies the exact same fields deterministically
+ *  (there is no clock at replay time either). (Task 1 review F5.) */
+const LAST_ACTIVITY_STAMP_KINDS = new Set(["mark_queued", "archive_view", "adopt_session", "reconcile_finalize", "plan_ready", "mark_completed", "mark_holding", "clear_holding", "host_run_failed"]);
+/** Kinds whose status patch may CREATE the run's status file: they carry the
+ *  full status content for a run that has no materialized status yet. Every
+ *  other kind keeps PR #1's "patch presence ≠ file requirement" semantics
+ *  (e.g. mark_completed's `status: {autoState: null}` on a legacy row without
+ *  a status file must not fabricate one).
+ *
+ *  `run_progress` joins them (issue #91 hard-down residual closure): its beat
+ *  patch IS the runner's full in-memory status, and when the coordinator was
+ *  down through the runner's boot window (mark_queued applied, run_started
+ *  lost) the first post-recovery beat is the only surviving source that can
+ *  recreate the file — without it beats and finalize reject stale_run forever
+ *  and the row can never converge. The decision layer gates this on a
+ *  qualified live-run beat (full-shaped patch, matching string runId). */
+const STATUS_BOOTSTRAP_KINDS = new Set(["run_started", "followup_started", "run_progress"]);
+
+const root = process.argv[2];
+if (!root) {
+	process.stderr.write("state-coordinator: missing root argument\n");
+	process.exit(2);
+}
+if (process.env.AGENT_BOARD_COORDINATOR === "off") process.exit(0);
+
+main().catch((err) => {
+	process.stderr.write(`state-coordinator: fatal ${err?.stack || err}\n`);
+	process.exit(1);
+});
+
+/**
+ * Append a coordinator-scoped diagnostic. `appendDiagnostic` throws when the
+ * disk is failing, so callers fence the write where a crash would be worse
+ * than a lost diagnostic (issue #224 D4). The AGENT_BOARD_TEST_FAIL_DIAGNOSTIC
+ * knob forces that throw so A14b can prove the step-down survives it.
+ * @param {string} code
+ * @param {Record<string, any>} details
+ * @param {"info"|"warn"|"error"} [level]
+ * @param {string} [source]
+ */
+function appendCoordinatorDiagnostic(code, details, level = "info", source = "coordinator") {
+	if (process.env.AGENT_BOARD_TEST_FAIL_DIAGNOSTIC === "1") {
+		throw new Error(`forced coordinator diagnostic failure (${code})`);
+	}
+	appendDiagnostic(root, "_coordinator", { source, level, code, details });
+}
+
+/**
+ * Whether the board root is provably gone. Only `ENOENT` counts (issue #241):
+ * a transient access failure (EACCES/EBUSY, e.g. a scanner holding the
+ * directory) must never kill a healthy coordinator, so it reads as "present".
+ * @returns {boolean}
+ */
+function rootVanished() {
+	try {
+		statSync(root);
+		return false;
+	} catch (err) {
+		return /** @type {NodeJS.ErrnoException} */ (err)?.code === "ENOENT";
+	}
+}
+
+/**
+ * Snapshot the board root directory's filesystem identity (issue #241).
+ * `{dev, ino}` identifies one exact directory: a delete-and-recreate at the same
+ * path gets a new inode, which is the only way to tell "the root came back" from
+ * "the root never left" once a write's ensureDir has recreated it. Returns null
+ * when the root is missing or the filesystem reports no usable identity (ino 0,
+ * or no dev/ino at all), which degrades the check to existence-only.
+ * @returns {{dev: number, ino: number}|null}
+ */
+function captureRootIdentity() {
+	try {
+		const st = statSync(root);
+		if (!Number.isFinite(st.dev) || !Number.isFinite(st.ino) || st.ino === 0) return null;
+		return { dev: st.dev, ino: st.ino };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether the board root is gone or was replaced since boot (issue #241).
+ * Existence alone is not enough: `appendCommand`/`writeState`/lease acquisition
+ * ensureDir their parent, so a write landing after the delete RECREATES the path
+ * and a plain stat then reads "present" (final-review I1). Comparing against the
+ * identity captured at boot detects the replacement on the next supervised tick,
+ * including the boot-window race where lease acquisition recreates the root.
+ * Only `ENOENT` counts as missing; any other stat error (EACCES/EBUSY) reads as
+ * present so a transient access failure never kills a healthy coordinator. With
+ * no captured identity the check degrades to existence-only (never a false
+ * step-down).
+ * @param {{dev: number, ino: number}|null} identity
+ * @returns {"missing"|"replaced"|null}
+ */
+function rootVanishedOrReplaced(identity) {
+	try {
+		const st = statSync(root);
+		if (!identity) return null;
+		return st.dev !== identity.dev || st.ino !== identity.ino ? "replaced" : null;
+	} catch (err) {
+		return /** @type {NodeJS.ErrnoException} */ (err)?.code === "ENOENT" ? "missing" : null;
+	}
+}
+
+/**
+ * The one stderr line every "root is gone" exit emits (issue #241): the boot
+ * guard and the supervised step-down. Neither writes a diagnostic: every
+ * append helper ensures its parent directory (src/core/atomic.mjs), so a write
+ * under <root>/views/_coordinator would recreate the deleted directory chain —
+ * the throwaway-root residue this issue exists to remove. Detached callers
+ * ignore stdio; a test pipes stderr and attributes the exit to this line.
+ * @param {"missing"|"replaced"} state
+ * @param {string} outcome
+ */
+function writeRootGone(state, outcome) {
+	process.stderr.write(`state-coordinator: board root ${state} (${root}); ${outcome}\n`);
+}
+
+async function main() {
+	const instanceId = randomBytes(8).toString("hex");
+	const startedAt = Date.now();
+	const heartbeatMs = resolveTestMs(process.env, "AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS", HEARTBEAT_MS);
+
+	// Capture the root's identity BEFORE the boot guard (issue #241, final-review
+	// I1): a delete between the guard and lease acquisition would let that
+	// ensureDir recreate the root WITH a valid lease, and the process would then
+	// serve it forever. The tick compares against this snapshot, so the recreated
+	// directory is detected on the first heartbeat.
+	const rootIdentity = captureRootIdentity();
+
+	// 0. A root that is already gone must fail closed (issue #241 A3b). Lease
+	// acquisition runs ensureDir, which would happily REBUILD the deleted board
+	// and serve that empty root forever — the exact orphan shape this issue is
+	// about. "Nothing to serve" is an expected outcome like a lost lease, so it
+	// exits 0, writes no diagnostic, and logs the shared stderr line.
+	if (rootVanished()) {
+		writeRootGone("missing", "nothing to serve; exiting");
+		process.exit(0);
+	}
+
+	// 1. Lease first: a second coordinator is an expected, idempotent no-op.
+	// Identity carries a POSIX startToken (pty-runner pattern) so a SIGKILLed
+	// coordinator's lease can be reclaimed by the next instance after pid reuse,
+	// plus the in-process instanceId the pong reports (issue #239 A4) so a client
+	// can tell whether the live endpoint is still the lease's owner.
+	// heartbeatMs declares the staleness contract (issue #224): a holder that
+	// stops heartbeating becomes reclaimable on its own staleness.
+	/** @type {import("../src/core/locks.mjs").Lease} */
+	let lease;
+	try {
+		lease = acquireOwnedViewLock(root, "_coordinator", "state-coordinator", {
+			waitMs: 500,
+			identity: { pid: process.pid, startToken: captureStartToken(process.pid), instanceId },
+			heartbeatMs,
+		});
+	} catch (err) {
+		// Record the conflict instead of exiting silently (issue #224 D6). The
+		// diagnostic write is best-effort: it must never turn the expected
+		// idempotent exit into a crash.
+		const summary = describeLeaseConflict(root, "_coordinator", "state-coordinator");
+		if (summary) {
+			try { appendCoordinatorDiagnostic("coordinator_lease_unavailable", summary, "error"); } catch { /* best effort */ }
+		}
+		process.stderr.write(`state-coordinator: lease unavailable (${err?.code ?? err?.message ?? "unknown"}); another instance may own it; exiting\n`);
+		process.exit(0);
+	}
+	// Leave a trace when this acquire reclaimed a stale lease (issue #224 D6).
+	if (lease.reclaimed) {
+		try { appendCoordinatorDiagnostic("lease_reclaimed", { ...lease.reclaimed }, "info", "lock"); } catch { /* best effort */ }
+	}
+	// Boot-edge touch (issue #224 D5): reflect acquisition progress before the
+	// supervised interval starts. Never counted toward the failure counter.
+	try { lease.touch(); } catch { /* best effort */ }
+
+	// 2. Boot state: journal summary, processed-command ring, replay, counter init.
+	// Repair a crash-torn tail FIRST: without it the first post-restart append
+	// concatenates onto the torn line and that fsynced record becomes invisible
+	// to every readJournal / replay / revision scan below.
+	repairJournalTail(root);
+	const checkpoint = readCheckpoint(root) ?? { materializedRevision: 0, journalBytes: 0 };
+	const journal = readJournal(root);
+	/** @type {Map<string, { result: { status: string, reason: string|null }, materializedRevision: number }>} */
+	const processedCommands = new Map();
+	for (const record of journal) {
+		const commandId = record?.command?.commandId;
+		if (commandId && !processedCommands.has(commandId)) {
+			processedCommands.set(commandId, {
+				result: record.result ?? { status: "rejected", reason: "unknown" },
+				materializedRevision: record.materializedRevision ?? 0,
+			});
+		}
+	}
+
+	// Replay in journal order: re-materialize every applied record from its stored
+	// patches; materialize's per-file guards write only files strictly behind the
+	// recorded revision, so this repairs just the half that missed its write in a
+	// crash window and never moves the other half backwards.
+	for (const record of journal) {
+		if (record?.result?.status !== "applied") continue;
+		const viewId = record?.command?.viewId;
+		if (!viewId) continue;
+		materialize(viewId, record.command ?? {}, record.mutate ?? {}, record.materializedRevision ?? 0, record.statusRunId ?? null);
+	}
+
+	// Global revision counter: never reissue a revision that exists anywhere.
+	let revisionCounter = Math.max(checkpoint.materializedRevision ?? 0, 0);
+	for (const record of journal) revisionCounter = Math.max(revisionCounter, record.materializedRevision ?? 0);
+	if (existsSync(P.viewsDir(root))) {
+		for (const entry of readdirSync(P.viewsDir(root))) {
+			const state = readJson(P.statePath(root, entry), null);
+			revisionCounter = Math.max(revisionCounter, state?.materializedRevision ?? 0);
+		}
+	}
+	let lastCheckpointBytes = 0;
+
+	// Boot-edge touch (issue #224 D5): replay is done; the heartbeat now
+	// reflects live progress before the endpoint binds. Never counted.
+	try { lease.touch(); } catch { /* best effort */ }
+
+	// 3. Control socket (JSONL, pty-runner's line-buffered server shape).
+	const socketPath = P.coordinatorEndpointPathFor(process.platform, root);
+	if (process.platform !== "win32" && existsSync(socketPath)) {
+		// Lease is ours: any leftover socket file belongs to a dead coordinator.
+		try { unlinkSync(socketPath); } catch { /* best effort */ }
+	}
+	/** {dev,ino} recorded at bind time; cleanup unlinks only this exact inode. */
+	let boundSocketIdentity = null;
+	/** Set by the supervised tick when the bound endpoint is gone or replaced:
+	 *  shutdown must then leave the path alone even while the lease still looks
+	 *  ours (issue #255). */
+	let endpointCompromised = false;
+
+	const server = createServer((socket) => {
+		let buffer = "";
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) handleClientLine(line, socket);
+		});
+		socket.on("error", () => {}); // client vanished mid-request; nothing to answer
+	});
+
+	server.on("error", (err) => {
+		process.stderr.write(`state-coordinator: server error ${err instanceof Error ? err.message : String(err)}\n`);
+		shutdown(1);
+	});
+
+	// Boot-edge touch (issue #224 D5): the endpoint bind is the last boot
+	// boundary; the supervised interval takes over once listen succeeds.
+	// Never counted toward the failure counter.
+	try { lease.touch(); } catch { /* best effort */ }
+
+	// Consecutive supervised heartbeat failures. Only interval touches count;
+	// the boot-edge touches above are deliberately ignored (issue #224 D4/D5).
+	let consecutiveTouchFailures = 0;
+	let heartbeatTimer = null;
+
+	server.listen(socketPath, () => {
+		if (process.platform !== "win32") {
+			try {
+				const st = statSync(socketPath);
+				boundSocketIdentity = { dev: st.dev, ino: st.ino };
+			} catch (err) {
+				// Without the bind identity both endpoint cleanup and self-supervision
+				// degrade to a no-op; say so instead of failing silently (issue #255).
+				process.stderr.write(`state-coordinator: endpoint identity unavailable (${err instanceof Error ? err.message : String(err)}); self-supervision disabled\n`);
+			}
+		}
+		// Supervision starts only after the endpoint is bound (issue #224 D4):
+		// a live-but-stuck holder must step down before its lease can be
+		// preempted as stale, and stepping down before the socket exists would
+		// make the A14 endpoint cleanup a no-op.
+		heartbeatTimer = setInterval(() => {
+			// Step down when the board root is gone or was REPLACED (issue #241):
+			// a detached coordinator that outlives its root serves nobody, and its
+			// lease can never be reclaimed while the pid is alive. Detection reuses
+			// this tick — no second timer — so the worst case is one heartbeat.
+			//
+			// Existence alone is not enough (final-review I1): a write landing after
+			// the delete (appendCommand / writeState → ensureDir) recreates the
+			// directory, so a plain stat would read "present" and the coordinator
+			// would serve a dead board. The boot-time dev/ino identity distinguishes
+			// the recreated directory from the original one, and the same guard
+			// catches a root deleted between the boot guard and lease acquisition
+			// (that ensureDir would recreate it WITH a lease).
+			//
+			// No diagnostic is written on either path: every append helper
+			// ensureDirs its parent (src/core/atomic.mjs), so appending to
+			// <root>/views/_coordinator/diagnostics.jsonl would RECREATE the
+			// deleted directory chain — reintroducing exactly the throwaway-root
+			// residue this issue measures (U1). The shared stderr line is the
+			// attribution instead; detached callers ignore stdio, while a test
+			// spawns with a stderr pipe. Residual accepted (spec §7): a write in
+			// the delete window may leave a skeleton directory (data, not a
+			// process); this tick bounds its lifetime.
+			//
+			// A missing root also makes the touch below fail, but that path needs
+			// three consecutive failures; checking first attributes the step-down
+			// to the real cause and vacates the root immediately.
+			const rootState = rootVanishedOrReplaced(rootIdentity);
+			if (rootState) {
+				writeRootGone(rootState, "stepping down");
+				shutdown(0);
+				return;
+			}
+			// Self-supervise the endpoint (issue #255): a lease holder whose socket
+			// vanished or was replaced serves nobody — every client write fails with
+			// ENOENT while its fresh heartbeat keeps replacement coordinators losing
+			// the lease race. Step down so the next ensureCoordinator() binds a fresh
+			// endpoint. MUST stay after the root guard: a diagnostic append for a
+			// deleted root would recreate the directory skeleton (#241). `unknown`
+			// (transient stat error, or no bound identity) never steps a holder down.
+			// Short-circuit on the bound identity: without it (win32 named pipe, or a
+			// failed bind-time stat) there is nothing to compare against, and skipping
+			// the stat also avoids win32's non-trivial pipe stat side effects.
+			const endpointState = boundSocketIdentity
+				? classifyEndpointHealth(boundSocketIdentity, statSocketObservation(socketPath))
+				: "unknown";
+			if (endpointState === "missing" || endpointState === "replaced") {
+				endpointCompromised = true; // veto endpoint cleanup in shutdown (R1)
+				try {
+					appendCoordinatorDiagnostic("coordinator_endpoint_lost", { state: endpointState }, "warn");
+				} catch { /* a failing diagnostic must not block the step-down (#224 D4) */ }
+				process.stderr.write(`state-coordinator: endpoint ${endpointState} (${socketPath}); stepping down\n`);
+				shutdown(0);
+				return;
+			}
+			let ok;
+			try {
+				ok = process.env.AGENT_BOARD_TEST_FORCE_TOUCH_FAILURE === "1" ? false : lease.touch();
+			} catch {
+				ok = false;
+			}
+			if (!ok) {
+				consecutiveTouchFailures += 1;
+				if (heartbeatFailureAction(consecutiveTouchFailures) === "abandon") {
+					// Count → diagnostic → shutdown, in that order. The
+					// diagnostic write throws when the disk is failing (the
+					// exact step-down scenario), so it is fenced and must not
+					// block the exit.
+					try {
+						appendCoordinatorDiagnostic("coordinator_heartbeat_lost", { consecutiveFailures: consecutiveTouchFailures }, "error");
+					} catch { /* a failing diagnostic must not block the step-down */ }
+					shutdown(0);
+				}
+			} else {
+				consecutiveTouchFailures = 0;
+			}
+		}, heartbeatMs);
+		heartbeatTimer.unref?.();
+	});
+
+	let shuttingDown = false;
+	process.on("SIGTERM", () => shutdown(0));
+	process.on("SIGINT", () => shutdown(0));
+
+	/** One stat attempt, classified into the supervised observation discriminator.
+	 *  A transient access error is `unknown`, never `missing`/`replaced` (issue #255). */
+	function statSocketObservation(path) {
+		let stat = null;
+		let errorCode = null;
+		try {
+			stat = statSync(path);
+		} catch (err) {
+			errorCode = /** @type {NodeJS.ErrnoException} */ (err)?.code ?? "UNKNOWN";
+		}
+		return socketIdentityObservation(stat, errorCode);
+	}
+
+	/** Lease ownership at cleanup time; a read failure fails closed (no unlink). */
+	function safeIsOwner() {
+		try { return lease.isOwner(); } catch { return false; }
+	}
+
+	function shutdown(code) {
+		if (shuttingDown) return;
+		shuttingDown = true;
+		try { clearInterval(heartbeatTimer); } catch { /* best effort */ }
+		// Do NOT call server.close() (issue #255, nodejs/node#19729): libuv unlinks the
+		// unix-socket bind path when the handle closes, so a deposed coordinator closing
+		// after a successor bound would delete the successor's endpoint. The process is
+		// exiting anyway, and process.exit() skips the uv handle cleanup, so the implicit
+		// unlink never runs. Cleanup is explicit and ownership-gated below — the #70
+		// contract: unlink only while this instance still holds the lease AND the path
+		// still carries the inode it bound.
+		// `endpointCompromised` (set by the supervised tick) vetoes that explicit unlink
+		// as well; it is defence in depth on top of the dev+ino comparison.
+		const stillOwner = safeIsOwner();
+		if (process.platform !== "win32" && stillOwner && !endpointCompromised && boundSocketIdentity) {
+			try {
+				const st = statSync(socketPath);
+				if (shouldUnlinkEndpoint({ stillOwner, compromised: endpointCompromised, bound: boundSocketIdentity, current: { dev: st.dev, ino: st.ino } })) {
+					try { unlinkSync(socketPath); } catch { /* best effort */ }
+				}
+			} catch { /* path gone — nothing to clean */ }
+		}
+		try { lease.release(); } catch { /* best effort */ }
+		process.exit(code);
+	}
+
+	function send(socket, msg) {
+		socket.write(JSON.stringify(msg) + "\n");
+	}
+
+	function handleClientLine(line, socket) {
+		if (!line.trim()) return;
+		let msg;
+		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
+		switch (msg?.type) {
+			case "ping":
+				send(socket, { type: "pong", instanceId, startedAt, protocolVersion: COORDINATOR_PROTOCOL_VERSION });
+				break;
+			case "state_command":
+				send(socket, { type: "state_command_result", ...processStateCommand(msg) });
+				break;
+			default:
+				send(socket, { type: "error", message: "unknown type" });
+		}
+	}
+
+	/**
+	 * The command loop: validate → dedupe → decide → journal (fsync) → materialize
+	 * → remember → reply. Rejections are journaled too, so their exact reason is
+	 * replayable; duplicates short-circuit before any append.
+	 * @param {object} msg
+	 * @returns {{ commandId: string|null, status: string, reason: string|null, materializedRevision: number }}
+	 */
+	function processStateCommand(msg) {
+		const checked = validateCommand(msg);
+		if (!checked.ok) {
+			return {
+				commandId: typeof msg?.commandId === "string" ? msg.commandId : null,
+				status: "rejected",
+				reason: checked.error,
+				materializedRevision: 0,
+			};
+		}
+		const command = checked.command;
+		const transient = TRANSIENT_KINDS.includes(command.kind);
+
+		if (!transient) {
+			const known = lookupProcessed(command.commandId);
+			if (known) {
+				return { commandId: command.commandId, status: known.result.status, reason: known.result.reason, materializedRevision: known.materializedRevision };
+			}
+		}
+
+		const state = readState(root, command.viewId);
+		// Status consistency only binds the view's current run (spec 根治条件 5):
+		// no currentRunId → status.json plays no role in this command.
+		// Exception (Task 1 review F1): followup_started re-points the row at a
+		// NEW run carried in payload.newRunId (command.runId is deliberately null
+		// so the stale-run guard cannot fire against the finished parent run).
+		// Resolving the status from the parent here would overwrite the parent's
+		// status.json with the new run's bootstrap patch; resolving from newRunId
+		// finds no file and cleanly bootstraps the new run's status instead.
+		const statusRunId = command.kind === "followup_started"
+			? (typeof command.payload?.newRunId === "string" ? command.payload.newRunId : null)
+			: (command.runId ?? state?.currentRunId ?? null);
+		const status = statusRunId ? readStatus(root, command.viewId, statusRunId) : null;
+		const now = Date.now();
+		const decision = stampLegacyTimestamps(command, decideStateTransition(command, state, status, now), now);
+		const currentRevision = state?.materializedRevision ?? 0;
+
+		if (decision.action === "reject") {
+			if (transient) {
+				// Transient rejections are not replayable either — nothing was
+				// mutated, and journaling them would grow the journal for noise.
+				return { commandId: command.commandId ?? null, status: "rejected", reason: decision.reason, materializedRevision: currentRevision };
+			}
+			const result = { status: "rejected", reason: decision.reason };
+			const record = { command, result, materializedRevision: currentRevision, at: now };
+			const journalBytes = appendCommand(root, record);
+			rememberProcessed(command.commandId, result, currentRevision);
+			maybeCheckpoint(journalBytes);
+			return { commandId: command.commandId, status: "rejected", reason: decision.reason, materializedRevision: currentRevision };
+		}
+
+		const newRevision = revisionCounter + 1;
+		const result = { status: "applied", reason: decision.reason };
+		if (transient) {
+			// No journal, no processed ring, no checkpoint: a periodic snapshot —
+			// the next beat supersedes it.
+			materialize(command.viewId, command, decision.mutate, newRevision, statusRunId);
+			revisionCounter = newRevision;
+			return { commandId: command.commandId ?? null, status: "applied", reason: decision.reason, materializedRevision: newRevision };
+		}
+		// Journal first (fsync inside), materialize second: boot replay repairs
+		// the window between the two using the stored patches.
+		const record = { command, result, materializedRevision: newRevision, at: now, mutate: decision.mutate, statusRunId };
+		const journalBytes = appendCommand(root, record);
+		materialize(command.viewId, command, decision.mutate, newRevision, statusRunId);
+		revisionCounter = newRevision;
+		rememberProcessed(command.commandId, result, newRevision);
+		maybeCheckpoint(journalBytes);
+		return { commandId: command.commandId, status: "applied", reason: decision.reason, materializedRevision: newRevision };
+	}
+
+	/**
+	 * Merge patches onto state.json (and the run's status.json when it exists)
+	 * under the view's materialize lock, stamping the shared revision. Per-file
+	 * guards stamp only files strictly behind the record revision: the live path
+	 * always qualifies (the global counter is monotonic), while replay repairs
+	 * just the half that missed its write in a crash window and never moves the
+	 * other half backwards.
+	 *
+	 * Pairing invariant (issue #91 final review): EVERY applied revision pairs
+	 * BOTH files. A state-only patch (e.g. patch_fields markVisited) restamps
+	 * the existing status file's revision with no content change, and a
+	 * status-only patch restamps the state file the same way — a healthy
+	 * coordinator can never produce the asymmetric pair the reader-side
+	 * revision check (reconcile) treats as a crash signature. Journaled
+	 * state-only records heal on replay through this shared path. Residual:
+	 * a torn TRANSIENT beat (crash between the two writes, never journaled)
+	 * stays half-paired — ms-window × adjacent-crash, documented in the spec.
+	 *
+	 * A status patch without a status file is skipped — patch presence ≠ file
+	 * requirement (mark_completed always emits `status: {autoState: null}`).
+	 * The status run binding is the decision-time one (`statusRunId`, recorded
+	 * in the journal) so replay cannot re-bind a runId-less patch to whatever
+	 * run is current on disk at replay time; `state.currentRunId` remains only
+	 * as a legacy fallback for records written before statusRunId existed.
+	 */
+	function materialize(viewId, command, mutate, revision, statusRunId) {
+		withViewLockSync(root, viewId, "state-materialize", () => {
+			const state = readState(root, viewId);
+			if (state && (state.materializedRevision ?? 0) < revision) {
+				writeState(root, mutate?.state
+					? { ...state, ...mutate.state, materializedRevision: revision }
+					: { ...state, materializedRevision: revision });
+			}
+			const runId = command?.runId ?? statusRunId ?? state?.currentRunId ?? null;
+			if (!runId) return;
+			const status = readStatus(root, viewId, runId);
+			if (mutate?.status) {
+				if (!status && STATUS_BOOTSTRAP_KINDS.has(command?.kind)) {
+					// run_started / followup_started / (bootstrapping) run_progress
+					// carry the full status content for a run that has no status
+					// file yet — create it. Identity fields come from the command
+					// context; the patch carries everything meaningful.
+					writeStatus(root, { version: 1, runId, viewId, ...mutate.status, materializedRevision: revision });
+				} else if (status && (status.materializedRevision ?? 0) < revision) {
+					writeStatus(root, { ...status, ...mutate.status, materializedRevision: revision });
+				}
+			} else if (status && (status.materializedRevision ?? 0) < revision) {
+				// State-only patch: restamp the existing status file's revision with
+				// no content change (pairing invariant above).
+				writeStatus(root, { ...status, materializedRevision: revision });
+			}
+		});
+	}
+
+	/** Add the legacy wall-clock stamp to a decided patch (F5): see
+	 *  LAST_ACTIVITY_STAMP_KINDS. Applied before the journal append so the
+	 *  stored patches are exactly what replay re-materializes. */
+	function stampLegacyTimestamps(command, decision, now) {
+		if (decision.action !== "apply" || !LAST_ACTIVITY_STAMP_KINDS.has(command.kind)) return decision;
+		return { ...decision, mutate: { ...decision.mutate, state: { ...(decision.mutate.state ?? {}), lastActivityAt: now } } };
+	}
+
+	/** Memory ring first (covers the post-GC window), journal second. */
+	function lookupProcessed(commandId) {
+		const inMemory = processedCommands.get(commandId);
+		if (inMemory) return inMemory;
+		const result = findProcessedCommand(root, commandId);
+		if (!result) return null;
+		const entry = { result, materializedRevision: revisionOf(commandId) };
+		rememberProcessed(commandId, result, entry.materializedRevision);
+		return entry;
+	}
+
+	/** Revision recorded for a known commandId (journal scan; 0 if unrecorded). */
+	function revisionOf(commandId) {
+		for (const record of readJournal(root)) {
+			if (record?.command?.commandId === commandId) return record.materializedRevision ?? 0;
+		}
+		return 0;
+	}
+
+	function rememberProcessed(commandId, result, materializedRevision) {
+		processedCommands.set(commandId, { result, materializedRevision });
+		while (processedCommands.size > PROCESSED_RING_MAX) {
+			processedCommands.delete(processedCommands.keys().next().value);
+		}
+	}
+
+	/** Checkpoint + GC once the journal outgrows the threshold. GC only runs when
+	 *  the checkpoint write provably succeeded (journal module enforces this). */
+	function maybeCheckpoint(journalBytes) {
+		if (journalBytes - lastCheckpointBytes < CHECKPOINT_THRESHOLD_BYTES) return;
+		if (!writeCheckpoint(root, { materializedRevision: revisionCounter, journalBytes })) return;
+		lastCheckpointBytes = gcJournal(root);
+	}
+}

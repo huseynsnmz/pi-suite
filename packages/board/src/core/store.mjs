@@ -1,0 +1,523 @@
+/**
+ * High-level store operations over the agent-board layout (see paths.mjs).
+ * Roster/meta/state/status read+write, row listing, and view creation/recovery.
+ * Used by the extension, the runner, and tests. Pure node, no Pi imports.
+ */
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { atomicWriteJson, ensureDir, readJson } from "./atomic.mjs";
+import { sameHostOwner } from "./host-coordination.mjs";
+import { tryAcquireOwnedViewLock } from "./locks.mjs";
+import * as P from "./paths.mjs";
+import { currentProcessIdentity, isAlive } from "./pid.mjs";
+import { readCodeRefs, summarizeCodeRefs } from "./code-refs-store.mjs";
+import { appendDiagnostic, readDiagnosticSummary } from "./diagnostics.mjs";
+import { readEvidence, summarizeEvidence } from "./evidence.mjs";
+import { readFollowUpQueue, summarizeFollowUpQueue } from "./follow-up-queue.mjs";
+import { readSteering, summarizeSteering } from "./steering.mjs";
+
+/** @typedef {import("./types.mjs").Roster} Roster */
+/** @typedef {import("./types.mjs").ViewMeta} ViewMeta */
+/** @typedef {import("./types.mjs").ViewState} ViewState */
+/** @typedef {import("./types.mjs").RunStatus} RunStatus */
+/** @typedef {import("./types.mjs").HostStatus} HostStatus */
+/** @typedef {import("./types.mjs").LaunchPrefs} LaunchPrefs */
+
+const META_VERSION = 1;
+
+// ---- roster ---------------------------------------------------------------
+
+/** @param {string} root @returns {Roster} */
+export function readRoster(root) {
+	return readJson(P.rosterPath(root), { version: 1, views: [] });
+}
+
+/** @param {string} root @param {Roster} roster */
+export function writeRoster(root, roster) {
+	atomicWriteJson(P.rosterPath(root), roster);
+}
+
+/** @param {string} root @param {string} viewId */
+export function addToRoster(root, viewId) {
+	const roster = readRoster(root);
+	if (!roster.views.includes(viewId)) {
+		roster.views.push(viewId);
+		writeRoster(root, roster);
+	}
+}
+
+/** @param {string} root @param {string} viewId */
+export function removeFromRoster(root, viewId) {
+	const roster = readRoster(root);
+	const next = roster.views.filter((v) => v !== viewId);
+	if (next.length !== roster.views.length) {
+		roster.version = roster.version ?? 1;
+		writeRoster(root, { version: roster.version, views: next });
+	}
+}
+
+/** @param {string} root @returns {LaunchPrefs} */
+export function readLaunchPrefs(root) {
+	return readJson(P.launchPrefsPath(root), {
+		version: 1,
+		cwd: null,
+		model: null,
+		thinkingLevel: null,
+		screenLogRetentionDays: null,
+		screenLogMaxSize: null,
+	});
+}
+
+/** @param {string} root @param {Partial<LaunchPrefs>} prefs */
+export function writeLaunchPrefs(root, prefs) {
+	atomicWriteJson(P.launchPrefsPath(root), {
+		version: 1,
+		cwd: prefs.cwd ?? null,
+		model: prefs.model ?? null,
+		thinkingLevel: prefs.thinkingLevel ?? null,
+		screenLogRetentionDays: prefs.screenLogRetentionDays ?? null,
+		screenLogMaxSize: prefs.screenLogMaxSize ?? null,
+	});
+}
+
+// ---- meta / state / status ------------------------------------------------
+
+/** @param {string} root @param {string} viewId @returns {ViewMeta|null} */
+export function readMeta(root, viewId) {
+	return readJson(P.metaPath(root, viewId), /** @type {ViewMeta|null} */ (null));
+}
+
+/** @param {string} root @param {ViewMeta} meta */
+export function writeMeta(root, meta) {
+	meta.updatedAt = Date.now();
+	atomicWriteJson(P.metaPath(root, meta.id), meta);
+}
+
+/** @param {string} root @param {string} viewId @returns {ViewState|null} */
+export function readState(root, viewId) {
+	return readJson(P.statePath(root, viewId), /** @type {ViewState|null} */ (null));
+}
+
+/** @param {string} root @param {ViewState} state */
+export function writeState(root, state) {
+	atomicWriteJson(P.statePath(root, state.viewId), state);
+}
+
+/** @param {string} root @param {string} viewId @param {string} runId @returns {RunStatus|null} */
+export function readStatus(root, viewId, runId) {
+	return readJson(P.statusPath(root, viewId, runId), /** @type {RunStatus|null} */ (null));
+}
+
+/** @param {string} root @param {RunStatus} status */
+export function writeStatus(root, status) {
+	atomicWriteJson(P.statusPath(root, status.viewId, status.runId), status);
+}
+
+/** @param {string} root @param {string} viewId @returns {HostStatus|null} */
+export function readHost(root, viewId) {
+	return readJson(P.hostPath(root, viewId), /** @type {HostStatus|null} */ (null));
+}
+
+/** @param {string} root @param {HostStatus} host */
+export function writeHost(root, host) {
+	atomicWriteJson(P.hostPath(root, host.viewId), host);
+}
+
+/**
+ * @param {string} root
+ * @param {string} viewId
+ * @param {number|null} pid
+ * @param {{ instanceId?: string, identity?: object|null }} [extra] merged into the mirror record
+ */
+export function writeHostPid(root, viewId, pid, extra) {
+	atomicWriteJson(P.hostPidPath(root, viewId), { pid, at: Date.now(), ...(extra ?? {}) });
+}
+
+/**
+ * Host states that represent an unreplaced claim: no replacement may be
+ * started while a host record is in one of these states (issue #70).
+ * @param {HostStatus|null} host
+ */
+function hostClaimActive(host) {
+	return Boolean(host && (host.state === "starting" || host.state === "alive" || host.state === "stopping"));
+}
+
+/**
+ * Views with an unrecovered host-meta contention report on record. The
+ * heartbeat path calls updateOwnedHost once per second, so without this a
+ * sustained contention episode would flood diagnostics.jsonl (issue #112).
+ */
+const hostMetaContentionReported = new Set();
+
+/** Test hook: clear the per-process contention report throttle. */
+export function clearHostMetaThrottleForTests() {
+	hostMetaContentionReported.clear();
+}
+
+/**
+ * Best-effort single warn per view per contention episode; diagnostics must
+ * never break the caller (appendDiagnostic throws on fs failure).
+ */
+function reportHostMetaContention(root, viewId, code, message, details) {
+	if (hostMetaContentionReported.has(viewId)) return;
+	hostMetaContentionReported.add(viewId);
+	try {
+		appendDiagnostic(root, viewId, { source: "store", level: "warn", code, message, details });
+	} catch { /* best effort */ }
+}
+
+/**
+ * Identity stamped on host-meta acquisitions so a holder that dies mid-hold
+ * leaves a reclaimable record (issue #112).
+ * @returns {{pid: number, startToken: string|null}}
+ */
+function hostMetaIdentity() {
+	return currentProcessIdentity();
+}
+
+/**
+ * Atomically create the provisional `starting` host record for a new instance.
+ * The ONLY entry point allowed to move "no claim / reclaimable terminal state"
+ * into `starting` (issue #70). Refuses when an active claim exists or the
+ * host-meta lease is contended; the fresh record always nulls runner/child/
+ * ready/stop fields so no stale owner data survives the handover.
+ * @param {string} root
+ * @param {Partial<HostStatus> & { viewId: string, instanceId: string }} provisionalHost
+ * @param {{ heldStartLease?: unknown, lockImpl?: typeof tryAcquireOwnedViewLock }} [opts]
+ *   heldStartLease is reserved for host-start lease nesting; lockImpl injects
+ *   the host-meta acquisition for deterministic contention/identity tests.
+ * @returns {{ claimed: boolean, host: HostStatus|null }}
+ */
+export function claimHost(root, provisionalHost, opts = {}) {
+	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
+	const lock = acquireHostMeta(root, provisionalHost.viewId, "host-meta", { identity: hostMetaIdentity() });
+	if (!lock.acquired) {
+		// busy is ordinary millisecond-scale contention; blocked (identity-less
+		// holder) is the orphan-lock signature worth a diagnostic (issue #112).
+		if (lock.reason === "blocked") {
+			reportHostMetaContention(root, provisionalHost.viewId, "host_meta_claim_contended", "host-meta lease blocked; host claim not established", { reason: lock.reason });
+		}
+		return { claimed: false, host: null };
+	}
+	hostMetaContentionReported.delete(provisionalHost.viewId);
+	try {
+		const existing = readHost(root, provisionalHost.viewId);
+		if (hostClaimActive(existing)) return { claimed: false, host: existing };
+		const now = Date.now();
+		/** @type {HostStatus} */
+		const record = {
+			version: 1,
+			viewId: provisionalHost.viewId,
+			mode: "pty",
+			instanceId: provisionalHost.instanceId,
+			configPath: provisionalHost.configPath ?? null,
+			socketPath: provisionalHost.socketPath ?? null,
+			claimAt: provisionalHost.claimAt ?? now,
+			claimPid: provisionalHost.claimPid ?? null,
+			claimIdentity: provisionalHost.claimIdentity ?? null,
+			// A fresh claim owns nothing yet: force-clear every field a superseded
+			// instance might have left behind.
+			runnerPid: null,
+			runnerIdentity: null,
+			runnerSpawnedAt: null,
+			childPid: null,
+			childIdentity: null,
+			childSpawnedAt: null,
+			readyAt: null,
+			stopRequestedAt: null,
+			revokeToken: null,
+			stopReason: null,
+			state: "starting",
+			startedAt: provisionalHost.claimAt ?? now,
+			lastSeenAt: now,
+			endedAt: null,
+			exitCode: null,
+			error: null,
+			cols: provisionalHost.cols ?? 120,
+			rows: provisionalHost.rows ?? 36,
+			attachedClients: 0,
+		};
+		writeHost(root, record);
+		// Mirror is best-effort; host.json is the authority for the new protocol.
+		try {
+			writeHostPid(root, provisionalHost.viewId, record.claimPid, {
+				instanceId: record.instanceId,
+				identity: record.claimIdentity,
+			});
+		} catch { /* best effort */ }
+		return { claimed: true, host: record };
+	} finally {
+		lock.lease.release();
+	}
+}
+
+/**
+ * Bounded contention retry for owner-fenced host writes (issue #70, PR #84 CI
+ * wave 2). Heartbeat/client-merge writes hold the host-meta lease for only a
+ * few milliseconds, but a one-shot acquire can land inside that window and
+ * return busy — a revoke or recovery write that silently no-ops is a real
+ * reliability bug, not just a test race. Both `busy` (live owner) and
+ * `blocked` (identity-less holder) are transient here: retry a few times with
+ * a short synchronous sleep before giving up, and record a warn diagnostic on
+ * a sustained episode (issue #112). Acquisitions stamp a full process identity
+ * (issue #112), so a holder that dies mid-hold leaves a reclaimable record;
+ * legacy identity-less residue is reclaimed past the orphan age gate.
+ */
+const UPDATE_LOCK_BUSY_ATTEMPTS = 3;
+const UPDATE_LOCK_BUSY_SLEEP_MS = 20;
+
+/**
+ * Owner-fenced compare-and-write for host.json. Re-reads the view's record
+ * under the host-meta lease and only applies `mutate` while it still belongs
+ * to `expectedInstanceId`; a superseded instance's late heartbeat/crash/exit
+ * writes are rejected with `ownerChanged: true` and the current host (issue
+ * #70). Lease contention that survives the bounded retry returns not-updated
+ * with `ownerChanged: false` — callers treat that as retryable (heartbeats
+ * simply retry next tick; revokes/recovery re-attempt).
+ * @param {string} root
+ * @param {string} viewId
+ * @param {string} expectedInstanceId
+ * @param {(host: HostStatus) => HostStatus} mutate returns a new record
+ * @param {{ heldStartLease?: unknown, lockImpl?: typeof tryAcquireOwnedViewLock }} [opts]
+ *   heldStartLease is reserved for host-start lease nesting; lockImpl injects
+ *   the host-meta acquisition for deterministic contention tests.
+ * @returns {{ updated: boolean, ownerChanged: boolean, host: HostStatus|null }}
+ */
+export function updateOwnedHost(root, viewId, expectedInstanceId, mutate, opts = {}) {
+	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
+	let lock;
+	let lastReason = null;
+	for (let attempt = 0; ; attempt++) {
+		lock = acquireHostMeta(root, viewId, "host-meta", { identity: hostMetaIdentity() });
+		if (lock.acquired) break;
+		lastReason = lock.reason;
+		// busy and blocked are both millisecond-scale holds for host-meta;
+		// neither is ownership information — only the fenced read below is.
+		if (attempt >= UPDATE_LOCK_BUSY_ATTEMPTS - 1) {
+			reportHostMetaContention(root, viewId, "host_meta_lease_contended", "host-meta lease contended; fenced write not applied", { attempts: UPDATE_LOCK_BUSY_ATTEMPTS, lastReason });
+			return { updated: false, ownerChanged: false, host: null };
+		}
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, UPDATE_LOCK_BUSY_SLEEP_MS);
+	}
+	try {
+		hostMetaContentionReported.delete(viewId);
+		const host = readHost(root, viewId);
+		if (!host || !sameHostOwner(host, expectedInstanceId)) {
+			return { updated: false, ownerChanged: true, host };
+		}
+		const next = mutate(host);
+		// The mutate result must still belong to the expected instance: a buggy or
+		// hijacked callback that swaps the owner token is never written (issue #70).
+		if (!sameHostOwner(next, expectedInstanceId)) {
+			return { updated: false, ownerChanged: true, host };
+		}
+		writeHost(root, next);
+		try {
+			writeHostPid(root, viewId, next.runnerPid ?? null, {
+				instanceId: next.instanceId,
+				identity: next.runnerIdentity ?? null,
+			});
+		} catch { /* best effort */ }
+		return { updated: true, ownerChanged: false, host: next };
+	} finally {
+		lock.lease.release();
+	}
+}
+
+/** @param {string} root @param {string} viewId @returns {number|null} */
+export function readHostPid(root, viewId) {
+	return readJson(P.hostPidPath(root, viewId), { pid: null }).pid ?? null;
+}
+
+/** @param {string} root @param {string} viewId @param {string} runId @param {number|null} pid */
+export function writePid(root, viewId, runId, pid) {
+	atomicWriteJson(P.pidPath(root, viewId, runId), { pid, at: Date.now() });
+}
+
+/** @param {string} root @param {string} viewId @param {string} runId @returns {number|null} */
+export function readPid(root, viewId, runId) {
+	return readJson(P.pidPath(root, viewId, runId), { pid: null }).pid ?? null;
+}
+
+// ---- listing / loading ----------------------------------------------------
+
+/** @param {string} root @param {string} viewId @returns {string[]} run ids, newest first by mtime. */
+export function listRunIds(root, viewId) {
+	const dir = P.runsDir(root, viewId);
+	if (!existsSync(dir)) return [];
+	try {
+		return readdirSync(dir)
+			.filter((name) => {
+				try {
+					return statSync(P.runDir(root, viewId, name)).isDirectory();
+				} catch {
+					return false;
+				}
+			})
+			.sort((a, b) => mtime(P.runDir(root, viewId, b)) - mtime(P.runDir(root, viewId, a)));
+	} catch {
+		return [];
+	}
+}
+
+/** @param {string} dir */
+function mtime(dir) {
+	try {
+		return statSync(dir).mtimeMs;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * A merged dashboard row: meta + derived state. `state` may be null for a never-run row.
+ * @typedef {Object} Row
+ * @property {ViewMeta} meta
+ * @property {ViewState|null} state
+ * @property {boolean} alive  Whether the row's current run pid/foreground activity is alive.
+ * @property {boolean} hostAlive Whether a PTY host/socket is alive and attachable.
+ * @property {boolean} hostActive Whether an unreplaced host claim exists (starting/alive/stopping).
+ * @property {boolean} hostReady Whether the host claims readiness (alive + readyAt); metadata hint only.
+ * @property {HostStatus|null} host
+ * @property {import("./types.mjs").ReviewSummary} [review]
+ * @property {import("./types.mjs").DiagnosticSummary} [diagnostics]
+ * @property {import("./types.mjs").FollowUpSummary} [followUps]
+ * @property {import("./types.mjs").SteeringSummary} [steering]
+ * @property {import("./types.mjs").CodeRefsSummary} [codeRefs]
+ */
+
+/** @param {string} root @param {string} viewId @returns {Row|null} */
+export function loadRow(root, viewId) {
+	const meta = readMeta(root, viewId);
+	if (!meta) return null;
+	const state = readState(root, viewId);
+	const summaries = readViewArtifactSummaries(root, viewId);
+	const enrichedState = state ? { ...state, ...summaries } : state;
+	let alive = false;
+	// True when a detached runner pid record exists for the current run. The
+	// processState mirror below exists for the foreground path, which has no
+	// runner pid to poll — it must never override a RECORDED pid: an
+	// un-finalized dead runner is the row's truth, and trusting the mirror
+	// here makes reconcile() skip the row forever (issue #153, A10).
+	let runnerPidRecorded = false;
+	if (enrichedState?.currentRunId) {
+		const pid = readPid(root, viewId, enrichedState.currentRunId);
+		runnerPidRecorded = pid != null;
+		alive = isAlive(pid);
+	}
+	// A managed session can also be active in the foreground after the user attaches
+	// and types a follow-up. In that path there is no detached runner pid for us to
+	// poll, but foreground extension events mirror processState into state.json.
+	if (!alive && !runnerPidRecorded && enrichedState?.processState === "alive") alive = true;
+	const host = readHost(root, viewId);
+	// New-protocol records carry an explicit runnerPid (null until spawn
+	// confirms); only legacy records without the property fall back to the
+	// host-pid mirror (issue #70).
+	const hostPid = host && Object.hasOwn(host, "runnerPid") ? host.runnerPid : readHostPid(root, viewId);
+	const hostAlive = Boolean(host && (host.state === "alive" || host.state === "starting") && isAlive(hostPid));
+	const hostActive = Boolean(host && (host.state === "starting" || host.state === "alive" || host.state === "stopping"));
+	const hostReady = Boolean(hostActive && host.state === "alive" && host.readyAt != null);
+	return { meta, state: enrichedState, alive, hostAlive, hostActive, hostReady, host, ...summaries };
+}
+
+/** @param {string} root @param {string} viewId */
+export function readViewArtifactSummaries(root, viewId) {
+	const review = summarizeEvidence(readEvidence(root, viewId));
+	const diagnostics = readDiagnosticSummary(root, viewId);
+	const followUps = summarizeFollowUpQueue(readFollowUpQueue(root, viewId));
+	const steering = summarizeSteering(readSteering(root, viewId));
+	const codeRefs = summarizeCodeRefs(readCodeRefs(root, viewId));
+	return { review, diagnostics, followUps, steering, codeRefs };
+}
+
+/**
+ * Load every non-archived row referenced by the roster.
+ * @param {string} root
+ * @param {{ includeArchived?: boolean }} [opts]
+ * @returns {Row[]}
+ */
+export function listRows(root, opts = {}) {
+	const roster = readRoster(root);
+	/** @type {Row[]} */
+	const rows = [];
+	for (const viewId of roster.views) {
+		// Archived short-circuit: archived rows are invisible on the dashboard, so
+		// never pay for their artifact files (state/evidence/host/diagnostics...).
+		// meta.json is the single authoritative source of the archived flag.
+		const meta = readMeta(root, viewId);
+		if (!meta) continue;
+		if (meta.archived && !opts.includeArchived) continue;
+		const row = loadRow(root, viewId);
+		if (!row) continue;
+		if (row.meta.archived && !opts.includeArchived) continue;
+		rows.push(row);
+	}
+	return rows;
+}
+
+// ---- creation -------------------------------------------------------------
+
+/**
+ * Create a new managed view (row) and persist meta + roster + an initial queued state.
+ * Does not launch anything — the caller launches a run afterward.
+ * @param {string} root
+ * @param {{
+ *   id: string, name: string, cwd: string, repoCwd?: string, repoRoot?: string|null,
+ *   worktreeMode?: import("./types.mjs").WorktreeMode, worktreePath?: string|null,
+ *   defaultModel?: string|null,
+ *   defaultThinking?: "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|null,
+ *   writeCapable?: boolean,
+ *   sessionFile?: string,
+ * }} opts
+ * @returns {ViewMeta}
+ */
+export function createView(root, opts) {
+	ensureDir(P.sessionsDir(root));
+	const now = Date.now();
+	/** @type {ViewMeta} */
+	const meta = {
+		version: META_VERSION,
+		id: opts.id,
+		name: opts.name,
+		cwd: opts.cwd,
+		repoCwd: opts.repoCwd ?? opts.cwd,
+		repoRoot: opts.repoRoot ?? null,
+		sessionFile: opts.sessionFile ?? P.sessionFilePath(root, opts.id),
+		createdAt: now,
+		updatedAt: now,
+		pinned: false,
+		kind: "pi-session",
+		defaultModel: opts.defaultModel ?? null,
+		defaultThinking: opts.defaultThinking ?? null,
+		worktreeMode: opts.worktreeMode ?? "off",
+		worktreePath: opts.worktreePath ?? null,
+		writeCapable: opts.writeCapable ?? true,
+		archived: false,
+		source: "agent-board",
+	};
+	ensureDir(P.viewDir(root, meta.id));
+	writeMeta(root, meta);
+	/** @type {ViewState} */
+	const state = {
+		version: 1,
+		viewId: meta.id,
+		currentRunId: null,
+		semanticState: "queued",
+		processState: "exited",
+		summary: "Queued",
+		lastActivityAt: now,
+		updatedAt: now,
+		needsInput: false,
+		hasError: false,
+		latestAssistantPreview: "",
+		latestTool: null,
+		question: null,
+		pendingQuestions: [],
+		error: null,
+		lastVisitedAt: null,
+		lastAgentActivityAt: null,
+		autoState: null,
+	};
+	writeState(root, state);
+	addToRoster(root, meta.id);
+	return meta;
+}

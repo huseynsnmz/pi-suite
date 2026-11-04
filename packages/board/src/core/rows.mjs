@@ -1,0 +1,398 @@
+/**
+ * Pure dashboard logic: turn store Rows into display view-models, group them by
+ * semantic state, and filter them. No pi-tui / theme coupling (the dashboard component
+ * applies colors); everything here is unit-tested.
+ */
+import { normalizeGenericStatusText } from "./derive.mjs";
+import { baseName, relativeTime } from "./heuristics.mjs";
+import { GROUP_LABELS, GROUP_ORDER, SEMANTIC_STATES } from "./types.mjs";
+
+/** @typedef {import("./store.mjs").Row} Row */
+/** @typedef {import("./types.mjs").SemanticState} SemanticState */
+
+/**
+ * Host heartbeat staleness threshold (ms). The pty-runner writes host.json on a
+ * 1 Hz heartbeat; when a crashed runner leaves host.json stuck on "alive", the
+ * heartbeat goes stale within seconds (issue #48 L4).
+ */
+const STALE_HOST_MS = 10_000;
+
+/**
+ * @typedef {Object} RowView
+ * @property {string} id
+ * @property {string} name
+ * @property {string} summary
+ * @property {string} age
+ * @property {string} place
+ * @property {string} folderKey
+ * @property {string} folderName
+ * @property {string} folderPath
+ * @property {boolean} pinned
+ * @property {SemanticState} state
+ * @property {boolean} alive
+ * @property {boolean} hostAlive
+ * @property {boolean} staleHost True when host.json claims alive but the runner
+ *   process is gone and the heartbeat is stale (display-only crash marker).
+ * @property {boolean} needsInput
+ * @property {boolean} hasError
+ * @property {boolean} worktree
+ * @property {boolean} unread
+ * @property {boolean} reviewReady
+ * @property {number} evidenceErrorCount
+ * @property {boolean} diagnosticStalled
+ * @property {number} diagnosticErrorCount
+ * @property {number} followUpCount
+ * @property {string|null} followUpPreview
+ * @property {string} steeringState
+ * @property {string} refsBadge Inline issue/PR badge (e.g. "#40 ▸#45"); "" when there are no refs.
+ * @property {boolean} refsLowConfidence True when the winning issue or pr confidence is "low".
+ * @property {import("./types.mjs").CodeRefsSummary|null} codeRefs Compact ref summary the peek view consumes.
+ * @property {number} lastActivityAt
+ * @property {number} createdAt
+ */
+
+/** @param {Row} row @returns {SemanticState} */
+export function rowState(row) {
+	return row.state?.semanticState ?? "queued";
+}
+
+/**
+ * State glyph (plain unicode; the dashboard colors it via theme).
+ * @param {SemanticState} state
+ * @param {boolean} alive
+ * @param {boolean} [hostAlive]
+ * @param {boolean} [unread]
+ * @returns {string}
+ */
+export function stateGlyph(state, alive, hostAlive = false, unread = false) {
+	switch (state) {
+		case "needs_input":
+			return unread ? "◆" : "◇";
+		case "working":
+			return alive ? (unread ? "◉" : "●") : (unread ? "◕" : "◐");
+		case "queued":
+			return hostAlive ? (unread ? "◍" : "◌") : (unread ? "◎" : "○");
+		case "completed":
+			return hostAlive ? (unread ? "◍" : "◌") : (unread ? "✔" : "✓");
+		case "failed":
+			return unread ? "✖" : "✗";
+		case "idle":
+			return unread ? "●" : "·";
+		case "holding":
+			return unread ? "◒" : "◑";
+		case "stopped":
+			return unread ? "■" : "▪";
+		default:
+			return "?";
+	}
+}
+
+/**
+ * Theme color name appropriate for a state (consumed by the dashboard).
+ * @param {SemanticState} state
+ * @returns {string}
+ */
+export function stateColor(state) {
+	switch (state) {
+		case "needs_input":
+			return "warning";
+		case "working":
+			return "accent";
+		case "queued":
+			return "muted";
+		case "completed":
+			return "success";
+		case "failed":
+			return "error";
+		case "idle":
+			return "dim";
+		case "holding":
+			return "warning";
+		case "stopped":
+			return "muted";
+		default:
+			return "text";
+	}
+}
+
+/**
+ * @param {Row} row
+ * @param {number} now
+ * @returns {RowView}
+ */
+export function rowView(row, now) {
+	const state = rowState(row);
+	const summary = oneLine(normalizeGenericStatusText(state, row.state?.summary));
+	const lastActivityAt = row.state?.lastActivityAt ?? row.meta.updatedAt ?? row.meta.createdAt;
+	const worktree = row.meta.worktreeMode === "worktree";
+	const folderPath = row.meta.repoCwd || row.meta.cwd;
+	const folderName = baseName(folderPath) + (worktree ? "⌥" : "");
+	const folderKey = normalizeFolderKey(folderPath);
+	const place = folderName;
+	const lastVisitedAt = row.state?.lastVisitedAt ?? null;
+	const lastAgentActivityAt = row.state?.lastAgentActivityAt ?? null;
+	const refs = codeRefsBadge(row.codeRefs);
+	// Host-lost display marker (issue #48 L4): host.json still claims "alive"
+	// but the runner process is gone and the 1 Hz heartbeat went stale — the
+	// crash path leaves exactly this fingerprint (no exit message, no
+	// reconcile). Display-only; state.json is deliberately untouched.
+	const host = row.host;
+	const staleHost = Boolean(
+		host &&
+			host.state === "alive" &&
+			!row.hostAlive &&
+			typeof host.lastSeenAt === "number" &&
+			now - host.lastSeenAt > STALE_HOST_MS,
+	);
+	return {
+		id: row.meta.id,
+		name: row.meta.name,
+		summary,
+		age: relativeTime(lastActivityAt, now),
+		place,
+		folderKey,
+		folderName,
+		folderPath,
+		pinned: Boolean(row.meta.pinned),
+		order: row.meta.order ?? row.meta.createdAt ?? 0,
+		state,
+		alive: Boolean(row.alive),
+		hostAlive: Boolean(row.hostAlive),
+		staleHost,
+		needsInput: state === "needs_input",
+		hasError: state === "failed",
+		worktree,
+		unread: lastAgentActivityAt !== null && (lastVisitedAt === null || lastAgentActivityAt > lastVisitedAt),
+		reviewReady: Boolean(row.state?.review?.ready),
+		evidenceErrorCount: row.state?.review?.errorCount ?? 0,
+		diagnosticStalled: Boolean(row.state?.diagnostics?.stalled),
+		diagnosticErrorCount: row.state?.diagnostics?.errorCount ?? 0,
+		followUpCount: row.state?.followUps?.queuedCount ?? 0,
+		followUpPreview: row.state?.followUps?.lastQueuedPreview ?? null,
+		steeringState: row.state?.steering?.status ?? "none",
+		refsBadge: refs.refsBadge,
+		refsLowConfidence: refs.refsLowConfidence,
+		codeRefs: row.codeRefs ?? null,
+		lastActivityAt,
+		createdAt: row.meta.createdAt ?? 0,
+	};
+}
+
+/**
+ * Map a CodeRefsSummary to the inline badge strings shown on dashboard rows:
+ * the winning issue and pr joined by a space, each prefixed with the provider
+ * prefix stored on the summary; plus the low-confidence flag that makes the
+ * dashboard dim the badge. Missing/garbage summaries yield an empty badge.
+ * @param {import("./types.mjs").CodeRefsSummary|null|undefined} summary
+ * @returns {{ refsBadge: string, refsLowConfidence: boolean }}
+ */
+function codeRefsBadge(summary) {
+	if (!summary) return { refsBadge: "", refsLowConfidence: false };
+	const issue = summary.issue;
+	const pr = summary.pr;
+	const parts = [];
+	if (issue && Number.isFinite(issue.number)) parts.push(`${summary.issuePrefix ?? "#"}${issue.number}`);
+	if (pr && Number.isFinite(pr.number)) parts.push(`${summary.prPrefix ?? "▸#"}${pr.number}`);
+	return {
+		refsBadge: parts.join(" "),
+		refsLowConfidence: issue?.confidence === "low" || pr?.confidence === "low",
+	};
+}
+
+/** @param {string} text */
+function oneLine(text) {
+	return String(text || "").replace(/\s+/g, " ").trim() || "—";
+}
+
+/**
+ * Group rows by semantic state in GROUP_ORDER. Within a group: pinned first, then
+ * creation order (oldest first) — the order is stable and never reshuffles on activity.
+ * Empty groups are omitted.
+ * @param {Row[]} rows
+ * @param {number} now
+ * @returns {Array<{ state: SemanticState, label: string, rows: RowView[] }>}
+ */
+export function groupRows(rows, now) {
+	const views = rows.map((r) => rowView(r, now));
+	/** @type {Array<{state: SemanticState, label: string, rows: RowView[]}>} */
+	const groups = [];
+	for (const state of GROUP_ORDER) {
+		const inGroup = sortRowViews(views.filter((v) => v.state === state));
+		if (inGroup.length > 0) groups.push({ state, label: GROUP_LABELS[state], rows: inGroup });
+	}
+	return groups;
+}
+
+/**
+ * Group rows first by semantic state, then by repo/folder within that state.
+ * `showFolders` is true only when a stage spans more than one folder, so a stage backed by
+ * a single folder renders as a flat list (no redundant folder header).
+ * @param {Row[]} rows
+ * @param {number} now
+ * @returns {Array<{ state: SemanticState, label: string, rowCount: number, showFolders: boolean, folders: Array<{ key: string, name: string, path: string, rows: RowView[], createdAt: number, pinned: boolean }> }>}
+ */
+export function groupRowsByFolder(rows, now) {
+	const views = rows.map((r) => rowView(r, now));
+	const groups = [];
+	for (const state of GROUP_ORDER) {
+		const inState = views.filter((v) => v.state === state);
+		if (inState.length === 0) continue;
+		const byFolder = new Map();
+		for (const view of inState) {
+			const key = view.folderKey;
+			const existing = byFolder.get(key);
+			if (existing) existing.rows.push(view);
+			else byFolder.set(key, { key, name: view.folderName, path: view.folderPath, rows: [view], createdAt: view.createdAt, pinned: view.pinned });
+		}
+		const folders = [...byFolder.values()].map((folder) => {
+			folder.rows = sortRowViews(folder.rows);
+			// Folder creation time = its first-created row, so folders keep a stable,
+			// creation-ordered position and don't jump when any row inside gets busy.
+			folder.createdAt = Math.min(...folder.rows.map((r) => r.createdAt));
+			folder.pinned = folder.rows.some((r) => r.pinned);
+			return folder;
+		}).sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.createdAt - b.createdAt || a.name.localeCompare(b.name));
+		const showFolders = folders.length > 1;
+		groups.push({ state, label: GROUP_LABELS[state], rowCount: inState.length, showFolders, folders });
+	}
+	return groups;
+}
+
+/**
+ * The other way to see the list: one group per directory, whatever state its rows are in.
+ * @param {Row[]} rows
+ * @param {number} now
+ * @returns {Array<{ key: string, name: string, path: string, rows: RowView[] }>}
+ */
+export function groupRowsByDirectory(rows, now) {
+	const byFolder = new Map();
+	for (const view of rows.map((r) => rowView(r, now))) {
+		const existing = byFolder.get(view.folderKey);
+		if (existing) existing.rows.push(view);
+		else byFolder.set(view.folderKey, { key: view.folderKey, name: view.folderName, path: view.folderPath, rows: [view] });
+	}
+	const folders = [...byFolder.values()];
+	for (const folder of folders) folder.rows = sortRowViews(folder.rows);
+	return folders.sort((a, b) => Math.min(...a.rows.map((r) => r.createdAt)) - Math.min(...b.rows.map((r) => r.createdAt)) || a.name.localeCompare(b.name));
+}
+
+/**
+ * Issue #147: the row the board should select after `id` is removed — the
+ * next visible row in dashboard order, else the previous one, else null
+ * (caller falls back to the existing orderedIds[0] clamp). Uses the same
+ * groupRowsByFolder ordering as the dashboard's orderedIds.
+ * @param {Row[]} rows
+ * @param {string} id
+ * @param {number} now
+ * @returns {string | null}
+ */
+export function nextVisibleIdAfterRemoval(rows, id, now) {
+	const ordered = groupRowsByFolder(rows, now).flatMap((g) => g.folders.flatMap((f) => f.rows.map((r) => r.id)));
+	const idx = ordered.indexOf(id);
+	if (idx === -1) return null;
+	if (idx + 1 < ordered.length) return ordered[idx + 1];
+	if (idx - 1 >= 0) return ordered[idx - 1];
+	return null;
+}
+
+/**
+ * Stable row order: pinned first, then creation order (oldest first), then id.
+ * Activity time deliberately does not participate, so rows never reshuffle while
+ * sessions are running.
+ * @param {RowView[]} views
+ */
+function sortRowViews(views) {
+	return views.sort(
+		(a, b) =>
+			Number(b.pinned) - Number(a.pinned) ||
+			a.order - b.order ||
+			a.createdAt - b.createdAt ||
+			a.id.localeCompare(b.id),
+	);
+}
+
+/** @param {string} path */
+function normalizeFolderKey(path) {
+	return String(path || "").replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+}
+
+/**
+ * Parse a filter query into a state filter + free-text terms.
+ * Supports `s:<state>` (state prefix) and bare words (AND substring match).
+ * @param {string} query
+ * @returns {{ states: SemanticState[], terms: string[], reviewReady: boolean, diagStalled: boolean, evidenceError: boolean, queued: boolean, steering: string|null }}
+ */
+export function parseFilter(query) {
+	/** @type {Set<SemanticState>} */
+	const states = new Set();
+	/** @type {string[]} */
+	const terms = [];
+	let reviewReady = false;
+	let diagStalled = false;
+	let evidenceError = false;
+	let queued = false;
+	let steering = null;
+	for (const tok of String(query || "").trim().split(/\s+/).filter(Boolean)) {
+		const m = /^s:(.+)$/i.exec(tok);
+		if (m) {
+			const want = normalizeStateToken(m[1]);
+			for (const s of SEMANTIC_STATES) {
+				const aliases = [s, GROUP_LABELS[s]];
+				if (aliases.some((alias) => matchesStateToken(alias, want))) states.add(s);
+			}
+		} else if (/^review:ready$/i.test(tok)) {
+			reviewReady = true;
+		} else if (/^diag:stalled$/i.test(tok)) {
+			diagStalled = true;
+		} else if (/^evidence:error$/i.test(tok)) {
+			evidenceError = true;
+		} else if (/^queued:(true|yes|1)$/i.test(tok)) {
+			queued = true;
+		} else if (/^steer:/i.test(tok)) {
+			steering = normalizeStateToken(tok.replace(/^steer:/i, ""));
+		} else {
+			terms.push(tok.toLowerCase());
+		}
+	}
+	return { states: [...states], terms, reviewReady, diagStalled, evidenceError, queued, steering };
+}
+
+/** @param {string} value */
+function normalizeStateToken(value) {
+	return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** @param {string} alias @param {string} want */
+function matchesStateToken(alias, want) {
+	const normalized = normalizeStateToken(alias);
+	return normalized === want || normalized.startsWith(want);
+}
+
+/** @param {string} query @returns {boolean} whether the text is a filter expression. */
+export function isFilterQuery(query) {
+	return /(^|\s)(s:|review:|diag:|evidence:|queued:|steer:)/i.test(query || "");
+}
+
+/**
+ * Filter rows by a query string.
+ * @param {Row[]} rows
+ * @param {string} query
+ * @returns {Row[]}
+ */
+export function filterRows(rows, query) {
+	const { states, terms, reviewReady, diagStalled, evidenceError, queued, steering } = parseFilter(query);
+	if (states.length === 0 && terms.length === 0 && !reviewReady && !diagStalled && !evidenceError && !queued && !steering) return rows;
+	return rows.filter((row) => {
+		if (states.length > 0 && !states.includes(rowState(row))) return false;
+		if (reviewReady && !row.state?.review?.ready) return false;
+		if (diagStalled && !row.state?.diagnostics?.stalled) return false;
+		if (evidenceError && (row.state?.review?.errorCount ?? 0) <= 0) return false;
+		if (queued && (row.state?.followUps?.queuedCount ?? 0) <= 0) return false;
+		if (steering && normalizeStateToken(row.state?.steering?.status ?? "none") !== steering) return false;
+		if (terms.length === 0) return true;
+		const hay = [row.meta.name, row.state?.summary ?? "", row.meta.repoCwd, row.meta.cwd]
+			.join(" ")
+			.toLowerCase();
+		return terms.every((t) => hay.includes(t));
+	});
+}

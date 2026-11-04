@@ -1,0 +1,414 @@
+/**
+ * Shared data shapes for the agent-board store. JSDoc typedefs (consumed by the TS
+ * extension via `allowJs`) plus the canonical state vocabularies as runtime constants.
+ */
+
+/** Semantic (task) state of a row. @typedef {"queued"|"working"|"needs_input"|"idle"|"holding"|"completed"|"failed"|"stopped"} SemanticState */
+/** Process/liveness state. @typedef {"alive"|"exited"} ProcessState */
+/** PTY host mode. @typedef {"json-runner"|"pty"} HostMode */
+/** PTY host liveness. @typedef {"starting"|"alive"|"stopping"|"exited"|"failed"} HostState */
+/** How a run was kicked off. @typedef {"dispatch"|"reply"|"plan"|"plan_change"|"plan_approval"} RunKind */
+/** Worktree isolation mode for a row. @typedef {"off"|"worktree"} WorktreeMode */
+/** Diagnostic severity. @typedef {"info"|"warn"|"error"} DiagnosticLevel */
+/** Diagnostic event source. @typedef {"runner"|"host"|"service"|"queue"|"steering"|"evidence"|"store"} DiagnosticSource */
+/** Evidence outcome. @typedef {"unknown"|"in_progress"|"ready"|"needs_input"|"failed"|"stopped"|"queued"|"working"|"idle"|"holding"|"completed"} EvidenceOutcome */
+/** Command kind. @typedef {"test"|"build"|"lint"|"git"|"install"|"other"} EvidenceCommandKind */
+/** Command status. @typedef {"started"|"passed"|"failed"|"unknown"} EvidenceCommandStatus */
+/** File change action. @typedef {"edited"|"written"|"deleted"|"unknown"} EvidenceFileAction */
+/** Follow-up kind. @typedef {"reply"|"plan_request"|"plan_approval"|"plan_change"} FollowUpKind */
+/** Follow-up status. @typedef {"queued"|"claimed"|"completed"|"failed"|"cancelled"} FollowUpStatus */
+/** Steering state. @typedef {"none"|"plan_requested"|"awaiting_approval"|"approved"|"changes_requested"|"executing_approved_plan"} SteeringModeState */
+/** Dashboard auto-state bucket. @typedef {"needs_input"|"in_progress"|"done"} AutoStateKind */
+/** Auto-state classifier source. @typedef {"model"|"heuristic"} AutoStateSource */
+/** Auto-state classifier confidence. @typedef {"high"|"medium"|"low"} AutoStateConfidence */
+
+/**
+ * LLM/heuristic classification of the latest assistant turn.
+ * @typedef {Object} AutoStateClassification
+ * @property {number} version
+ * @property {AutoStateKind} kind
+ * @property {SemanticState} semanticState
+ * @property {AutoStateConfidence} confidence
+ * @property {AutoStateSource} source
+ * @property {string} reason
+ * @property {string|null} question
+ * @property {number} classifiedAt
+ * @property {number|null} lastAgentActivityAt
+ * @property {string} textHash
+ */
+
+export const SEMANTIC_STATES = /** @type {const} */ ([
+	"queued",
+	"working",
+	"needs_input",
+	"idle",
+	"holding",
+	"completed",
+	"failed",
+	"stopped",
+]);
+
+export const PROCESS_STATES = /** @type {const} */ (["alive", "exited"]);
+
+/** Order rows are grouped/shown in the dashboard (most-actionable first). */
+export const GROUP_ORDER = /** @type {const} */ ([
+	"queued",
+	"working",
+	"needs_input",
+	"idle",
+	"holding",
+	"completed",
+	"failed",
+	"stopped",
+]);
+
+/** Human labels for group headers. @type {Record<SemanticState,string>} */
+export const GROUP_LABELS = {
+	needs_input: "Needs answer",
+	working: "Running",
+	queued: "Queued",
+	failed: "Failed",
+	completed: "Done",
+	idle: "Needs instructions",
+	holding: "On hold",
+	stopped: "Stopped",
+};
+
+/**
+ * Stable row metadata (`meta.json`).
+ * @typedef {Object} ViewMeta
+ * @property {number} version
+ * @property {string} id
+ * @property {string} name
+ * @property {string} cwd               Working dir the worker runs in (repo or worktree path).
+ * @property {string} repoCwd           Original repo dir requested at dispatch (== cwd unless worktree).
+ * @property {string|null} repoRoot     Git repo root, if any.
+ * @property {string} sessionFile        Managed Pi session JSONL path.
+ * @property {number} createdAt
+ * @property {number} updatedAt
+ * @property {boolean} pinned
+ * @property {"pi-session"} kind
+ * @property {string|null} defaultModel
+ * @property {"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|null} defaultThinking
+ * @property {WorktreeMode} worktreeMode
+ * @property {string|null} worktreePath
+ * @property {boolean} writeCapable      Whether this session may mutate files (default true).
+ * @property {boolean} archived          Soft-deleted from the dashboard (data preserved).
+ * @property {"agent-board"} source
+ */
+
+/**
+ * Derived dashboard state for a row (`state.json`).
+ * @typedef {Object} ViewState
+ * @property {number} version
+ * @property {string} viewId
+ * @property {string|null} currentRunId
+ * @property {SemanticState} semanticState
+ * @property {ProcessState} processState
+ * @property {string} summary
+ * @property {number} lastActivityAt
+ * @property {number} updatedAt
+ * @property {boolean} needsInput
+ * @property {boolean} hasError
+ * @property {string} latestAssistantPreview
+ * @property {{name:string, path:string|null}|null} latestTool
+ * @property {string|null} question
+ * @property {Array<{toolCallId:string, question:string}>} pendingQuestions
+ * @property {string|null} error
+ * @property {number|null} lastVisitedAt
+ * @property {number|null} lastAgentActivityAt Timestamp of the latest assistant reply shown in the row.
+ * @property {ReviewSummary} [review] Compact collected-evidence summary.
+ * @property {DiagnosticSummary} [diagnostics] Compact diagnostics summary.
+ * @property {FollowUpSummary} [followUps] Compact queued follow-up summary.
+ * @property {SteeringSummary} [steering] Compact plan/approval steering summary.
+ * @property {CodeRefsSummary} [codeRefs] Compact issue/PR reference summary.
+ * @property {AutoStateClassification|null} [autoState] Latest automatic terminal-state classification.
+ * @property {number} [materializedRevision] Coordinator-stamped monotonic revision (issue #91). Absent on legacy rows until the View State Coordinator first materializes the view.
+ */
+
+/**
+ * Durable PTY host snapshot (`host.json`).
+ * @typedef {Object} HostStatus
+ * @property {number} version
+ * @property {string} viewId
+ * @property {HostMode} mode
+ * @property {number|null} runnerPid
+ * @property {number|null} childPid
+ * @property {string|null} socketPath
+ * @property {HostState} state
+ * @property {number} startedAt
+ * @property {number} lastSeenAt
+ * @property {number|null} endedAt
+ * @property {number|null} exitCode
+ * @property {string|null} error
+ * @property {number} cols
+ * @property {number} rows
+ * @property {number} attachedClients
+ * @property {boolean} [attachedEver] Whether any client attached to this host.
+ * @property {string|null} [instanceId] Owner/fencing token for this host launch (issue #70).
+ * @property {string|null} [configPath] Per-instance config file this host was launched with.
+ * @property {number|null} [claimAt] When the provisional claim was written (epoch ms).
+ * @property {number|null} [claimPid] PID of the service process that wrote the claim.
+ * @property {{pid:number,startToken:string|null}|null} [claimIdentity] Launch-time identity of the claiming service process.
+ * @property {{pid:number,startToken:string|null}|null} [runnerIdentity] Stable identity of the runner process.
+ * @property {number|null} [runnerSpawnedAt] When the runner spawn was confirmed (null = not yet spawned).
+ * @property {{pid:number,startToken:string|null}|null} [childIdentity] Stable identity of the child Pi process.
+ * @property {number|null} [childSpawnedAt] When the child spawn was confirmed (null = not yet spawned).
+ * @property {number|null} [readyAt] Set only after endpoint bind + child creation; alive implies readyAt != null.
+ * @property {number|null} [stopRequestedAt] When a revoke was requested via the host record.
+ * @property {string|null} [revokeToken] Random token written by requestHostStop to fence duplicate revokes.
+ * @property {string|null} [stopReason] Human-readable reason recorded with the revoke.
+ */
+
+/**
+ * Durable per-run snapshot (`runs/<runId>/status.json`).
+ * @typedef {Object} RunStatus
+ * @property {number} version
+ * @property {string} runId
+ * @property {string} viewId
+ * @property {number|null} pid
+ * @property {number} startedAt
+ * @property {number|null} endedAt
+ * @property {number|null} exitCode
+ * @property {RunKind} kind
+ * @property {string} prompt
+ * @property {string|null} model
+ * @property {SemanticState} semanticState
+ * @property {ProcessState} processState
+ * @property {string} summary
+ * @property {number} lastActivityAt
+ * @property {{name:string, path:string|null}|null} currentTool
+ * @property {string} latestAssistantPreview
+ * @property {string|null} question
+ * @property {Array<{toolCallId:string, question:string}>} pendingQuestions
+ * @property {string|null} error
+ * @property {number|null} lastAgentActivityAt Timestamp of the latest assistant reply.
+ * @property {string|null} stopReason
+ * @property {boolean} stoppedByUser
+ * @property {number} turns
+ * @property {number} toolCount
+ * @property {number} [eventCount]
+ * @property {number|null} [lastEventAt]
+ * @property {number} [updatedAt] In-memory foreground rebuild freshness (issue #225); not persisted on run status files.
+ * @property {EvidenceUsage|null} [usage]
+ * @property {string|null} [stallReason]
+ * @property {ReviewSummary|null} [evidenceSummary]
+ * @property {number} [materializedRevision] Coordinator-stamped monotonic revision shared with the view's state.json (issue #91). Absent on legacy rows until first coordinator materialization.
+ * @property {AutoStateClassification|null} [autoState]
+ */
+
+/**
+ * Configuration handed to the detached runner (written to the run dir as `config.json`
+ * and passed by path on argv).
+ * @typedef {Object} RunConfig
+ * @property {string} root
+ * @property {string} viewId
+ * @property {string} runId
+ * @property {RunKind} kind
+ * @property {string} sessionFile
+ * @property {string} cwd
+ * @property {string} prompt
+ * @property {string} piCommand        Executable to launch the worker (e.g. "pi" or a node path).
+ * @property {string[]} piArgsPrefix   Args before our flags (e.g. [cliJsPath] when piCommand is node).
+ * @property {string|null} model
+ * @property {"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|null} thinkingLevel
+ * @property {string|null} tools
+ */
+
+/**
+ * Configuration handed to the detached PTY host runner (written as `host-config.json`).
+ * @typedef {Object} HostConfig
+ * @property {string} root
+ * @property {string} viewId
+ * @property {string} sessionFile
+ * @property {string} cwd
+ * @property {string|null} initialPrompt
+ * @property {string} piCommand
+ * @property {string[]} piArgsPrefix
+ * @property {string|null} model
+ * @property {"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|null} thinkingLevel
+ * @property {string|null} tools
+ * @property {Record<string,string>} env
+ * @property {number} cols
+ * @property {number} rows
+ * @property {number|null} screenLogMaxBytes per-view screen.log write cap; null = runner default
+ * @property {string|null} [instanceId] Owner/fencing token for this host launch (issue #70).
+ * @property {string|null} [configPath] Per-instance config file path; each launch owns its own so concurrent launches never share a config.
+ * @property {string|null} [socketPath] Per-instance control endpoint the spawned runner must bind.
+ */
+
+/**
+ * Configuration handed to the detached title runner (written as `title-config.json`).
+ * @typedef {Object} TitleConfig
+ * @property {string} root
+ * @property {string} viewId
+ * @property {string} cwd
+ * @property {string} prompt
+ * @property {string} fallbackName
+ * @property {string} piCommand
+ * @property {string[]} piArgsPrefix
+ * @property {string|null} model
+ */
+
+/**
+ * Configuration handed to the detached auto-state runner.
+ * @typedef {Object} AutoStateConfig
+ * @property {string} root
+ * @property {string} viewId
+ * @property {string|null} runId
+ * @property {string} cwd
+ * @property {string} piCommand
+ * @property {string[]} piArgsPrefix
+ */
+
+/**
+ * @typedef {Object} DiagnosticEvent
+ * @property {number} version
+ * @property {number} at
+ * @property {string} viewId
+ * @property {string|null} runId
+ * @property {DiagnosticSource|string} source
+ * @property {DiagnosticLevel} level
+ * @property {string} code
+ * @property {string} message
+ * @property {Record<string,any>} details
+ */
+
+/**
+ * @typedef {Object} DiagnosticSummary
+ * @property {number} count
+ * @property {number} warningCount
+ * @property {number} errorCount
+ * @property {number|null} lastAt
+ * @property {DiagnosticLevel|null} lastLevel
+ * @property {string|null} lastCode
+ * @property {string|null} lastMessage
+ * @property {boolean} stalled
+ * @property {string|null} stallReason
+ */
+
+/**
+ * @typedef {Object} EvidenceUsage
+ * @property {number} inputTokens
+ * @property {number} outputTokens
+ * @property {number} totalTokens
+ */
+
+/**
+ * @typedef {Object} EvidenceCommand
+ * @property {string} id
+ * @property {number} at
+ * @property {string} command
+ * @property {EvidenceCommandKind} kind
+ * @property {EvidenceCommandStatus} status
+ * @property {number|null} exitCode
+ * @property {number|null} durationMs
+ * @property {string} outputPreview
+ */
+
+/**
+ * @typedef {Object} EvidenceFileChange
+ * @property {string} path
+ * @property {EvidenceFileAction} action
+ * @property {string|null} toolName
+ * @property {number} firstSeenAt
+ * @property {number} lastSeenAt
+ * @property {number} count
+ */
+
+/** @typedef {{ at:number, source:string, message:string, toolName:string|null }} EvidenceError */
+/** @typedef {{ at:number, text:string }} EvidenceAssistantClaim */
+
+/**
+ * @typedef {Object} EvidenceSnapshot
+ * @property {number} version
+ * @property {string} viewId
+ * @property {string|null} runId
+ * @property {number} updatedAt
+ * @property {EvidenceOutcome|string} outcome
+ * @property {boolean} ready
+ * @property {string} summary
+ * @property {EvidenceCommand[]} commands
+ * @property {EvidenceFileChange[]} fileChanges
+ * @property {EvidenceError[]} errors
+ * @property {EvidenceAssistantClaim[]} assistantEvidence
+ * @property {EvidenceUsage|null} usage
+ * @property {number} [eventCount]
+ * @property {string} [source]
+ */
+
+/**
+ * @typedef {Object} ReviewSummary
+ * @property {boolean} ready
+ * @property {EvidenceOutcome|string} outcome
+ * @property {number} fileChangeCount
+ * @property {number} commandCount
+ * @property {number} failedCommandCount
+ * @property {number} errorCount
+ * @property {string} latestAssistantEvidence
+ * @property {number|null} updatedAt
+ */
+
+/**
+ * @typedef {Object} FollowUpItem
+ * @property {string} id
+ * @property {number} seq
+ * @property {string} viewId
+ * @property {FollowUpKind} kind
+ * @property {string} text
+ * @property {number} createdAt
+ * @property {number} updatedAt
+ * @property {FollowUpStatus} status
+ * @property {string} source
+ * @property {"auto"|"now"|"queue"} delivery
+ * @property {string|null} runId
+ * @property {number|null} claimedAt
+ * @property {number|null} completedAt
+ * @property {number} attempts
+ * @property {string|null} error
+ */
+
+/** @typedef {{ version:number, viewId:string, nextSeq:number, updatedAt:number, items:FollowUpItem[] }} FollowUpQueue */
+/** @typedef {{ queuedCount:number, claimedCount:number, lastQueuedAt:number|null, lastQueuedPreview:string|null }} FollowUpSummary */
+
+/**
+ * @typedef {Object} SteeringState
+ * @property {number} version
+ * @property {string} viewId
+ * @property {SteeringModeState} status
+ * @property {number} updatedAt
+ * @property {string} planText
+ * @property {string|null} planRunId
+ * @property {number|null} approvedAt
+ * @property {string|null} changeRequest
+ * @property {string|null} executionRunId
+ * @property {Array<{at:number, from:string, to:string, action:string, runId:string|null, note:string|null}>} history
+ */
+
+/** @typedef {{ status:SteeringModeState, awaitingApproval:boolean, planPreview:string|null, updatedAt:number|null, question:string|null }} SteeringSummary */
+
+/**
+ * Compact issue/PR reference summary for a view (`github.json`).
+ * @typedef {Object} CodeRefsSummary
+ * @property {string|null} provider Resolved provider name (e.g. "github"); always non-null after a successful extraction (falls back to "generic"), null only before any extraction has run.
+ * @property {string} issuePrefix Issue-number prefix resolved from the matched provider at write time (default "#").
+ * @property {string} prPrefix PR/MR-number prefix resolved from the matched provider at write time (default "▸#"; "!" for gitlab).
+ * @property {import("./code-refs.mjs").Ref|null} issue
+ * @property {import("./code-refs.mjs").Ref|null} pr
+ * @property {import("./code-refs.mjs").Ref[]} allRefs Distinct refs for the peek view (max 10).
+ */
+
+/** Roster index (`roster.json`). @typedef {Object} Roster @property {number} version @property {string[]} views */
+
+/**
+ * Persisted launch dialog defaults (`launch-prefs.json`).
+ * @typedef {Object} LaunchPrefs
+ * @property {number} version
+ * @property {string|null} cwd
+ * @property {string|null} model
+ * @property {"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|null} thinkingLevel
+ * @property {number|null} screenLogRetentionDays days before an ended view's screen.log is GC'd; 0 disables GC
+ * @property {number|null} screenLogMaxSize per-view screen.log write cap in bytes; null = built-in default
+ */
+
+export {};

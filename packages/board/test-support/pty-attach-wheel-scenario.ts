@@ -1,0 +1,188 @@
+// Component-level fullscreen wheel coverage (issue #173 follow-up): the REAL
+// PtyAttachComponent with a fake TUI and a nonexistent control socket (on
+// non-Windows, connect() short-circuits to its reconnect loop before creating a
+// socket — no socket churn), its xterm scrollback filled directly so the local
+// viewport has somewhere to travel.
+//
+// Why this needs its own scenario: the renderer's routeWheel fallback only moves
+// real ScrollView components, while the attach viewport paints its own xterm
+// scrollback. A wheel event we hand back unconsumed therefore scrolls nothing at
+// all, and the fullscreen wheel goes dead. No runner socket and no xclip stub are
+// involved, so the case stays green on Windows too.
+// Cases:
+//   1. wheel up with scrollback available → {handled:true, render:false} and the
+//      viewport travels up by exactly the reported delta;
+//   2. wheel down → consumed while it moves, lands back on follow-bottom (null),
+//      and the NEXT downward wheel falls through (undefined) instead of
+//      swallowing the event. This component has no runner socket, so it is
+//      disconnected: issue #198 made a *connected* attach forward the wheel to
+//      the child when the local viewport cannot move, and this case pins the
+//      disconnected half of that rule (a forward would be a silent no-op);
+//   3. a wheel report with no delta, and a non-wheel press, both fall through;
+//   4. the AGENT_BOARD_ATTACH_MOUSE / AGENT_BOARD_ENABLE_MOUSE_SCROLL kill
+//      switches disable local scrolling in fullscreen too;
+//   5. Home still scrolls a legacy attach (no hydrate floor) to line 0;
+//   6. hydrating an authoritative frame taller than this terminal leaves no
+//      scrollable history (issue #205: the overflow is hydration residue, so the
+//      floor has to swallow it).
+// Run via `node --experimental-transform-types`.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+const root = mkdtempSync(join(tmpdir(), "agentview-attach-wheel-"));
+const socketPath = join(root, "nonexistent.sock");
+process.env.AGENT_BOARD_ATTACH_MOUSE = "1";
+
+/** Every byte the component writes to the outer terminal (issue #207). */
+const outerWrites: string[] = [];
+
+const tui = {
+	mode: "fullscreen",
+	terminal: {
+		rows: 24,
+		cols: 80,
+		columns: 80,
+		// Issue #207: capture what the component writes to the OUTER terminal so a
+		// test can prove the full-screen mouse mode is re-asserted on open.
+		write: (data: string) => {
+			outerWrites.push(data);
+		},
+	},
+	requestRender: () => {},
+};
+const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+
+const mouseBase = { x: 3, y: 3, screenX: 3, screenY: 3, width: 80, height: 22, shift: false, alt: false, ctrl: false };
+// pi-tui convention: negative wheelDelta scrolls up.
+const wheelEvent = (wheelDelta?: number) => ({
+	...mouseBase,
+	type: "wheel",
+	button: "none",
+	...(wheelDelta === undefined ? {} : { wheelDelta }),
+});
+
+const result = {
+	error: null as string | null,
+	room: 0,
+	upHandled: false,
+	upRenderFalse: false,
+	upMovedByDelta: false,
+	outerWrites: [] as string[],
+	downHandled: false,
+	downLandedOnBottom: false,
+	atBottomFallsThrough: false,
+	missingDeltaFallsThrough: false,
+	nonWheelFallsThrough: false,
+	attachMouseOffFallsThrough: false,
+	attachMouseOffNoMove: false,
+	scrollSwitchOffFallsThrough: false,
+	scrollSwitchOffNoMove: false,
+	restoredAfterKillSwitch: false,
+	legacyHomeScrolls: false,
+	legacyHomeViewportTop: null as number | null,
+	hydratedBaseY: 0,
+	hydratedHistoryFloor: 0,
+	hydratedFloorStartIsBottom: false,
+};
+
+let component: any = null;
+let hydrated: any = null;
+try {
+	component = new PtyAttachComponent(
+		tui as never,
+		theme as never,
+		{} as never,
+		() => {},
+		{ socketPath, title: "wheel e2e" } as never,
+	);
+	// Fill the attach scrollback so the local viewport can actually travel.
+	await new Promise<void>((resolve) => component.term.write("scrollback line\r\n".repeat(200), resolve));
+	await sleep(50);
+
+	const bottom = component.bottomViewportTop(component.bodyHeight());
+	result.room = bottom;
+	if (bottom <= 0) throw new Error("scrollback never exceeded one screen");
+
+	// 1. Wheel up scrolls locally by exactly the reported delta.
+	const up = component.handleMouse(wheelEvent(-3));
+	result.upHandled = !!up && up.handled === true;
+	result.upRenderFalse = !!up && up.render === false;
+	result.upMovedByDelta = component.viewportTop === bottom - 3;
+
+	// 2. Wheel down is consumed while it still moves, and lands on follow-bottom.
+	const down = component.handleMouse(wheelEvent(600));
+	result.downHandled = !!down && down.handled === true;
+	result.downLandedOnBottom = component.viewportTop === null;
+	result.atBottomFallsThrough = component.handleMouse(wheelEvent(600)) === undefined;
+
+	// 3. Nothing-to-scroll and non-wheel events are never swallowed. Native paste
+	// is off so the middle press cannot reach the xclip path.
+	process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE = "0";
+	result.missingDeltaFallsThrough = component.handleMouse(wheelEvent()) === undefined;
+	result.nonWheelFallsThrough = component.handleMouse({ ...mouseBase, type: "press", button: "middle" }) === undefined;
+
+	// 4. The documented kill switches must disable the fullscreen wheel too. The
+	// regular path gets that for free by never enabling mouse reporting; in
+	// fullscreen TuiAltScreen owns reporting, so this handler has to gate itself.
+	const parkedTop = component.viewportTop;
+	process.env.AGENT_BOARD_ATTACH_MOUSE = "0";
+	result.attachMouseOffFallsThrough = component.handleMouse(wheelEvent(-3)) === undefined;
+	result.attachMouseOffNoMove = component.viewportTop === parkedTop;
+	delete process.env.AGENT_BOARD_ATTACH_MOUSE;
+	process.env.AGENT_BOARD_ENABLE_MOUSE_SCROLL = "0";
+	result.scrollSwitchOffFallsThrough = component.handleMouse(wheelEvent(-3)) === undefined;
+	result.scrollSwitchOffNoMove = component.viewportTop === parkedTop;
+	delete process.env.AGENT_BOARD_ENABLE_MOUSE_SCROLL;
+	// Both switches cleared ⇒ local scrolling is back.
+	result.restoredAfterKillSwitch = !!component.handleMouse(wheelEvent(-3));
+
+	// Issue #207: ship the RAW bytes the component wrote to the outer terminal.
+	// The test derives the expected sequence from the same pure helper the
+	// implementation calls (fullscreenMouseEnableSequence), so neither side
+	// hard-codes a form and the check follows TMUX/ZELLIJ/STY/TERM automatically.
+	result.outerWrites = outerWrites;
+	result.legacyHomeScrolls = component.tryScrollToTop();
+	result.legacyHomeViewportTop = component.viewportTop;
+
+	// 6. Issue #205: hydrating an authoritative frame taller than this terminal
+	// scrolls the overflow rows into the local buffer, but those rows are a
+	// by-product of the hydration, not session history the runner ever had. The
+	// floor must swallow them so the first wheel notch is forwarded instead of
+	// spent scrolling them.
+	hydrated = new PtyAttachComponent(
+		tui as never,
+		theme as never,
+		{} as never,
+		() => {},
+		{ socketPath, title: "wheel hydrate" } as never,
+	);
+	const frame = Array.from({ length: 40 }, (_, i) => `frame row ${i}`).join("\r\n");
+	hydrated.pushOutput(frame, { authoritative: true, scrollbackLines: 0 });
+	// The xterm parse is async: an empty trailing write flushes after the frame's
+	// callback, which is where the floor is set.
+	await new Promise<void>((resolve) => hydrated.term.write("", resolve));
+	result.hydratedBaseY = hydrated.term.buffer.active.baseY;
+	result.hydratedHistoryFloor = hydrated.historyFloor;
+	result.hydratedFloorStartIsBottom =
+		hydrated.scrollFloorStart(hydrated.bodyHeight()) === hydrated.bottomViewportTop(hydrated.bodyHeight());
+} catch (err) {
+	result.error = err instanceof Error ? err.message : String(err);
+} finally {
+	delete process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE;
+	try {
+		component?.dispose();
+	} catch {}
+	try {
+		hydrated?.dispose();
+	} catch {}
+	try {
+		rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 });
+	} catch {}
+}
+
+console.log(JSON.stringify(result));
+process.exit(0);

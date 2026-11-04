@@ -1,0 +1,2144 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, mkdirSync, symlinkSync, copyFileSync, unlinkSync, renameSync } from "node:fs";
+import { createConnection, createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { once } from "node:events";
+import { spawn } from "node:child_process";
+import { test } from "node:test";
+import { atomicWriteJson } from "../src/core/atomic.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
+import { probeHost } from "../src/core/host-probe.mjs";
+import * as P from "../src/core/paths.mjs";
+import { claimHost, createView, readHost, readMeta, readState, updateOwnedHost, writeHost, writeState } from "../src/core/store.mjs";
+import { readJournal } from "../src/core/coordinator-journal.mjs";
+import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
+import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
+import { createEchoProbe } from "../test-support/echo-probe.mjs";
+import { tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
+
+function freshRoot() {
+	return mkdtempSync(join(tmpdir(), "agentview-pty-"));
+}
+
+// Default raised 3000→10000: every call site asserts "eventually happens"
+// (spawn liveness, file appearance, message arrival), never a timing bound.
+// Under full-suite parallel load (A11 perf file burns CPU in parallel), real
+// PTY spawn + first output can legitimately exceed 3s; genuine loss still
+// fails, only later.
+// 15s ceiling: spawn+first-output under parallel suite load measured past 10s
+// on dev hardware (phase 4 added test files; phase 3 residual note anticipated
+// this). Still a hard failure on real breakage — only failure latency grows.
+async function waitFor(predicate, timeoutMs = 15000, capture = null) {
+	return waitForWithPostmortem(predicate, { timeoutMs, intervalMs: 25, capture });
+}
+
+/** Host is usable once the runner reports the socket bound and the child pid is recorded.
+ *  Deliberately avoids existsSync(socketPath): on Windows the socket is a named pipe,
+ *  which never exists as a filesystem entry. Also requires the runner process to be
+ *  alive, so a runner that fails at listen (and exits) never satisfies the gate. */
+function hostReady(root, viewId) {
+	const host = readHost(root, viewId);
+	if (!host || host.state !== "alive" || !host.socketPath || !host.childPid) return false;
+	return isAlive(host.runnerPid);
+}
+
+function isAlive(pid) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Connect to the control socket, retrying until it binds. The runner binds the
+ *  socket only after the child spawns, and on Windows the pipe is not a filesystem
+ *  entry (existsSync can't gate it), so poll with real connect attempts. */
+async function connectWhenReady(socketPath, timeoutMs = 5000) {
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		const socket = createConnection(socketPath);
+		try {
+			await once(socket, "connect");
+			return socket;
+		} catch {
+			socket.destroy();
+			await new Promise((r) => setTimeout(r, 50));
+		}
+	}
+	throw new Error("timed out waiting for control socket");
+}
+
+let hasNodePty = true;
+try {
+	await import("node-pty");
+} catch {
+	hasNodePty = false;
+}
+
+function waitForExit(child, timeoutMs) {
+	if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+	return new Promise((resolve) => {
+		let settled = false;
+		let timer;
+		const onExit = () => finish(true);
+		const finish = (exited) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			child.removeListener("exit", onExit);
+			resolve(exited);
+		};
+		timer = setTimeout(() => finish(false), timeoutMs);
+		child.once("exit", onExit);
+		if (child.exitCode !== null || child.signalCode !== null) finish(true);
+	});
+}
+
+async function stopRunner(runner) {
+	if (!runner || runner.exitCode !== null || runner.signalCode !== null) return;
+	try { runner.kill("SIGTERM"); } catch {}
+	if (!(await waitForExit(runner, 500)) && runner.exitCode === null && runner.signalCode === null) {
+		try { runner.kill("SIGKILL"); } catch {}
+		await waitForExit(runner, 500);
+	}
+}
+
+
+function send(socket, msg) {
+	socket.write(JSON.stringify(msg) + "\n");
+}
+
+/** Best-effort reap of the hosted child after a hard runner kill (Windows). */
+function reapChild(root, viewId) {
+	try {
+		const pid = readHost(root, viewId)?.childPid;
+		if (pid) process.kill(pid, "SIGKILL");
+	} catch {}
+}
+
+test("pty-runner creates host socket, broadcasts output, forwards input, finalizes", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "pty", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+
+		const socket = createConnection(P.controlSocketPath(root, "v1"));
+		await once(socket, "connect");
+		let buf = "";
+		const messages = [];
+		socket.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+		});
+		send(socket, { type: "hello" });
+		// The socket carries only live output; output emitted before the client connects
+		// is replayed from the screen log (same as the UI attach path, pty-attach.ts
+		// replayScreenLog). Wait on the log so the boot banner is visible before we
+		// assert on realtime echo below.
+		await waitFor(() => {
+			try {
+				return readFileSync(P.screenLogPath(root, "v1"), "utf8").includes("fake pi ready");
+			} catch {
+				return false;
+			}
+		});
+		send(socket, { type: "input", data: "hello\r" });
+		await waitFor(() => messages.find((m) => m.type === "output" && m.data.includes("echo:hello")));
+		send(socket, { type: "resize", cols: 100, rows: 30 });
+		await waitFor(() => readHost(root, "v1")?.cols === 100);
+		send(socket, { type: "input", data: "exit\r" });
+		await waitFor(() => readHost(root, "v1")?.endedAt);
+		assert.equal(readHost(root, "v1").state, "exited");
+		assert.match(readFileSync(P.screenLogPath(root, "v1"), "utf8"), /fake pi ready/);
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGTERM"); } catch {}
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner protects dash-prefixed initial prompts while keeping argv delivery", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "pty", cwd: process.cwd() });
+		const capturePath = join(root, "argv-prompt.txt");
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: "- Create a ticket\n- Run the fix",
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_ARGV_CAPTURE_PATH: capturePath },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+		await waitFor(() => existsSync(capturePath) && readFileSync(capturePath, "utf8") === " - Create a ticket\n- Run the fix");
+	} finally {
+		try { runner?.kill("SIGTERM"); } catch {}
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner applies an ordered restore resize before a detach packet", async () => {
+	const root = freshRoot();
+	let runner;
+	let socket;
+	try {
+		const meta = createView(root, { id: "detach1", name: "detach", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "detach1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "detach1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: {},
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => existsSync(P.controlSocketPath(root, "detach1")) && readHost(root, "detach1")?.state === "alive");
+
+		socket = createConnection(P.controlSocketPath(root, "detach1"));
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		// Send both packets in one write, matching PtyAttachComponent's
+		// restore -> detach sequence. The runner must process resize first,
+		// before ending the socket for detach.
+		socket.write(
+			JSON.stringify({ type: "resize", cols: 100, rows: 30 }) + "\n" +
+			JSON.stringify({ type: "detach" }) + "\n",
+		);
+		// host.json is the durable protocol-side observation. Do not wait for
+		// the client socket's close event: some Node/net versions keep the local
+		// close event pending while the peer has already ended its side.
+		await waitFor(() => readHost(root, "detach1")?.cols === 100 && readHost(root, "detach1")?.rows === 30);
+		assert.equal(readHost(root, "detach1").cols, 100);
+		assert.equal(readHost(root, "detach1").rows, 30);
+	} finally {
+		try { socket?.destroy(); } catch {}
+		await stopRunner(runner);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner server error routes through the child-aware shutdown", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "servererr1", name: "server error", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "servererr1");
+		const socketPath = P.controlSocketPath(root, "servererr1");
+		// A directory at the Unix socket path survives the runner's best-effort
+		// unlink and makes server.listen() emit EADDRINUSE right after spawn.
+		mkdirSync(socketPath);
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "servererr1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-ignore-term-pi.mjs")],
+			model: null,
+			tools: null,
+			env: {},
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		assert.equal(await waitForExit(runner, 7000), true, "runner must exit after server error cleanup");
+		assert.equal(runner.exitCode, 1);
+		// The failed listener must be recorded, and — the actual regression guard —
+		// the runner must have awaited the child's exit before process.exit:
+		// child.onExit is what clears childPid and flips state to "exited". The
+		// old server-error path exited synchronously, leaving state "failed"
+		// with childPid still set.
+		const host = readHost(root, "servererr1");
+		assert.match(host.error ?? "", /EADDRINUSE/);
+		assert.equal(host.childPid, null, "shutdown must observe the child exit before the runner exits");
+		assert.equal(host.state, "exited");
+	} finally {
+		await stopRunner(runner);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner shutdown escalates when the PTY child ignores SIGTERM", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		const meta = createView(root, { id: "ignore1", name: "ignore", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "ignore1");
+		const childPidPath = join(root, "ignore-child.pid");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "ignore1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			// The shell trap sets SIG_IGN for TERM/HUP/INT BEFORE exec, and ignored
+			// dispositions survive exec — the child then ignores SIGTERM even while
+			// node is booting. The test waits for the child's PID file (written after
+			// boot) before signaling the runner, so the 4s SIGKILL escalation is the
+			// only way shutdown can complete.
+			piCommand: "sh",
+			piArgsPrefix: [
+				"-c",
+				`trap '' TERM HUP INT; exec ${JSON.stringify(process.execPath)} ${JSON.stringify(resolve("test-support/fake-ignore-term-pi.mjs"))}`,
+			],
+			model: null,
+			tools: null,
+			env: { FAKE_PTY_PID_PATH: childPidPath },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => existsSync(childPidPath));
+		childPid = Number(readFileSync(childPidPath, "utf8"));
+		assert.ok(childPid > 0, "escalation fixture must wait for the booted PTY child");
+		const shutdownStartedAt = Date.now();
+		runner.kill("SIGTERM");
+		assert.equal(await waitForExit(runner, 7000), true, "runner must finish the escalated shutdown");
+		const shutdownElapsed = Date.now() - shutdownStartedAt;
+		assert.ok(
+			shutdownElapsed >= 3500,
+			`shutdown finished in ${shutdownElapsed}ms — a SIGTERM-immune child requires the ~4s SIGKILL escalation`,
+		);
+		assert.equal(runner.exitCode, 0);
+		assert.throws(() => process.kill(childPid, 0), "child must be gone after runner shutdown");
+	} finally {
+		try { if (childPid) process.kill(childPid, "SIGKILL"); } catch {}
+		await stopRunner(runner);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner terminates its child when the runner is stopped", { skip: !hasNodePty }, async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "pty-kill", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			// No AGENT_BOARD_ALLOW_PIPE_FALLBACK: exercise the node-pty path whose
+			// kill() throws "Signals not supported on windows" — the runner must
+			// fall back to terminating the child directly.
+			env: {},
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+		const childPid = readHost(root, "v1")?.childPid;
+		assert.ok(childPid, "child pid recorded");
+		assert.ok(isAlive(childPid), "child alive before stop");
+		// Use the control protocol (the panel stop path) rather than killing the
+		// runner process: on Windows process.kill("SIGTERM") is TerminateProcess
+		// and would skip the runner's shutdown handler entirely.
+		const socket = createConnection(P.controlSocketPath(root, "v1"));
+		await once(socket, "connect");
+		send(socket, { type: "terminate" });
+		await waitFor(() => !isAlive(childPid), 5000);
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		const pid = readHost(root, "v1")?.childPid;
+		if (pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner honors screenLogMaxBytes from host config", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "cap1", name: "cap", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "cap1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "cap1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+			screenLogMaxBytes: 2048,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		const screenLog = () => {
+			try {
+				return readFileSync(P.screenLogPath(root, "cap1"), "utf8");
+			} catch {
+				return "";
+			}
+		};
+		// The child's banner says it's up. Before that a terminal takes lines of about 1 KB at most on macOS,
+		// and what overflows is lost, including the "exit" that ends this test.
+		await waitFor(() => hostReady(root, "cap1") && screenLog().includes("fake pi ready"));
+
+		const socket = createConnection(P.controlSocketPath(root, "cap1"));
+		await once(socket, "connect");
+		// ~8 KB of echoed output → well over the 2 KB cap → runner must compact.
+		send(socket, { type: "input", data: `${`${"x".repeat(512)}\n`.repeat(16)}cap-all-sent\n` });
+		// The newest output survives compaction, so this shows all of it went through the cap.
+		await waitFor(() => screenLog().includes("cap-all-sent"));
+		send(socket, { type: "input", data: "exit\n" });
+		await waitFor(() => readHost(root, "cap1")?.endedAt != null);
+		// Compaction happens synchronously inside onData; size must settle ≤ cap.
+		const size = await waitFor(() => {
+			try {
+				const s = statSync(P.screenLogPath(root, "cap1")).size;
+				return s <= 2048 ? s : false;
+			} catch {
+				return false;
+			}
+		});
+		assert.ok(size > 0 && size <= 2048, `screen.log should be compacted to <=2048 bytes, got ${size}`);
+		socket.end();
+	} finally {
+		try { runner?.kill(); } catch {}
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("pty-runner survives persistent host.json persist failures (EPERM-class)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid = null;
+	try {
+		const meta = createView(root, { id: "v1", name: "persist-fail", cwd: process.cwd() });
+		// Occupy host.json with a DIRECTORY: rename(tmp, host.json) must fail on
+		// every attempt on every platform (EISDIR/EPERM), so every heartbeat
+		// persist fails — the runner must degrade instead of dying.
+		mkdirSync(P.hostPath(root, "v1"), { recursive: true });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		// hostReady() gates on host.json which can never be written here — gate on
+		// the runner process being alive, then poll-connect the control socket
+		// (the runner binds it only after the child spawns).
+		await waitFor(() => isAlive(runner.pid ?? -1));
+		const socket = await connectWhenReady(P.controlSocketPath(root, "v1"));
+		let buf = "";
+		const messages = [];
+		socket.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+		});
+		send(socket, { type: "get_status" });
+		// The control protocol must keep working even though every host.json
+		// write fails (status is delivered over the socket, not the file).
+		await waitFor(() => messages.find((m) => m.type === "status"));
+		// Capture the child pid from the socket status (host.json is occupied by
+		// a directory, so reapChild's readHost lookup is a no-op here).
+		childPid = messages.find((m) => m.type === "status")?.status?.childPid ?? null;
+		// Degradation is recorded in diagnostics; the runner is still alive.
+		await waitFor(() => readDiagnostics(root, "v1").some((d) => d.code === "persist_error"));
+		assert.ok(isAlive(runner.pid ?? -1), "runner must survive persist failures");
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner routes editor_state between clients, seeds hello, resets on exit", async () => {
+	const root = freshRoot();
+	let runner;
+	// issue #178 (cross-review R1-G1): this is one of the issue's two target
+	// signatures, so its waits carry the same flake postmortem as
+	// subscribe_terminal's — a red must arrive with a scene, not just
+	// "timed out waiting".
+	const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+	try {
+		const meta = createView(root, { id: "v1", name: "editor-state", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"), 15000, capture);
+
+		const readMessages = (socket) => {
+			let buf = "";
+			const messages = [];
+			socket.on("data", (chunk) => {
+				buf += chunk.toString();
+				const lines = buf.split("\n");
+				buf = lines.pop() ?? "";
+				for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+			});
+			return messages;
+		};
+
+		const client1 = createConnection(P.controlSocketPath(root, "v1"));
+		await once(client1, "connect");
+		const messages1 = readMessages(client1);
+		send(client1, { type: "hello" });
+		await waitFor(() => messages1.find((m) => m.type === "hello"), 15000, capture);
+
+		// A second client must receive the pushed state as a broadcast.
+		const client2 = createConnection(P.controlSocketPath(root, "v1"));
+		await once(client2, "connect");
+		const messages2 = readMessages(client2);
+		// Registration proof (issue #178): `connect` only proves the TCP handshake.
+		// The runner registers the socket and writes this unsolicited hello inside
+		// the accept callback (runner/pty-runner.mjs:375/:380), so receiving it
+		// means client2 is already in the broadcast set. Without this wait the push
+		// below can be broadcast before registration and is never replayed.
+		await waitFor(() => messages2.find((m) => m.type === "hello"), 15000, capture);
+		send(client1, { type: "editor_state", empty: false });
+		await waitFor(() => messages2.find((m) => m.type === "editor_state"), 15000, capture);
+		assert.equal(messages2.find((m) => m.type === "editor_state").empty, false);
+
+		// A client connecting afterwards gets the current state seeded in hello.
+		const client3 = createConnection(P.controlSocketPath(root, "v1"));
+		await once(client3, "connect");
+		const messages3 = readMessages(client3);
+		send(client3, { type: "hello" });
+		// The runner also sends an unsolicited hello on connect (now with the
+		// current editorEmpty seeded too); both it and the explicit-hello reply
+		// carry the seeded value, so the finder matches either.
+		await waitFor(() => messages3.find((m) => m.type === "hello" && "editorEmpty" in m), 15000, capture);
+		assert.equal(messages3.find((m) => m.type === "hello" && "editorEmpty" in m).editorEmpty, false);
+
+		// Child exit resets the state to null and broadcasts it.
+		send(client1, { type: "input", data: "exit\r" });
+		await waitFor(() => messages2.find((m) => m.type === "editor_state" && m.empty === null), 15000, capture);
+		await waitFor(() => readHost(root, "v1")?.endedAt, 15000, capture);
+
+		client1.destroy();
+		client2.destroy();
+		client3.destroy();
+	} finally {
+		await stopRunner(runner);
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- new-protocol (issue #70): per-instance endpoint + ownership fencing ----
+
+/** Launch a new-protocol runner the way the service does: instance-scoped
+ *  config + provisional host claim, then spawn. Returns runner/config/socket. */
+async function launchOwnedRunner(root, viewId, instanceId, opts = {}) {
+	const meta = createView(root, { id: viewId, name: `owned-${instanceId}`, cwd: process.cwd() });
+	const configPath = P.hostConfigPathFor(root, viewId, instanceId);
+	const socketPath = P.hostEndpointPathFor(process.platform, root, viewId, instanceId);
+	atomicWriteJson(configPath, {
+		root,
+		viewId,
+		instanceId,
+		configPath,
+		socketPath,
+		sessionFile: meta.sessionFile,
+		cwd: process.cwd(),
+		initialPrompt: null,
+		piCommand: process.execPath,
+		piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+		model: null,
+		tools: null,
+		env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+		cols: 80,
+		rows: 24,
+		...opts.config,
+	});
+	const claim = claimHost(root, {
+		viewId,
+		instanceId,
+		configPath,
+		socketPath,
+		claimAt: Date.now(),
+		claimPid: process.pid,
+		claimIdentity: { pid: process.pid, startToken: null },
+	});
+	if (!claim.claimed) throw new Error(`claimHost refused: ${JSON.stringify(claim)}`);
+	const runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+	return { runner, configPath, socketPath, meta };
+}
+
+test("owned runner binds unique endpoint, publishes ready, cleans up on natural child exit", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i1"));
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		assert.ok(isAlive(childPid), "child alive before exit");
+		assert.equal(host.instanceId, "i1");
+		assert.equal(host.socketPath, P.hostEndpointPathFor(process.platform, root, "v1", "i1"));
+		const socket = createConnection(host.socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		send(socket, { type: "input", data: "exit\r" });
+		assert.equal(await waitForExit(runner, 5000), true, "runner exits after natural child exit");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		const final = readHost(root, "v1");
+		assert.equal(final.instanceId, "i1");
+		assert.equal(final.childPid, null);
+		assert.equal(final.readyAt, null);
+		assert.ok(final.endedAt != null, "terminal record carries endedAt");
+		assert.equal(existsSync(host.socketPath), false, "instance endpoint must be cleaned up");
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("duplicate runner for the same instance exits before spawning a child", async () => {
+	const root = freshRoot();
+	let runnerA;
+	let runnerB;
+	let childPid;
+	try {
+		({ runner: runnerA } = await launchOwnedRunner(root, "v1", "i1"));
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		// B starts from the SAME instance config — the endpoint is already owned by A.
+		runnerB = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), host.configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		assert.equal(await waitForExit(runnerB, 8000), true, "duplicate runner must exit");
+		const diags = readDiagnostics(root, "v1");
+		assert.ok(
+			diags.some((d) => d.code === "host_endpoint_busy" || d.code === "host_start_yielded"),
+			"duplicate runner records a yield/busy diagnostic",
+		);
+		assert.ok(isAlive(childPid), "original child still alive");
+		const settled = readHost(root, "v1");
+		assert.equal(settled.state, "alive");
+		assert.equal(settled.childPid, childPid);
+		assert.equal(settled.runnerPid, runnerA.pid, "duplicate runner never wrote host.json");
+	} finally {
+		try { runnerA?.kill("SIGKILL"); } catch {}
+		try { runnerB?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("owned runner does not unlink a foreign endpoint on exit", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let foreign;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i1"));
+		await waitFor(() => readHost(root, "v1")?.state === "alive");
+		childPid = readHost(root, "v1")?.childPid;
+		// A second instance's endpoint with a REAL listener must survive A's exit.
+		const foreignPath = P.hostEndpointPathFor(process.platform, root, "v1", "i2");
+		foreign = createServer(() => {});
+		await new Promise((resolveListen, rejectListen) => {
+			foreign.once("error", rejectListen);
+			foreign.listen(foreignPath, resolveListen);
+		});
+		runner.kill("SIGTERM");
+		assert.equal(await waitForExit(runner, 8000), true, "owned runner exits on SIGTERM");
+		const probe = createConnection(foreignPath);
+		probe.on("error", () => {});
+		await once(probe, "connect");
+		probe.destroy();
+		assert.equal(existsSync(foreignPath), true, "foreign endpoint survives the other instance's exit");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		try { foreign?.close(); } catch {}
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("heartbeat detects ownership loss and exits without writing host state", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i1"));
+		await waitFor(() => readHost(root, "v1")?.state === "alive");
+		childPid = readHost(root, "v1")?.childPid;
+		// Simulate a superseding owner rewriting host.json.
+		writeHost(root, { ...readHost(root, "v1"), instanceId: "other" });
+		assert.equal(await waitForExit(runner, 5000), true, "runner exits after ownership loss");
+		const after = readHost(root, "v1");
+		assert.equal(after.instanceId, "other", "superseding owner's record untouched");
+		assert.equal(after.state, "alive", "loser runner never wrote a terminal state");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("runner exits 0 on its own terminal host record — no resurrection, no child", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "owned-term", cwd: process.cwd() });
+		const configPath = P.hostConfigPathFor(root, "v1", "i9");
+		const socketPath = P.hostEndpointPathFor(process.platform, root, "v1", "i9");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			instanceId: "i9",
+			configPath,
+			socketPath,
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: "must not be re-delivered",
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		const claim = claimHost(root, {
+			viewId: "v1",
+			instanceId: "i9",
+			configPath,
+			socketPath,
+			claimAt: Date.now(),
+			claimPid: process.pid,
+			claimIdentity: { pid: process.pid, startToken: null },
+		});
+		assert.equal(claim.claimed, true);
+		// The record finalized (e.g. a prior runner of this instance exited after claiming):
+		// a restarted runner for the SAME instance must not republish/respawn.
+		writeHost(root, { ...claim.host, state: "exited", endedAt: Date.now() });
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		assert.equal(await waitForExit(runner, 5000), true, "runner must exit on its own terminal record");
+		assert.equal(runner.exitCode, 0);
+		const after = readHost(root, "v1");
+		assert.equal(after.state, "exited", "terminal record untouched");
+		assert.equal(after.runnerPid, null, "runner identity was never re-published");
+		assert.ok(readDiagnostics(root, "v1").some((d) => d.code === "host_start_own_terminal"), "own-terminal diagnostic recorded");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("terminate over the socket escalates a SIGTERM-immune child and exits the runner", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid = null;
+	try {
+		const meta = createView(root, { id: "v1", name: "owned-escalate", cwd: process.cwd() });
+		const configPath = P.hostConfigPathFor(root, "v1", "i1");
+		const socketPath = P.hostEndpointPathFor(process.platform, root, "v1", "i1");
+		const childPidPath = join(root, "escalate-child.pid");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			instanceId: "i1",
+			configPath,
+			socketPath,
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			// The shell trap sets SIG_IGN BEFORE exec — the child ignores SIGTERM, so only
+			// the SIGKILL escalation can complete shutdown (same fixture as the legacy test).
+			piCommand: "sh",
+			piArgsPrefix: [
+				"-c",
+				`trap '' TERM HUP INT; exec ${JSON.stringify(process.execPath)} ${JSON.stringify(resolve("test-support/fake-ignore-term-pi.mjs"))}`,
+			],
+			model: null,
+			tools: null,
+			env: { FAKE_PTY_PID_PATH: childPidPath },
+			cols: 80,
+			rows: 24,
+		});
+		const claim = claimHost(root, {
+			viewId: "v1",
+			instanceId: "i1",
+			configPath,
+			socketPath,
+			claimAt: Date.now(),
+			claimPid: process.pid,
+			claimIdentity: { pid: process.pid, startToken: null },
+		});
+		assert.equal(claim.claimed, true);
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => readHost(root, "v1")?.state === "alive" && existsSync(childPidPath));
+		childPid = Number(readFileSync(childPidPath, "utf8"));
+		const socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		send(socket, { type: "terminate" });
+		// finishHost ladder: SIGTERM → 4s → SIGKILL → 1s. Runner exits only after the child.
+		assert.equal(await waitForExit(runner, 8000), true, "runner finishes despite SIGTERM-immune child");
+		assert.equal(runner.exitCode, 0);
+		assert.ok(!isAlive(childPid), "child must be gone after escalation");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("owned runner publishes proc start tokens for runner and child identities (linux)", { skip: process.platform !== "linux" }, async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i1"));
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null ? h : false;
+		});
+		childPid = host.childPid;
+		const tokenPattern = process.platform === "win32" ? /^ct:\d+$/ : /^\d+$/;
+		assert.match(String(host.runnerIdentity?.startToken), tokenPattern, "runnerIdentity.startToken from /proc");
+		assert.match(String(host.childIdentity?.startToken), tokenPattern, "childIdentity.startToken from /proc");
+		assert.equal(host.childIdentity?.pid, childPid);
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("owned runner never republishes alive after a child exits during startup", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid = null;
+	try {
+		// Reused fast-exit fixture (issue #90): boot output, then exit after 150 ms —
+		// inside the ready path's token probe window (issue #238: a microtask on
+		// linux, a PowerShell round trip on win32).
+		({ runner } = await launchOwnedRunner(root, "v1", "i238", {
+			config: { piArgsPrefix: [resolve("test-support/fake-failing-pty-pi.mjs")] },
+		}));
+		// Poll the record through the whole startup/finalize window. The guard's
+		// contract is an ordering one — a terminal record must never be overwritten
+		// by a later "alive" publish — so collect the observed sequence, not just
+		// the end value.
+		const observed = [];
+		const deadline = Date.now() + 10000;
+		while (Date.now() < deadline) {
+			const h = readHost(root, "v1");
+			if (h) {
+				if (h.childPid) childPid = h.childPid;
+				observed.push(h.state);
+			}
+			if (runner.exitCode !== null || runner.signalCode !== null) break;
+			await new Promise((r) => setTimeout(r, 2));
+		}
+		const trace = observed.filter((s, i) => i === 0 || s !== observed[i - 1]).join(" → ");
+		assert.equal(await waitForExit(runner, 8000), true, "runner exits after the child exits during startup");
+		const final = readHost(root, "v1");
+		assert.ok(final, `host record survives the runner; observed ${trace}`);
+		assert.equal(final.state, "exited", `child_exit is not a FAILED_REASONS entry; observed ${trace}`);
+		assert.equal(final.exitCode, 1);
+		assert.equal(final.childPid, null, "a terminal record records no live child");
+		assert.equal(final.readyAt, null, "a terminal record records no readyAt");
+		assert.ok(final.endedAt != null, "terminal record carries endedAt");
+		const firstTerminal = observed.findIndex((s) => s === "exited" || s === "failed");
+		assert.ok(
+			firstTerminal === -1 || !observed.slice(firstTerminal + 1).includes("alive"),
+			`no alive publish after the terminal state; observed ${trace}`,
+		);
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- new-protocol starting protocol + input ack + revoke (issue #70 Task 8) ----
+
+/** Collect parsed JSONL messages from a control socket into an array. */
+function messageCollector(socket) {
+	const messages = [];
+	let buf = "";
+	socket.on("data", (chunk) => {
+		buf += chunk.toString();
+		const lines = buf.split("\n");
+		buf = lines.pop() ?? "";
+		for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+	});
+	return messages;
+}
+
+const waitForMessage = async (messages, predicate, timeoutMs = 5000) => {
+	await waitFor(() => messages.some(predicate), timeoutMs);
+	return messages.find(predicate);
+};
+
+test("input before child ready gets host_starting; after ready gets input_ack; duplicate requestId is deduped", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socket;
+	let socketPath;
+	try {
+		({ runner, socketPath } = await launchOwnedRunner(root, "v1", "i1", {
+			config: { env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", AGENT_BOARD_TEST_SPAWN_DELAY_MS: "800" } },
+		}));
+		// The spawn delay creates a real starting window: endpoint bound, identity
+		// published, child still null, host.json still `starting`.
+		await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "starting" && h?.runnerPid === runner.pid && existsSync(socketPath) ? h : false;
+		});
+		socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		const messages = messageCollector(socket);
+
+		// 1) Service input during the starting window: error with the requestId echoed.
+		send(socket, { type: "input", requestId: "r1", data: "never-echoed" });
+		const starting = await waitForMessage(messages, (m) => m.type === "error" && m.code === "host_starting");
+		assert.equal(starting.requestId, "r1");
+
+		// 2) Wait for ready, then the same requestId delivers and acks.
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		send(socket, { type: "input", requestId: "r1", data: "dedup-me\r" });
+		const ack1 = await waitForMessage(messages, (m) => m.type === "input_ack" && m.requestId === "r1");
+		assert.ok(ack1, "first delivery acks");
+
+		// 3) Duplicate requestId: ack again, but the child must NOT receive a second write.
+		send(socket, { type: "input", requestId: "r1", data: "dedup-me\r" });
+		const acks = await waitFor(() => messages.filter((m) => m.type === "input_ack" && m.requestId === "r1").length >= 2);
+		assert.ok(acks, "duplicate requestId re-acks");
+		await waitForMessage(messages, (m) => m.type === "output" && m.data?.includes("echo:dedup-me"));
+		const echoCount = messages
+			.filter((m) => m.type === "output")
+			.map((m) => String(m.data))
+			.join("")
+			.split("echo:dedup-me").length - 1;
+		assert.equal(echoCount, 1, `child must receive the data exactly once (got ${echoCount} child echoes; bare pty line-discipline echo excluded)`);
+		assert.equal(
+			messages.filter((m) => m.type === "output").some((m) => String(m.data).includes("never-echoed")),
+			false,
+			"starting-window input must never reach the child",
+		);
+
+		// 4) Interactive keys (no requestId) still pass through after ready.
+		send(socket, { type: "input", data: "exit\r" });
+		assert.equal(await waitForExit(runner, 5000), true, "runner exits after child exit");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+	} finally {
+		try { socket?.destroy(); } catch {}
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("revoke via host.json stopRequestedAt triggers controlled shutdown", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socketPath;
+	try {
+		({ runner, socketPath } = await launchOwnedRunner(root, "v1", "i1"));
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		const revoked = updateOwnedHost(root, "v1", "i1", (cur) => ({
+			...cur,
+			state: "stopping",
+			stopRequestedAt: Date.now(),
+			revokeToken: "t-test",
+		}));
+		assert.equal(revoked.updated, true, "revoke write must be owner-fenced-in");
+		// Heartbeat ticks every 1s; revoke must land well inside 2.5s.
+		assert.equal(await waitForExit(runner, 2500), true, "runner exits after revoke");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		const final = readHost(root, "v1");
+		assert.equal(final.state, "exited");
+		assert.equal(final.stopReason, "revoked");
+		assert.ok(!isAlive(childPid), "revoke must take the child down");
+		await waitFor(() => !existsSync(socketPath), 2500);
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("revoke survives a concurrent client socket close (live-record merge)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socket;
+	try {
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i1");
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		// Attach a client, then revoke and destroy the client immediately: the
+		// socket-close handler must MERGE into the live record, not re-spread a
+		// pre-revoke snapshot that erases stopRequestedAt (final review finding 2).
+		socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await new Promise((resolve) => socket.once("data", resolve));
+		const revoked = updateOwnedHost(root, "v1", "i1", (cur) => ({
+			...cur,
+			state: "stopping",
+			stopRequestedAt: Date.now(),
+			revokeToken: "t-close",
+		}));
+		assert.equal(revoked.updated, true);
+		socket.destroy();
+		assert.equal(await waitForExit(runner, 3000), true, "revoke must not be clobbered by the close handler");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		const final = readHost(root, "v1");
+		assert.equal(final.state, "exited");
+		assert.equal(final.stopReason, "revoked");
+		// Terminal contract (spec §10.2) clears stopRequestedAt while keeping
+		// stopReason; the discriminating signal is that the revoke was NOT
+		// clobbered by the close handler (a stale spread would erase it before
+		// the heartbeat tick, leaving the runner alive past the exit window).
+		assert.equal(final.stopRequestedAt, null);
+		assert.ok(!isAlive(childPid));
+	} finally {
+		try { socket?.destroy(); } catch {}
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("resize before child ready is cached and applied when ready is published", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socket;
+	let socketPath;
+	try {
+		({ runner, socketPath } = await launchOwnedRunner(root, "v1", "i1", {
+			config: {
+				piArgsPrefix: [resolve("test-support/fake-slow-start-pi.mjs")],
+				env: { AGENT_BOARD_TEST_SPAWN_DELAY_MS: "800" },
+			},
+		}));
+		await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "starting" && h?.runnerPid === runner.pid && existsSync(socketPath) ? h : false;
+		});
+		socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		const messages = messageCollector(socket);
+
+		// Resize lands while the child does not exist yet.
+		send(socket, { type: "resize", cols: 100, rows: 30 });
+		await waitFor(() => readHost(root, "v1")?.cols === 100);
+
+		// Once ready, the cached resize is applied to the child: the fixture
+		// reports its pty size on SIGWINCH.
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		const size = await waitForMessage(messages, (m) => m.type === "output" && m.data?.includes("size:"), 8000);
+		assert.match(String(size.data), /size:100x30/, "cached resize applied to the child at ready");
+
+		// Child still fully functional after the apply.
+		send(socket, { type: "input", data: "still-alive\r" });
+		await waitForMessage(messages, (m) => m.type === "output" && m.data?.includes("echo:still-alive"));
+		send(socket, { type: "input", data: "exit\r" });
+		assert.equal(await waitForExit(runner, 5000), true);
+	} finally {
+		try { socket?.destroy(); } catch {}
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("heartbeat survives host-meta lock contention from a foreign process (CR r1 f1)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socket;
+	try {
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i1");
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		// Hold the host-meta lease from THIS (foreign-to-the-runner) process across
+		// several heartbeat ticks: the runner's ownedUpdate reads pure lock
+		// contention ({updated:false, ownerChanged:false}) and must retry next
+		// tick — never tear down the live session as "owner_lost".
+		// Acquiring the lease must tolerate transient contention from the
+		// runner's periodic heartbeat writes (busy → retry; 2s bound).
+		let lock = null;
+		const leaseDeadline = Date.now() + 2000;
+		for (;;) {
+			const attempt = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: { pid: process.pid, startToken: "tester" } });
+			if (attempt.acquired) { lock = attempt; break; }
+			if (Date.now() >= leaseDeadline) break;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		assert.ok(lock, "test must hold the host-meta lease");
+		await new Promise((resolve) => setTimeout(resolve, 2300)); // > 2 heartbeat ticks
+		assert.ok(isAlive(runner.pid ?? -1), "runner must survive lease contention");
+		assert.ok(isAlive(childPid), "child must survive lease contention");
+		assert.equal(readHost(root, "v1")?.state, "alive", "no terminal write during contention");
+		lock.lease.release();
+		// Contention over: heartbeat resumes bumping lastSeenAt, and the session
+		// still serves clients end-to-end.
+		await waitFor(() => (readHost(root, "v1")?.lastSeenAt ?? 0) > host.lastSeenAt, 4000);
+		socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		send(socket, { type: "input", data: "exit\r" });
+		assert.equal(await waitForExit(runner, 5000), true, "runner still healthy after contention");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		socket.destroy();
+	} finally {
+		try { socket?.destroy(); } catch {}
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("probe connections leave host.json untouched; real clients flip attachedEver (CR r1 f3)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i1");
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		// The resolver's probe pattern: connect, probe hello, destroy. Repeat.
+		for (let i = 0; i < 5; i++) {
+			const probe = createConnection(socketPath);
+			probe.on("error", () => {});
+			await once(probe, "connect");
+			probe.write(JSON.stringify({ type: "hello", clientId: "probe", wantOutput: false }) + "\n");
+			await new Promise((resolve) => probe.once("data", resolve));
+			probe.destroy();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+		}
+		const afterProbes = readHost(root, "v1");
+		assert.notEqual(afterProbes.attachedEver, true, "probes must never mark the host attached");
+		// A real UI client (hello with a non-probe clientId) flips attachedEver.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test", wantOutput: true }) + "\n");
+		const afterClient = await waitFor(() => (readHost(root, "v1")?.attachedEver === true ? readHost(root, "v1") : false), 2000);
+		assert.equal(afterClient.attachedEver, true, "a real client still records attachedEver");
+		client.destroy();
+		// Cleanup: exit the child naturally so teardown stays on the tested path.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("owned runner: a connected probe never inflates attachedClients (issue #130)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i130");
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		const revBefore = readHost(root, "v1").revision;
+
+		// A probe that STAYS connected. The owned path suppresses the probe's
+		// close-time write on purpose (the resolver probes every 150ms), so the
+		// count has to be right at hello time — waiting for close is not enough.
+		const probe = createConnection(socketPath);
+		probe.on("error", () => {});
+		await once(probe, "connect");
+		const probeMessages = [];
+		let probeBuf = "";
+		probe.on("data", (chunk) => {
+			probeBuf += chunk.toString();
+			const lines = probeBuf.split("\n");
+			probeBuf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) probeMessages.push(JSON.parse(line));
+		});
+		probe.write(JSON.stringify({ type: "hello", clientId: "probe", wantOutput: false }) + "\n");
+		// Two hellos = the unsolicited one sent on connect + the reply to ours,
+		// which is sent AFTER classification ran — so the count is settled here.
+		await waitFor(() => probeMessages.filter((m) => m.type === "hello").length >= 2, 5000);
+
+		// A2: cross at least one heartbeat write while the probe stays connected.
+		// That is exactly the write that used to persist attachedClients=1 and
+		// then keep it wrong for a full heartbeat period (measured: ~975ms).
+		const afterHeartbeat = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.revision > revBefore ? h : false;
+		}, 5000);
+		assert.equal(afterHeartbeat.attachedClients, 0, "a connected probe must not be counted as attached");
+		assert.notEqual(afterHeartbeat.attachedEver, true, "a probe must never mark the host attached");
+
+		// A4: a real client alongside the probe must count exactly 1 — a probe
+		// still sitting in `clients` would make this 2.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test" }) + "\n");
+		const counted = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 1 ? h : false;
+		}, 3000);
+		assert.equal(counted.attachedClients, 1, "exactly one attached client — a counted probe would make this 2");
+		assert.equal(counted.attachedEver, true, "a real client still flips attachedEver");
+		client.destroy();
+		const released = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 ? h : false;
+		}, 3000);
+		assert.equal(released.attachedClients, 0, "probe-only host must read as detached for warm-host reclaim");
+
+		// A5: the probe's own close is write-suppressed on this path, so the
+		// record must already be 0 and stay 0 across the next heartbeat.
+		const revAfterClient = readHost(root, "v1").revision;
+		probe.destroy();
+		const settled = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.revision > revAfterClient ? h : false;
+		}, 5000);
+		assert.equal(settled.attachedClients, 0, "the record must stay at 0 once the probe is gone");
+
+		// A6: the real resolver probe still classifies this host as ready, and
+		// leaves no residue behind.
+		const probeResult = await probeHost(socketPath, { expectedViewId: "v1", expectedInstanceId: "i130" });
+		assert.equal(probeResult.classification, "ready", "the real resolver probe must still classify the host ready");
+		assert.equal(readHost(root, "v1").attachedClients, 0, "the real resolver probe must leave attachedClients at 0");
+		assert.equal(readHost(root, "v1").attachedEver, true, "probeHost must not disturb the record's attachment history");
+
+		// Cleanup stays on the tested path: natural child exit.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("editor reporter connections leave attachedClients/attachedEver untouched (issue #103)", async () => {
+	const root = freshRoot();
+	const envCapture = join(root, "child-env.txt");
+	let runner;
+	let childPid;
+	try {
+		// NOTE: launchOwnedRunner spreads opts.config over its defaults, and the default
+		// env is `{ AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" }` — pass the whole env object,
+		// or the pipe fallback disappears on Windows.
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i103", {
+			config: { env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_ENV_CAPTURE_PATH: envCapture } },
+		});
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+
+		// The runner must hand the child the endpoint it actually bound (#103 §B).
+		const injected = await waitFor(() => {
+			try {
+				return readFileSync(envCapture, "utf8").trim() || false;
+			} catch {
+				return false;
+			}
+		}, 5000);
+		assert.equal(injected, socketPath, "the child env must carry the per-instance control endpoint");
+
+		// Resident reporter: identity hello, then editor_state keeps flowing.
+		const reporter = createConnection(socketPath);
+		reporter.on("error", () => {});
+		await once(reporter, "connect");
+		const reporterMessages = [];
+		let buf = "";
+		reporter.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) reporterMessages.push(JSON.parse(line));
+		});
+		reporter.write(JSON.stringify({ type: "hello", clientId: "editor-reporter" }) + "\n");
+		await waitFor(() => reporterMessages.find((m) => m.type === "hello"));
+		reporter.write(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
+
+		// A real UI client still counts, and detaching it releases the host even
+		// though the reporter stays connected (the warm-host reclaim guard). The
+		// `counted === 1` read is the direct proof that the reporter's hello was
+		// classified out of `clients`: had it stayed counted, this would read 2.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test" }) + "\n");
+		const counted = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 1 ? h : false;
+		}, 3000);
+		assert.equal(counted.attachedClients, 1, "exactly one attached client — a resident reporter still sitting in `clients` would make this 2");
+		client.destroy();
+		const released = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 ? h : false;
+		}, 3000);
+		assert.equal(released.attachedClients, 0, "reporter-only host must read as detached for warm-host reclaim");
+		reporter.destroy();
+
+		// Cleanup stays on the tested path: natural child exit.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- child-exit error attribution (issue #90) ----
+
+test("legacy runner keeps the editor reporter and probes out of attachedClients/attachedEver (issue #103)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		// Legacy host: host-config WITHOUT `instanceId` — `main()` dispatches
+		// `legacyMain()`, which binds the stable `control.sock` endpoint and has
+		// its own (older) accounting path. This is the same warm-host-leak fix
+		// as the owned path (spec §C), so the legacy half needs its own proof.
+		const meta = createView(root, { id: "v1", name: "legacy-reporter", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+		childPid = readHost(root, "v1")?.childPid ?? null;
+		const socketPath = P.controlSocketPath(root, "v1");
+
+		// (1) A resident editor reporter must not count as attached and must not
+		// flip attachedEver. The runner sends an unsolicited hello on connect;
+		// the SECOND hello is the reply to our explicit reporter hello, which is
+		// sent only after classification + update() ran.
+		const reporter = createConnection(socketPath);
+		reporter.on("error", () => {});
+		await once(reporter, "connect");
+		const reporterMessages = [];
+		let rbuf = "";
+		reporter.on("data", (chunk) => {
+			rbuf += chunk.toString();
+			const lines = rbuf.split("\n");
+			rbuf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) reporterMessages.push(JSON.parse(line));
+		});
+		reporter.write(JSON.stringify({ type: "hello", clientId: "editor-reporter" }) + "\n");
+		await waitFor(() => reporterMessages.filter((m) => m.type === "hello").length >= 2);
+		const afterReporter = readHost(root, "v1");
+		assert.equal(afterReporter.attachedClients, 0, "a resident reporter must not count as attached");
+		assert.notEqual(afterReporter.attachedEver, true, "a resident reporter must not flip attachedEver");
+		reporter.write(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
+
+		// (4) A probe hello must never mark the host attached on the legacy path.
+		// Run it before any real client so attachedEver is still false here.
+		const probe = createConnection(socketPath);
+		probe.on("error", () => {});
+		await once(probe, "connect");
+		probe.write(JSON.stringify({ type: "hello", clientId: "probe", wantOutput: false }) + "\n");
+		await new Promise((resolve) => probe.once("data", resolve));
+		probe.destroy();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		const afterProbe = readHost(root, "v1");
+		assert.notEqual(afterProbe.attachedEver, true, "a probe must never mark the host attached on the legacy path");
+
+		// (2) A real UI client still counts exactly one — if the reporter were
+		// still sitting in `clients`, this would read 2.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test" }) + "\n");
+		const counted = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 1 ? h : false;
+		}, 3000);
+		assert.equal(counted.attachedClients, 1, "exactly one attached client — a resident reporter still in `clients` would make this 2");
+		assert.equal(counted.attachedEver, true, "a real client flips attachedEver on the legacy path too");
+
+		// (3) Detaching the real client releases the host even though the
+		// reporter stays connected (the warm-host reclaim guard).
+		client.destroy();
+		const released = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 ? h : false;
+		}, 3000);
+		assert.equal(released.attachedClients, 0, "reporter-only host must read as detached for warm-host reclaim");
+		reporter.destroy();
+
+		// Cleanup stays on the tested path: natural child exit.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		await stopRunner(runner);
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("legacy runner: a connected probe never inflates attachedClients (issue #130)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		// Legacy host: host-config WITHOUT `instanceId`, so `main()` dispatches
+		// `legacyMain()` and binds the stable control.sock endpoint.
+		const meta = createView(root, { id: "v1", name: "legacy-probe-count", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+		childPid = readHost(root, "v1")?.childPid ?? null;
+		const socketPath = P.controlSocketPath(root, "v1");
+		const revBefore = readHost(root, "v1").revision;
+
+		// A probe that STAYS connected: the resolver's real pattern is
+		// connect → probe hello → destroy, but the count must already be clean
+		// after the hello — before the close is observed.
+		const probe = createConnection(socketPath);
+		probe.on("error", () => {});
+		await once(probe, "connect");
+		const probeMessages = [];
+		let probeBuf = "";
+		probe.on("data", (chunk) => {
+			probeBuf += chunk.toString();
+			const lines = probeBuf.split("\n");
+			probeBuf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) probeMessages.push(JSON.parse(line));
+		});
+		probe.write(JSON.stringify({ type: "hello", clientId: "probe", wantOutput: false }) + "\n");
+		// Two hellos = the unsolicited one sent on connect + the reply to ours,
+		// which is sent AFTER classification ran — so the count is settled here.
+		await waitFor(() => probeMessages.filter((m) => m.type === "hello").length >= 2, 5000);
+
+		// A5/A3: cross at least one heartbeat write while the probe stays
+		// connected. That is exactly the write that used to persist 1.
+		const afterHeartbeat = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.revision > revBefore ? h : false;
+		}, 5000);
+		assert.equal(afterHeartbeat.attachedClients, 0, "a connected probe must not be counted as attached");
+		assert.notEqual(afterHeartbeat.attachedEver, true, "a probe must never mark the host attached");
+
+		// A4: a real client alongside the probe must count exactly 1 — a probe
+		// still sitting in `clients` would make this 2.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test" }) + "\n");
+		const counted = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 1 ? h : false;
+		}, 3000);
+		assert.equal(counted.attachedClients, 1, "exactly one attached client — a counted probe would make this 2");
+		assert.equal(counted.attachedEver, true, "a real client still flips attachedEver");
+		client.destroy();
+		const released = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 ? h : false;
+		}, 3000);
+		assert.equal(released.attachedClients, 0, "probe-only host must read as detached for warm-host reclaim");
+
+		// A5 again, driven by the probe's own close: the persisted record must
+		// still read 0 after the probe goes away and a heartbeat lands.
+		const revAfterClient = readHost(root, "v1").revision;
+		probe.destroy();
+		const settled = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.revision > revAfterClient ? h : false;
+		}, 5000);
+		assert.equal(settled.attachedClients, 0, "the record must stay at 0 once the probe is gone");
+
+		// A6: the real resolver probe still classifies this legacy host as ready
+		// (no expectedInstanceId → the legacy ready fallback).
+		const probeResult = await probeHost(socketPath, { expectedViewId: "v1", expectedInstanceId: null });
+		assert.equal(probeResult.classification, "ready", "the real resolver probe must still classify the host ready");
+		assert.equal(readHost(root, "v1").attachedClients, 0, "the real resolver probe must leave attachedClients at 0");
+
+		// Cleanup stays on the tested path: natural child exit.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		await stopRunner(runner);
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- child-exit error attribution (issue #90) ----
+
+test("owned runner attributes an abnormal child exit's last visible line into host.json error", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i90", {
+			config: { piArgsPrefix: [resolve("test-support/fake-failing-pty-pi.mjs")] },
+		}));
+		assert.equal(await waitForExit(runner, 8000), true, "runner exits after the failing child");
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.endedAt != null ? h : false;
+		});
+		assert.equal(host.state, "exited", "child_exit is not a FAILED_REASONS entry");
+		assert.equal(host.exitCode, 1);
+		assert.match(host.error, /Model "glm\/glm-5\.3" not found/);
+		assert.ok(!host.error.includes("\x1b"), "the attributed line must be stripped of escape sequences");
+		assert.ok(!host.error.includes("starting model check"), "the CR overwrite must resolve to the last segment");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("owned runner leaves error untouched on a clean child exit", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i90", {
+			config: {
+				piArgsPrefix: [resolve("test-support/fake-failing-pty-pi.mjs")],
+				env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_EXIT_CODE: "0" },
+			},
+		}));
+		assert.equal(await waitForExit(runner, 8000), true, "runner exits after the clean child");
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.endedAt != null ? h : false;
+		});
+		assert.equal(host.state, "exited");
+		assert.equal(host.exitCode, 0);
+		assert.equal(host.error ?? null, null, "a zero exit must not capture a screen.log line");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- host spawn failure → fenced host_run_failed (issue #91, Phase-2b Task 5) ----
+
+/** Spawn a copy of the runner from a package-less shadow dir so its top-level
+ *  `import("node-pty")` fails deterministically (no node_modules ancestor),
+ *  making spawnInteractive throw "node-pty is unavailable" before any child
+ *  starts — the markRowFailed trigger — when pipe fallback is disabled. */
+function launchShadowRunner(root, viewId, instanceId) {
+	const shadowRunnerDir = join(root, "shadow", "runner");
+	mkdirSync(shadowRunnerDir, { recursive: true });
+	symlinkSync(resolve("src"), join(root, "shadow", "src"), "dir");
+	copyFileSync(resolve("runner/pty-runner.mjs"), join(shadowRunnerDir, "pty-runner.mjs"));
+	copyFileSync(resolve("runner/pty-runner-legacy.mjs"), join(shadowRunnerDir, "pty-runner-legacy.mjs"));
+	// The view must already exist (caller creates + seeds it). createView here
+	// would bootstrap a fresh state.json and clobber the seeded row.
+	const meta = readMeta(root, viewId);
+	if (!meta) throw new Error(`view ${viewId} must exist before launchShadowRunner`);
+	const configPath = P.hostConfigPathFor(root, viewId, instanceId);
+	const socketPath = P.hostEndpointPathFor(process.platform, root, viewId, instanceId);
+	atomicWriteJson(configPath, {
+		root,
+		viewId,
+		instanceId,
+		configPath,
+		socketPath,
+		sessionFile: meta.sessionFile,
+		cwd: process.cwd(),
+		initialPrompt: null,
+		piCommand: process.execPath,
+		piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+		model: null,
+		tools: null,
+		env: {},
+		cols: 80,
+		rows: 24,
+	});
+	const claim = claimHost(root, {
+		viewId,
+		instanceId,
+		configPath,
+		socketPath,
+		claimAt: Date.now(),
+		claimPid: process.pid,
+		claimIdentity: { pid: process.pid, startToken: null },
+	});
+	if (!claim.claimed) throw new Error(`claimHost refused: ${JSON.stringify(claim)}`);
+	const runner = spawn(process.execPath, [join(shadowRunnerDir, "pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+	return { runner };
+}
+
+/** Idle, run-tracked row that is NOT a manual completion (autoState present). */
+function idleRowState(viewId) {
+	return {
+		version: 1,
+		viewId,
+		currentRunId: "r1",
+		semanticState: "idle",
+		processState: "exited",
+		summary: "Idle",
+		lastActivityAt: 1000,
+		updatedAt: 1000,
+		needsInput: false,
+		hasError: false,
+		latestAssistantPreview: "",
+		latestTool: null,
+		question: null,
+		pendingQuestions: [],
+		error: null,
+		autoState: { source: "heuristic" },
+		materializedRevision: 1,
+	};
+}
+
+test("host spawn failure keeps a manually completed row (fenced host_run_failed, PR #1 residual #2)", async () => {
+	const root = freshRoot();
+	// Seed BEFORE the coordinator boots so its revision counter scan and the
+	// manual_fence decision see the seeded row (createView-then-seed order).
+	createView(root, { id: "v1", name: "fence", cwd: process.cwd() });
+	const manualAt = Date.now();
+	writeState(root, {
+		version: 1, viewId: "v1", currentRunId: "r1", semanticState: "completed", processState: "exited",
+		summary: "Done by hand", lastActivityAt: manualAt, updatedAt: manualAt, needsInput: false, hasError: false,
+		latestAssistantPreview: "", latestTool: null, question: null, pendingQuestions: [], error: null,
+		autoState: null, materializedRevision: 2,
+	});
+	const coord = await startCoordinator(root);
+	try {
+		const { runner } = launchShadowRunner(root, "v1", "ifence");
+		assert.equal(await waitForExit(runner, 10000), true, "runner exits after spawn failure");
+		try {
+			await waitFor(() => readDiagnostics(root, "v1").some((d) => d.code === "host_run_failed_skipped"));
+		} catch (err) {
+			throw new Error(`skipped-diagnostic wait failed; diagnostics=${JSON.stringify(readDiagnostics(root, "v1"))} state=${JSON.stringify(readState(root, "v1"))} journal=${JSON.stringify(readJournal(root))}`, { cause: err });
+		}
+		const skipped = readDiagnostics(root, "v1").find((d) => d.code === "host_run_failed_skipped");
+		assert.equal(skipped.details?.reason, "manual_fence", "the coordinator must fence the late host failure");
+		const state = readState(root, "v1");
+		assert.equal(state.semanticState, "completed", "manual completion must survive a late host crash");
+		assert.equal(state.autoState ?? null, null, "the manual fence signal must stay intact");
+		const rejectedRecord = readJournal(root).find((e) => e?.command?.kind === "host_run_failed");
+		assert.ok(rejectedRecord, "the rejected command must be journaled (durable rejection)");
+		assert.equal(rejectedRecord.result?.status, "rejected", "the journal record must carry the rejection");
+		assert.equal(rejectedRecord.result?.reason, "manual_fence", "the journal record must carry the manual_fence reason");
+	} finally {
+		await coord.kill();
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("host spawn failure marks a non-fenced row failed through host_run_failed", async () => {
+	const root = freshRoot();
+	createView(root, { id: "v1", name: "fail", cwd: process.cwd() });
+	writeState(root, idleRowState("v1"));
+	const coord = await startCoordinator(root);
+	try {
+		const { runner } = launchShadowRunner(root, "v1", "ifail");
+		assert.equal(await waitForExit(runner, 10000), true, "runner exits after spawn failure");
+		const state = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s.semanticState === "failed" ? s : false;
+		});
+		assert.equal(state.processState, "exited");
+		assert.match(state.error ?? "", /PTY host failed/);
+		assert.equal(state.hasError, true, "host_run_failed stamps hasError (F4 legacy parity)");
+		assert.equal(state.needsInput, false, "host_run_failed stamps needsInput (F4 legacy parity)");
+		assert.match(state.summary ?? "", /PTY host failed/, "summary carries the message like legacy markRowFailedDirect (F4)");
+		assert.ok(state.lastActivityAt > 1000, "host_run_failed stamps lastActivityAt (F5b legacy parity)");
+		assert.equal(state.materializedRevision, 2, "applied command bumps the materialized revision");
+		const record = readJournal(root).find((e) => e?.command?.kind === "host_run_failed");
+		assert.ok(record, "applied command must be journaled");
+		assert.equal(record.command.runId, "r1", "the runner sources the runId from the row so stale_run stays effective");
+		assert.equal(record.command.source, "pty-runner");
+		assert.ok(!readDiagnostics(root, "v1").some((d) => d.code === "host_run_failed_ambiguous"), "applied commands are not ambiguous");
+	} finally {
+		await coord.kill();
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("subscribe_terminal: snapshot + live continuity alongside legacy clients", async () => {
+	const root = freshRoot();
+	let runner;
+	// issue #95: this test's waits have historically flaked, so a timeout now
+	// carries a snapshot of the durable state at the moment of failure.
+	const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+	try {
+		const meta = createView(root, { id: "v1", name: "term", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"), 15000, capture);
+
+		/** @type {(socket: import("node:net").Socket) => { messages: any[] }} */
+		const listen = (socket) => {
+			let buf = "";
+			const messages = [];
+			socket.on("data", (chunk) => {
+				buf += chunk.toString();
+				const lines = buf.split("\n");
+				buf = lines.pop() ?? "";
+				for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+			});
+			return { messages };
+		};
+
+		// Legacy client: plain hello + input, no subscribe (compat pin: its
+		// output messages keep carrying `data` after the seq field landed).
+		const legacy = createConnection(P.controlSocketPath(root, "v1"));
+		await once(legacy, "connect");
+		const legacyMessages = listen(legacy).messages;
+		send(legacy, { type: "hello" });
+		// accept-registration race (issue #178): the one-shot boot banner is
+		// broadcast when the child starts, which can be *before* this socket is
+		// accepted — and legacy output has no replay, so waiting for it can burn
+		// the whole budget. Probe with an echo instead — but match only the fake
+		// pty's APPLICATION echo (the "echo:" prefix). Until the child calls
+		// setRawMode the PTY line discipline is still in canonical mode with ECHO
+		// on, so the kernel echoes each probe line too, and the runner broadcasts
+		// that kernel echo before the child has written its banner — converging on
+		// it was the Node 22 merge-blocking flake. Only the application echo
+		// proves the banner was already written (the fake pty registers its stdin
+		// echo handler after the module-top banner write), and so that the runner
+		// has fed its canonical model — which is what keeps the subscribe below
+		// off the "host starting" empty-baseline race.
+		const probe = createEchoProbe({ send: (line) => send(legacy, { type: "input", data: line }) });
+		probe.start();
+		try {
+			await waitFor(() => legacyMessages.find((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))), 15000, capture);
+		} finally {
+			probe.stop();
+		}
+
+		// Snapshot subscriber on a second socket.
+		const sub = createConnection(P.controlSocketPath(root, "v1"));
+		await once(sub, "connect");
+		const subMessages = listen(sub).messages;
+		send(sub, { type: "subscribe_terminal" });
+
+		await waitFor(() => subMessages.find((m) => m.type === "snapshot_end"), 15000, capture);
+		const begin = subMessages.find((m) => m.type === "snapshot_begin");
+		const frame = subMessages.find((m) => m.type === "snapshot_frame");
+		const end = subMessages.find((m) => m.type === "snapshot_end");
+		assert.equal(begin.frameVersion, 1, "snapshot_begin carries the wire frame version");
+		assert.ok(begin.snapshotSeq >= 1, "baseline output (fake pi ready) is inside the snapshot");
+		assert.ok(typeof frame.data === "string" && frame.data.includes("fake pi ready"), "frame renders the canonical viewport");
+		assert.equal(frame.frameVersion, 1);
+		assert.equal(end.nextSeq, begin.snapshotSeq + 1, "live continues exactly after the snapshot cursor");
+
+		// New output: both clients receive it; the subscriber gets gap-free seq.
+		send(legacy, { type: "input", data: "ping\r" });
+		await waitFor(() => legacyMessages.find((m) => m.type === "output" && String(m.data).includes("echo:ping")), 15000, capture);
+		const subOutputs = subMessages.filter((m) => m.type === "output");
+		assert.ok(subOutputs.length >= 1, "subscriber receives the live chunk");
+		const subSeqs = subOutputs.map((m) => m.seq);
+		assert.deepEqual(
+			subSeqs,
+			subSeqs.map((_, i) => begin.snapshotSeq + 1 + i),
+			"subscriber seq is contiguous starting at nextSeq",
+		);
+		for (const m of legacyMessages.filter((m) => m.type === "output")) {
+			assert.equal(typeof m.data, "string", "legacy output keeps the data field (additive seq)");
+			assert.equal(typeof m.seq, "number", "legacy output gains the additive seq");
+		}
+
+		// frameVersion mismatch is rejected at the runner boundary.
+		const sub2 = createConnection(P.controlSocketPath(root, "v1"));
+		await once(sub2, "connect");
+		const sub2Messages = listen(sub2).messages;
+		send(sub2, { type: "subscribe_terminal", frameVersion: 99 });
+		await waitFor(() => sub2Messages.find((m) => m.type === "error"), 15000, capture);
+		assert.equal(sub2Messages.find((m) => m.type === "error").code, "frame_version_mismatch");
+
+		legacy.end();
+		sub.end();
+		sub2.end();
+	} finally {
+		try { runner?.kill("SIGTERM"); } catch {}
+		await waitForExit(runner, 5000);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// issue #178 spec D4: the reproduction case for the accept-registration race.
+// Load-independent by construction — every leg is event-driven, never a wall
+// clock: poll screen.log until the banner has been broadcast, connect only
+// then, and prove liveness with an echo before asserting the banner never
+// arrived. This pins the design fact "legacy output has no replay"; do not
+// "fix" it by waiting for the banner again.
+test("accept-registration race: a legacy client that connects late never receives the already-broadcast banner", async () => {
+	const root = freshRoot();
+	let runner;
+	// Same postmortem wiring as the file's other issue-178 case: a red must
+	// arrive with a scene, not just "timed out waiting" — screenLogTail answers
+	// whether the banner was ever written to disk.
+	const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+	try {
+		const meta = createView(root, { id: "v1", name: "late-join", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+
+		// Leg 0: the runner spawns the child before it binds the control socket
+		// (runner/pty-runner.mjs:312 vs :407), so gate on hostReady first —
+		// host.state becomes "alive" in the listen callback, i.e. the socket is
+		// bound. Connecting earlier would fail with ENOENT.
+		await waitFor(() => hostReady(root, "v1"), 15000, capture);
+
+		// Leg 1: the banner is already out. screen.log is written from the same
+		// onData path that feeds the canonical model (runner/pty-runner.mjs:333),
+		// so once it contains the banner the broadcast has happened — with no
+		// subscriber and no client attached.
+		await waitFor(() => {
+			try {
+				return readFileSync(P.screenLogPath(root, "v1"), "utf8").includes("fake pi ready");
+			} catch {
+				return false;
+			}
+		}, 15000, capture);
+
+		// Leg 2: only now connect a legacy client. No reply carries the banner.
+		const late = createConnection(P.controlSocketPath(root, "v1"));
+		await once(late, "connect");
+		let buf = "";
+		/** @type {any[]} */
+		const lateMessages = [];
+		late.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) lateMessages.push(JSON.parse(line));
+		});
+		send(late, { type: "hello" });
+
+		// Leg 3: probe until the echo arrives — proof the connection is live and
+		// output is flowing right now. Match the application echo ("echo:"
+		// prefix): until the child calls setRawMode the PTY kernel also echoes
+		// probe lines in canonical mode, and that early echo proves nothing about
+		// the banner. The probe stops on convergence, so it adds
+		// no load for the rest of the case.
+		const probe = createEchoProbe({ send: (line) => send(late, { type: "input", data: line }) });
+		probe.start();
+		try {
+			await waitFor(() => lateMessages.find((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))), 15000, capture);
+		} finally {
+			probe.stop();
+		}
+
+		// Leg 4: both halves of the race are pinned. The echo proves output flows
+		// to this socket; the missing banner proves there is no replay.
+		assert.ok(
+			lateMessages.some((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))),
+			"the echo-probe converged: output reaches this connection",
+		);
+		assert.ok(
+			!lateMessages.some((m) => m.type === "output" && String(m.data).includes("fake pi ready")),
+			"legacy clients get no replay: the banner broadcast before accept never arrives",
+		);
+
+		late.end();
+	} finally {
+		try { runner?.kill("SIGTERM"); } catch {}
+		await waitForExit(runner, 5000);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- #257: legacy pty-runner endpoint cleanup ------------------------------------------
+
+/** Boot a legacy runner: a host-config WITHOUT `instanceId` dispatches `legacyMain`, which
+ *  binds the stable `control.sock` endpoint (unlike the per-instance owned path). */
+async function bootLegacyRunner(viewId = "v1") {
+	const root = freshRoot();
+	const meta = createView(root, { id: viewId, name: "legacy-endpoint", cwd: process.cwd() });
+	const configPath = P.hostConfigPath(root, viewId);
+	atomicWriteJson(configPath, {
+		root,
+		viewId,
+		sessionFile: meta.sessionFile,
+		cwd: process.cwd(),
+		initialPrompt: null,
+		piCommand: process.execPath,
+		piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+		model: null,
+		tools: null,
+		env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+		cols: 80,
+		rows: 24,
+	});
+	const runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], {
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	runner.stdout.resume();
+	runner.stderr.resume();
+	await waitFor(() => hostReady(root, viewId));
+	return { root, runner, socketPath: P.controlSocketPath(root, viewId) };
+}
+
+async function stopLegacyRunner(runner, root, viewId = "v1") {
+	try { if (runner.exitCode === null) runner.kill("SIGKILL"); } catch { /* already gone */ }
+	await waitForExit(runner, 2000);
+	reapChild(root, viewId);
+	rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+}
+
+test("#257 A1: a legacy runner cleans up its own endpoint on SIGTERM", async (t) => {
+	if (process.platform === "win32") return t.skip("POSIX AF_UNIX only");
+	const { root, runner, socketPath } = await bootLegacyRunner();
+	try {
+		assert.ok(existsSync(socketPath), "precondition: endpoint exists before SIGTERM");
+		runner.kill("SIGTERM");
+		assert.equal(await waitForExit(runner, 5000), true, "runner exits");
+		assert.equal(runner.exitCode, 0, "clean SIGTERM exit");
+		assert.equal(existsSync(socketPath), false, "normal shutdown removes its own endpoint");
+	} finally {
+		await stopLegacyRunner(runner, root);
+	}
+});
+
+test("#257 A1b: a legacy runner exits cleanly when the endpoint is already gone", async (t) => {
+	if (process.platform === "win32") return t.skip("POSIX AF_UNIX only");
+	const { root, runner, socketPath } = await bootLegacyRunner();
+	try {
+		assert.ok(existsSync(socketPath), "precondition: endpoint exists");
+		unlinkSync(socketPath);
+		runner.kill("SIGTERM");
+		assert.equal(await waitForExit(runner, 5000), true, "runner exits");
+		assert.equal(runner.exitCode, 0, "ENOENT at cleanup must not crash the shutdown");
+	} finally {
+		await stopLegacyRunner(runner, root);
+	}
+});
+
+test("#257 A2: a legacy runner does not unlink a replaced endpoint", async (t) => {
+	if (process.platform === "win32") return t.skip("POSIX AF_UNIX only");
+	const { root, runner, socketPath } = await bootLegacyRunner();
+	const standinPath = join(root, `.standin-${process.pid}.sock`);
+	let standin = null;
+	try {
+		assert.ok(existsSync(socketPath), "precondition: endpoint exists");
+		const before = statSync(socketPath).ino;
+		standin = createServer(() => {});
+		await new Promise((ok, fail) => {
+			standin.once("error", fail);
+			standin.listen(standinPath, ok);
+		});
+		renameSync(standinPath, socketPath); // atomic replacement; same filesystem (inside root)
+		assert.notEqual(statSync(socketPath).ino, before, "stand-in really replaced the inode");
+		runner.kill("SIGTERM");
+		assert.equal(await waitForExit(runner, 5000), true, "runner exits");
+		assert.equal(runner.exitCode, 0, "clean SIGTERM exit");
+		assert.ok(existsSync(socketPath), "a legacy runner must not unlink an endpoint it no longer owns");
+	} finally {
+		if (standin) await new Promise((done) => standin.close(done));
+		await stopLegacyRunner(runner, root);
+	}
+});
