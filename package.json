@@ -1,0 +1,58 @@
+{
+  "name": "@huseynsnmz/pi-web",
+  "version": "0.1.0",
+  "description": "Web search and fetch for Pi, where a separate model with no tools reads every page so the agent never sees it",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "web-search",
+    "web-fetch",
+    "prompt-injection"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huseynsnmz/pi-web.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "test:e2e": "node test/e2e/run.mjs"
+  },
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "linkedom": "0.18.12",
+    "turndown": "7.2.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "26.6.6",
+    "@types/turndown": "5.0.6",
+    "typebox": "1.4.3",
+    "typescript": "7.0.2"
+  }
+}
