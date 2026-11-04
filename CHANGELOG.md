@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixes
+
+- **attach**: a session past about 85 frames opens at once instead of showing Loading for 2.5s, or 5.5s at a new size, and it follows resizes again. It stopped proving its frames when an internal log filled up. Sessions need a restart to pick this up, since the fix runs inside them
+- **attach**: sessions fill screens wider than 300 columns or taller than 120 rows
+- **attach**: a big frame no longer shows `���` and wraps a row when a read ends halfway through a character. Pasted text gets the same fix
+
 ## [0.18.1] - 2026-11-04
 
 ### Fixes

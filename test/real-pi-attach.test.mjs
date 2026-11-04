@@ -30,12 +30,12 @@ export default function (pi) {
 	});
 }`;
 
-async function startModel() {
+async function startModel(content = "OK") {
 	const server = createServer((req, res) => {
 		req.resume();
 		req.on("end", () => {
 			res.writeHead(200, { "content-type": "text/event-stream" });
-			for (const choice of [{ delta: { role: "assistant", content: "OK" } }, { delta: {}, finish_reason: "stop" }]) {
+			for (const choice of [{ delta: { role: "assistant", content } }, { delta: {}, finish_reason: "stop" }]) {
 				res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", created: 0, model: "m", choices: [{ index: 0, ...choice }] })}\n\n`);
 			}
 			res.end("data: [DONE]\n\n");
@@ -45,7 +45,7 @@ async function startModel() {
 	return server;
 }
 
-function startPi(root, port, { shell = false } = {}) {
+function startPi(root, port, { shell = false, cols = 120, rows = 45 } = {}) {
 	const home = join(root, "h");
 	const agent = join(home, ".pi/agent");
 	const project = join(root, "p");
@@ -57,13 +57,13 @@ function startPi(root, port, { shell = false } = {}) {
 	writeFileSync(taker, KEY_TAKER);
 	writeFileSync(join(agent, "models.json"), JSON.stringify({ providers: { mock: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "unused", api: "openai-completions", models: [{ id: "m", name: "Mock", contextWindow: 100000, maxTokens: 1000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
 	writeFileSync(join(agent, "settings.json"), JSON.stringify({ defaultProvider: "mock", defaultModel: "m", defaultThinkingLevel: "off", packages: [REPO], extensions: [taker] }));
-	const term = new Terminal({ cols: 120, rows: 45, allowProposedApi: true });
+	const term = new Terminal({ cols, rows, allowProposedApi: true });
 	// Only a shell with job control can stop and resume what it runs.
 	const [file, args] = shell ? ["/bin/bash", ["--norc", "--noprofile", "-i"]] : [join(REPO, "node_modules/.bin/pi"), []];
 	const child = pty.spawn(file, args, {
 		name: "xterm-256color",
-		cols: 120,
-		rows: 45,
+		cols,
+		rows,
 		cwd: project,
 		env: { PATH: `${join(REPO, "node_modules/.bin")}:${process.env.PATH}`, PS1: "SHELL$ ", BASH_SILENCE_DEPRECATION_WARNING: "1", HOME: home, TERM: "xterm-256color", LANG: "en_US.UTF-8", PI_CODING_AGENT_DIR: agent, PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1", TMPDIR: tmpdir(), AGENT_BOARD_ROOT: board },
 	});
@@ -187,4 +187,66 @@ test("ctrl+z stops only this Pi, from the board and attached, and fg brings the 
 	// The session itself was never stopped, so it still takes what's typed.
 	pi.child.write("typed-after-resume");
 	await pi.waitFor("typed-after-resume");
+});
+
+test("a long-lived session on a very big screen attaches at once, fills the width and keeps its characters", { timeout: 180000 }, async (t) => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rp-")));
+	// Rows of three-byte characters make a frame big enough to cross socket reads.
+	const model = await startModel(Array.from({ length: 40 }, () => "─".repeat(230)).join("\n\n"));
+	const pi = startPi(root, model.address().port, { cols: 240, rows: 60 });
+	t.after(() => {
+		pi.child.kill();
+		model.close();
+		rmSync(pi.taker, { force: true });
+		try {
+			execSync(`pkill -f ${root}`);
+		} catch {
+			/* Nothing left running. */
+		}
+		rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+	});
+	await pi.waitFor("taken:0", 60000);
+	pi.child.write("/agent-board\r");
+	await pi.waitFor("π-board");
+	await sleep(500);
+	pi.child.write("hello");
+	await sleep(300);
+	pi.child.write("\r");
+	await pi.waitFor("hosts:1");
+	await sleep(3000);
+
+	const attach = async () => {
+		const started = Date.now();
+		pi.child.write("\x1b[C");
+		await pi.waitFor("taken:0");
+		return Date.now() - started;
+	};
+	const detach = async () => {
+		pi.child.write("\x1c");
+		await pi.waitFor("π-board");
+		await sleep(500);
+	};
+	await attach();
+	// Each key is a frame, and proofs used to stop for good after about 85 of them.
+	for (let key = 0; key < 100; key++) {
+		pi.child.write("x");
+		await sleep(15);
+	}
+	pi.child.write("\x7f".repeat(100));
+	await sleep(500);
+	await detach();
+
+	assert.ok((await attach()) < 1500, "same size");
+	await sleep(500);
+	assert.doesNotMatch(pi.screen(), /\ufffd/);
+	await detach();
+
+	pi.resize(360, 130);
+	await sleep(500);
+	assert.ok((await attach()) < 1500, "new size");
+	await sleep(500);
+	const lines = pi.screen().split("\n").map((line) => line.trimEnd());
+	assert.equal(lines.findIndex((line) => line.includes("taken:0")) >= 0, true);
+	// The session's own wide rows reach the edge, not just the attach view's rule under them.
+	assert.equal(lines.filter((line) => /^─{20,}$/.test(line)).at(0)?.length, 360);
 });

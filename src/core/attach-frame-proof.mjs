@@ -364,6 +364,8 @@ export class FrameCandidateEvaluator {
 	#pendingRows = null;
 	#candidate = null;
 	#decisions = [];
+	// Every decision ever logged. The log's own length stops growing at its cap, so it can't say which are new.
+	#decisionCount = 0;
 	#markerFailures = 0;
 	#intent = NO_INTENT;
 	#intentRefused = false;
@@ -403,6 +405,11 @@ export class FrameCandidateEvaluator {
 
 	get decisions() {
 		return this.#decisions.slice();
+	}
+
+	#decisionsSince(before) {
+		const added = this.#decisionCount - before;
+		return added === 0 ? [] : this.#decisions.slice(-added);
 	}
 
 	get markerFailures() {
@@ -464,7 +471,7 @@ export class FrameCandidateEvaluator {
 	/** Sampling read of a shared-Terminal size getter. */
 	sizeRead(key, value) {
 		if (this.#stopped || typeof value !== "number") return [];
-		const before = this.#decisions.length;
+		const before = this.#decisionCount;
 		if (key === "columns") this.#pendingCols = value;
 		else if (key === "rows") this.#pendingRows = value;
 		else return [];
@@ -496,20 +503,20 @@ export class FrameCandidateEvaluator {
 		this.#pendingCols = null;
 		this.#pendingRows = null;
 		this.#push({ kind: "candidate", frameId: this.#candidate.frameId, reason: "size-pair-sampled" });
-		return this.#decisions.slice(before);
+		return this.#decisionsSince(before);
 	}
 
 	/** The post-pair sentinel fact. The LATEST fact wins (focus is rechecked later). */
 	sentinel(fact) {
 		if (this.#stopped) return [];
-		const before = this.#decisions.length;
+		const before = this.#decisionCount;
 		if (this.#candidate === null) {
 			this.#push({ kind: "none", frameId: null, reason: "sentinel-without-candidate" });
-			return this.#decisions.slice(before);
+			return this.#decisionsSince(before);
 		}
 		this.#latestSentinel = fact;
 		if (this.#candidate.sentinel === null) this.#candidate.sentinel = fact;
-		return this.#decisions.slice(before);
+		return this.#decisionsSince(before);
 	}
 
 	/**
@@ -519,7 +526,7 @@ export class FrameCandidateEvaluator {
 	 */
 	op(op) {
 		if (this.#stopped) return { decisions: [], insertions: [] };
-		const before = this.#decisions.length;
+		const before = this.#decisionCount;
 		const insertions = [];
 		this.#inOp = true;
 		try {
@@ -527,7 +534,7 @@ export class FrameCandidateEvaluator {
 		} finally {
 			this.#inOp = false;
 		}
-		return { decisions: this.#decisions.slice(before), insertions };
+		return { decisions: this.#decisionsSince(before), insertions };
 	}
 
 	/** Marker accounting hook: never counted as a terminal operation. */
@@ -547,37 +554,37 @@ export class FrameCandidateEvaluator {
 	finishWrite(fact) {
 		const candidate = this.#candidate;
 		if (candidate === null) return [];
-		const before = this.#decisions.length;
+		const before = this.#decisionCount;
 		if (!this.#completed(candidate)) return [];
 		if (fact === null || typeof fact !== "object" || fact.focusPresent !== true) {
 			this.#abortCandidate("focus-missing-at-completion", before);
-			return this.#decisions.slice(before);
+			return this.#decisionsSince(before);
 		}
 		const sFact = candidate.sentinel;
 		if (sFact === null || !Object.is(sFact.focusIdentity, fact.focusIdentity)) {
 			this.#abortCandidate("focus-changed-at-completion", before);
-			return this.#decisions.slice(before);
+			return this.#decisionsSince(before);
 		}
 		if (fact.mode !== this.#mode) {
 			this.#abortCandidate("mode-changed-at-completion", before);
-			return this.#decisions.slice(before);
+			return this.#decisionsSince(before);
 		}
 		if (Boolean(fact.overlayPresent) !== Boolean(sFact.overlayPresent)) {
 			this.#abortCandidate("overlay-changed-at-completion", before);
-			return this.#decisions.slice(before);
+			return this.#decisionsSince(before);
 		}
 		if (candidate.annotationDepth !== 0) {
 			this.#abortCandidate("unclosed-annotation", before);
-			return this.#decisions.slice(before);
+			return this.#decisionsSince(before);
 		}
 		this.#push({ kind: "F", frameId: candidate.frameId, reason: this.#mode === "fullscreen" ? "complete-fullscreen-sync-write-with-cursor" : "regular-open-close-park-and-visibility" });
 		this.#candidate = null;
-		return this.#decisions.slice(before);
+		return this.#decisionsSince(before);
 	}
 
 	fence() {
 		if (this.#stopped) return [];
-		const before = this.#decisions.length;
+		const before = this.#decisionCount;
 		const candidate = this.#candidate;
 		if (candidate === null) {
 			this.#pending = null;
@@ -586,18 +593,18 @@ export class FrameCandidateEvaluator {
 		if (this.#pending !== null) {
 			this.#abortCandidate("pending-escape-abandoned", before);
 			this.#pending = null;
-			return this.#decisions.slice(before);
+			return this.#decisionsSince(before);
 		}
 		if (!candidate.sEmitted) this.#push({ kind: "none", frameId: candidate.frameId, reason: "expired-without-sync-output" });
 		else if (!this.#completed(candidate)) this.#push({ kind: "A", frameId: candidate.frameId, reason: "incomplete-at-fence" });
 		this.#candidate = null;
-		return this.#decisions.slice(before);
+		return this.#decisionsSince(before);
 	}
 
 	abort(reason) {
-		const before = this.#decisions.length;
+		const before = this.#decisionCount;
 		this.#abortCandidate(reason, before);
-		return this.#decisions.slice(before);
+		return this.#decisionsSince(before);
 	}
 
 	stop() {
@@ -623,7 +630,7 @@ export class FrameCandidateEvaluator {
 		};
 	}
 
-	#abortCandidate(reason, before = this.#decisions.length) {
+	#abortCandidate(reason, before = this.#decisionCount) {
 		const candidate = this.#candidate;
 		if (candidate === null) return;
 		if (candidate.sEmitted) this.#push({ kind: "A", frameId: candidate.frameId, reason });
@@ -839,6 +846,7 @@ export class FrameCandidateEvaluator {
 	#push(decision) {
 		const candidate = this.#candidate;
 		const isProof = decision.kind === "S" || decision.kind === "F";
+		this.#decisionCount += 1;
 		this.#decisions.push({
 			kind: decision.kind,
 			frameId: decision.frameId === null || decision.frameId === undefined ? null : decision.frameId,

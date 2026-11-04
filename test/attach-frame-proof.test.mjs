@@ -94,6 +94,19 @@ test("fix1 scanner: tokens are ordered with offsets and exact finals", () => {
 	assert.deepEqual(scanTerminalOps("\u001bP1$r\u001b\\").map((token) => token.kind), ["unknown-control"]);
 });
 
+test("frames keep their proof after the decision log reaches its cap", () => {
+	const e = evaluator("regular");
+	const fact = { ...FACT, mode: "regular" };
+	for (let frame = 0; frame < 300; frame++) {
+		openCandidate(e, { fact });
+		const started = e.op({ kind: "write", text: OPEN }).decisions;
+		e.op({ kind: "write", text: CLOSE });
+		e.op({ kind: "write", text: CUP });
+		const finished = e.op({ kind: "write", text: HIDE }).decisions;
+		assert.deepEqual(kinds([...started, ...finished, ...e.finishWrite(fact)]), ["S", "F"], `frame ${frame}`);
+	}
+});
+
 test("fix1 negative: an erase is never cursor evidence, so a clear-only fullscreen write cannot prove", () => {
 	const e = evaluator("fullscreen");
 	openCandidate(e);

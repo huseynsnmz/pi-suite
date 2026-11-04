@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
+import { StringDecoder } from "node:string_decoder";
 import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
@@ -957,9 +958,11 @@ export class PtyAttachComponent implements Component {
 			if (!this.emptyResetPending) this.scheduleRender();
 			this.startAttachSettle();
 		});
+		// One read can end halfway through a character, and big frames always cross reads.
+		const decoder = new StringDecoder("utf8");
 		socket.on("data", (chunk) => {
 			if (this.socket !== socket) return;
-			this.onSocketData(chunk.toString("utf8"));
+			this.onSocketData(decoder.write(chunk));
 		});
 		socket.on("close", () => {
 			// A failed socket can close after a replacement connection has already

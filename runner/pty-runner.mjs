@@ -14,6 +14,7 @@ import { createServer } from "node:net";
 import { appendFileSync, closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { finalizeHostCrash } from "../src/core/host-crash.mjs";
@@ -44,6 +45,10 @@ import { createFrameStreamParser } from "../src/core/attach-frame-stream.mjs";
 import { createViewProofTracker } from "../src/core/attach-view-proof.mjs";
 import { createFrameWitnessSummaryScheduler } from "../src/core/frame-witness-update.mjs";
 import { createHash, randomBytes } from "node:crypto";
+
+// Only there to bound what a bad message can make us allocate; a big screen at a small font must still fit.
+const MAX_COLS = 1000;
+const MAX_ROWS = 500;
 import { markRowFailedDirect } from "./pty-runner-legacy.mjs";
 import { ensureNodePtySpawnHelperExecutable } from "../src/core/pty-support.mjs";
 
@@ -655,8 +660,9 @@ function legacyMain(config) {
 		);
 		socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty, generation: GENERATION }) + "\n");
 		let buffer = "";
+		const decoder = new StringDecoder("utf8"); // A read can end halfway through a character.
 		socket.on("data", (chunk) => {
-			buffer += chunk.toString("utf8");
+			buffer += decoder.write(chunk);
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
 			for (const line of lines) handleClientLine(line, socket);
@@ -791,8 +797,8 @@ function legacyMain(config) {
 				if (typeof msg.data === "string") child.write(msg.data);
 				break;
 			case "resize": {
-				const cols = clampInt(msg.cols, 20, 300, host.cols);
-				const rows = clampInt(msg.rows, 5, 120, host.rows);
+				const cols = clampInt(msg.cols, 20, MAX_COLS, host.cols);
+				const rows = clampInt(msg.rows, 5, MAX_ROWS, host.rows);
 				applyResize(cols, rows);
 				break;
 			}
@@ -1255,8 +1261,9 @@ async function ownedMain(config) {
 			socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty, generation: GENERATION }) + "\n");
 			broadcast({ type: "status", status: host, generation: GENERATION });
 			let buffer = "";
+			const decoder = new StringDecoder("utf8"); // A read can end halfway through a character.
 			socket.on("data", (chunk) => {
-				buffer += chunk.toString("utf8");
+				buffer += decoder.write(chunk);
 				const lines = buffer.split("\n");
 				buffer = lines.pop() ?? "";
 				for (const line of lines) handleClientLine(line, socket);
@@ -1630,8 +1637,8 @@ async function ownedMain(config) {
 				break;
 			}
 			case "resize": {
-				const cols = clampInt(msg.cols, 20, 300, host.cols);
-				const rows = clampInt(msg.rows, 5, 120, host.rows);
+				const cols = clampInt(msg.cols, 20, MAX_COLS, host.cols);
+				const rows = clampInt(msg.rows, 5, MAX_ROWS, host.rows);
 				if (child) applyResize(cols, rows);
 				else {
 					cachedResize = { cols, rows };
@@ -1999,8 +2006,8 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 					reply(socket, { type: "error", code: "host_starting", commandId: msg.commandId });
 					return;
 				}
-				const cols = clampInt(msg.cols, 20, 300, actions.hostCols());
-				const rows = clampInt(msg.rows, 5, 120, actions.hostRows());
+				const cols = clampInt(msg.cols, 20, MAX_COLS, actions.hostCols());
+				const rows = clampInt(msg.rows, 5, MAX_ROWS, actions.hostRows());
 				const tracked = resizes.track({ commandId: msg.commandId, clientId: msg.clientId, cols, rows });
 				for (const sup of tracked.superseded) {
 					const oldSocket = pendingResizeSockets.get(sup.commandId) ?? socket;
