@@ -418,19 +418,23 @@ test("pty-runner honors screenLogMaxBytes from host config", async () => {
 			screenLogMaxBytes: 2048,
 		});
 		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
-		await waitFor(() => existsSync(P.controlSocketPath(root, "cap1")) && readHost(root, "cap1")?.state === "alive");
+		const screenLog = () => {
+			try {
+				return readFileSync(P.screenLogPath(root, "cap1"), "utf8");
+			} catch {
+				return "";
+			}
+		};
+		// The child's banner says it's up. Before that a terminal takes lines of about 1 KB at most on macOS,
+		// and what overflows is lost, including the "exit" that ends this test.
+		await waitFor(() => hostReady(root, "cap1") && screenLog().includes("fake pi ready"));
 
 		const socket = createConnection(P.controlSocketPath(root, "cap1"));
 		await once(socket, "connect");
 		// ~8 KB of echoed output → well over the 2 KB cap → runner must compact.
-		send(socket, { type: "input", data: `${"x".repeat(8192)}\n` });
-		await waitFor(() => {
-			try {
-				return statSync(P.screenLogPath(root, "cap1")).size > 0;
-			} catch {
-				return false;
-			}
-		});
+		send(socket, { type: "input", data: `${`${"x".repeat(512)}\n`.repeat(16)}cap-all-sent\n` });
+		// The newest output survives compaction, so this shows all of it went through the cap.
+		await waitFor(() => screenLog().includes("cap-all-sent"));
 		send(socket, { type: "input", data: "exit\n" });
 		await waitFor(() => readHost(root, "cap1")?.endedAt != null);
 		// Compaction happens synchronously inside onData; size must settle ≤ cap.

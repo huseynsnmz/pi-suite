@@ -140,6 +140,13 @@ const result = {
 	clipboardReadSource: null as string | null,
 };
 
+/** The first spawn of the stub can take longer than any fixed wait. A settle keeps a second write from going unnoticed. */
+async function writesAfter(before: number): Promise<void> {
+	const deadline = Date.now() + 5000;
+	while (writes().length <= before && Date.now() < deadline) await sleep(10);
+	await sleep(80);
+}
+
 try {
 	// 1. Drag-style release mirrors the selection exactly once, unconsumed, and clears.
 	await withComponent(undefined, async (c) => {
@@ -148,7 +155,7 @@ try {
 		const r = (c as any).handleMouse(leftEvent("release"));
 		result.releaseResultUndefined = r === undefined;
 		result.releaseSyncWrites = writes().length - before; // deferral pin: nothing may happen synchronously
-		await sleep(80); // nextTick + xclip spawn
+		await writesAfter(before);
 		const ws = writes();
 		result.mirrorWrites = ws.length - before;
 		const line = ws.length > before ? ws[ws.length - 1] : null;
@@ -163,7 +170,7 @@ try {
 		const before = writes().length;
 		const r = (c as any).handleMouse(leftEvent("click"));
 		result.clickResultUndefined = r === undefined;
-		await sleep(80);
+		await writesAfter(before);
 		result.clickMirrorWrites = writes().length - before;
 		result.clickClears = clearCalls;
 	});
@@ -208,7 +215,7 @@ try {
 		copyOnSelect = false;
 		const before = writes().length;
 		(c as any).handleMouse(leftEvent("release"));
-		await sleep(80);
+		await writesAfter(before);
 		result.copyOnSelectOffWrites = writes().length - before;
 		result.copyOnSelectOffClears = clearCalls;
 	});
@@ -220,7 +227,7 @@ try {
 		const before = writes().length;
 		try {
 			(c as any).handleMouse(leftEvent("release"));
-			await sleep(80);
+			await writesAfter(before);
 		} catch (err) {
 			result.fallbackError = err instanceof Error ? err.message : String(err);
 		}

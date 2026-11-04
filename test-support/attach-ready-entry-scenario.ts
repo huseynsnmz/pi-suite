@@ -1067,8 +1067,8 @@ if (isMain) {
 	if (existsSync(cli.artifactDir)) cliError(`artifact dir already exists (overwrite refused): ${cli.artifactDir}`);
 	runEntryTrial({ artifactDir: cli.artifactDir })
 		.then((result) => {
-			process.stdout.write(JSON.stringify(result) + "\n");
-			process.exit(0);
+			// Exit once it's written: a pipe takes writes asynchronously, and exiting cuts off a large result.
+			process.stdout.write(JSON.stringify(result) + "\n", () => process.exit(0));
 		})
 		.catch((err) => {
 			process.stderr.write(`attach-ready-entry-scenario: trial harness error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
