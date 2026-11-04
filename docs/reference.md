@@ -119,7 +119,7 @@ The attach surface can forward terminal clipboard and image/file passthrough seq
 
 ## States, Grouping, and Filters
 
-the board separates a session's semantic task state from whether a worker process is currently alive. An exited worker can therefore leave a durable row that is still resumable or attachable.
+The board separates a session's semantic task state from whether a worker process is currently alive. An exited worker can therefore leave a durable row that is still resumable or attachable.
 
 | Display state | Meaning |
 | --- | --- |
@@ -157,7 +157,7 @@ steer:awaiting-approval
 
 ## Evidence and Code References
 
-Evidence is collected locally from session events. the board can extract issue and pull-request references from that evidence and show badges such as `#40` or `▸#45` on rows; Peek includes the provider, confidence, source, and URL when available. Built-in GitHub/GitLab-style providers are available, and an optional per-store `providers.json` can extend the provider rules. The `AGENT_BOARD_CODE_REFS=off` setting disables extraction.
+Evidence is collected locally from session events. The board can extract issue and pull-request references from that evidence and show badges such as `#40` or `▸#45` on rows; Peek includes the provider, confidence, source, and URL when available. Built-in GitHub/GitLab-style providers are available, and an optional per-store `providers.json` can extend the provider rules. The `AGENT_BOARD_CODE_REFS=off` setting disables extraction.
 
 For internal code platforms (non-github/gitlab hosts) or custom CLIs, add a per-store `providers.json` so claim/action rules exist and sessions stop depending on the low-confidence mention fallback. Example — an internal CLI (`acli`) with claim-strength issue rules:
 
@@ -237,7 +237,7 @@ First verify that Pi itself can complete a one-shot model call:
 pi --mode json -p --no-session "Reply with exactly: DONE"
 ```
 
-The command should emit an assistant reply, then an `agent_end` event, and exit. If it hangs before the assistant reply, fix Pi provider authentication or network access first. the board cannot produce live model results until Pi works independently.
+The command should emit an assistant reply, then an `agent_end` event, and exit. If it hangs before the assistant reply, fix Pi provider authentication or network access first. The board cannot produce live model results until Pi works independently.
 
 ### `node-pty unavailable`
 
