@@ -24,7 +24,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-board@0.18.1
+   pi install npm:@huseynsnmz/pi-board@0.18.2
    ```
 
 2. Restart Pi, and press `Left` twice on an empty prompt, or run `/agent-board`.
