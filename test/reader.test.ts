@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseConfig } from "../src/config.ts";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseConfig, saveReaderModel } from "../src/config.ts";
 import { checkAnswer, readerPrompt } from "../src/reader.ts";
 import { parseMarkdownNew, parseSearxng } from "../src/search.ts";
 
@@ -63,4 +66,22 @@ test("search results keep only real web links", () => {
   const md = parseMarkdownNew({ results: [{ title: "t", link: "https://ok.com/", snippet: "s" }], extracted: [{ url: "https://ok.com/", markdown: "full text" }] });
   assert.deepEqual(md.links, ["https://ok.com/"]);
   assert.match(md.text, /full text/);
+});
+
+test("choosing a reader changes only that setting, and a broken file is left alone", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "piweb-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "web.json");
+  assert.deepEqual(saveReaderModel(dir, "a/small").readerModel, { provider: "a", id: "small" });
+  writeFileSync(path, JSON.stringify({ companySearch: true, denyDomains: ["bad.com"], futureSetting: 1, readerModel: "a/small" }));
+  assert.equal(saveReaderModel(dir, "b/tiny/v2").readerModel?.id, "tiny/v2");
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { companySearch: true, denyDomains: ["bad.com"], futureSetting: 1, readerModel: "b/tiny/v2" });
+  assert.equal(saveReaderModel(dir, null).readerModel, null);
+  assert.equal("readerModel" in JSON.parse(readFileSync(path, "utf8")), false);
+  writeFileSync(path, "{ broken");
+  assert.throws(() => saveReaderModel(dir, "a/small"));
+  assert.equal(readFileSync(path, "utf8"), "{ broken");
+  writeFileSync(path, JSON.stringify({ allowDomains: "wrong" }));
+  assert.throws(() => saveReaderModel(dir, "a/small"), /allowDomains/);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { allowDomains: "wrong" });
 });

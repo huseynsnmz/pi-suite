@@ -1,5 +1,5 @@
 /** Settings live in the agent folder only: a project's own file could point searches at its author's server. */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DnsFilter } from "./dnsfilter.ts";
 
@@ -85,4 +85,19 @@ export function loadConfig(agentDir: string): WebConfig {
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${path} must hold a JSON object`);
   return parseConfig(raw as Record<string, unknown>);
+}
+
+/** Changes only the reader in the file, so a setting this doesn't know about survives. A rename keeps a crash from leaving half a file. */
+export function saveReaderModel(agentDir: string, model: string | null): WebConfig {
+  const path = join(agentDir, "web.json");
+  const raw: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${path} must hold a JSON object`);
+  const next = { ...(raw as Record<string, unknown>) };
+  if (model === null) delete next.readerModel;
+  else next.readerModel = model;
+  const config = parseConfig(next);
+  const temp = `${path}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`);
+  renameSync(temp, path);
+  return config;
 }

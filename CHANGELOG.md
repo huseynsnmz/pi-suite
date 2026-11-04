@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- **reader**: `/web reader` picks the page reader from your models, saves it to `web.json`, and applies it straight away
+
 ## [0.1.0] - 2026-11-04
 
 ### Features

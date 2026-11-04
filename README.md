@@ -14,7 +14,7 @@ pi install npm:@huseynsnmz/pi-web@0.1.0
 
 ## Search
 
-Everything you search for leaves your machine, so nothing is chosen for you. Settings go in `~/.pi/agent/web.json`, and are read when Pi starts.
+Everything you search for leaves your machine, so nothing is chosen for you. Settings go in `~/.pi/agent/web.json`, and are read when Pi starts, so restart it after editing the file.
 
 **Your own SearXNG server** needs no account, but it does pass your searches on to the search engines it uses:
 
@@ -45,7 +45,7 @@ SearXNG only answers in JSON if you list it under `search.formats` in its `setti
 | `minConfidence` | Answers the reader scores below this, out of 10, are withheld. Defaults to 4 |
 | `askNewDomains` | Set to `true` to be asked before the first fetch from each site |
 
-`/web` shows what's in use. If `web.json` can't be read or has a wrong value, the web tools stay off and Pi says why.
+`/web` shows what's in use, and `/web reader` lets you pick the page reader from your models. It saves to `web.json` and applies straight away. If `web.json` can't be read or has a wrong value, the web tools stay off and Pi says why.
 
 ## What it checks
 
