@@ -27,7 +27,7 @@ Syntax tokens are borrowed on purpose: a theme spends its hues there, so they gi
 
 ## Settings
 
-They live in the file `@adeildo/pi-kit` keeps, `~/.pi/agent/extensions/pi-harness/settings.json`, under `frame.`.
+They live under `frame` in `~/.pi/agent/suite.json`.
 
 | Key           | Default     | Does                                                                                                                                   |
 | ------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------- |

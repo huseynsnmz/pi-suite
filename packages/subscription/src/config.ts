@@ -1,5 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readSection } from "../../../src/settings.ts";
 
 export interface Config {
 	pathToClaudeCodeExecutable?: string;
@@ -9,23 +8,22 @@ export interface Config {
 	idleMinutes?: number;
 }
 
-function readJson(file: string): Record<string, unknown> {
-	if (!existsSync(file)) return {};
+const intIn = (lo: number, hi: number) => (n: unknown): n is number => Number.isInteger(n) && (n as number) >= lo && (n as number) <= hi;
+const validMaxSessions = intIn(1, 16);
+const validIdleMinutes = intIn(1, 24 * 60);
+
+/** Its settings are all conveniences, so broken ones just mean the defaults. */
+function readSaved(agentDir: string): Record<string, unknown> {
 	try {
-		const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-		return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+		return readSection(agentDir, "subscription");
 	} catch {
 		return {};
 	}
 }
 
-const intIn = (lo: number, hi: number) => (n: unknown): n is number => Number.isInteger(n) && (n as number) >= lo && (n as number) <= hi;
-const validMaxSessions = intIn(1, 16);
-const validIdleMinutes = intIn(1, 24 * 60);
-
 /** Global only: a repository must not choose which program runs, or how many, or how your prompt is built. */
 export function resolveConfig(where: { agentDir: string; env: Record<string, string | undefined> }): Config {
-	const saved = readJson(join(where.agentDir, "claude-sdk.json"));
+	const saved = readSaved(where.agentDir);
 	const path = where.env.PI_CLAUDE_SDK_CLAUDE_PATH ?? saved.pathToClaudeCodeExecutable;
 	return {
 		...(typeof path === "string" && path !== "" ? { pathToClaudeCodeExecutable: path } : {}),

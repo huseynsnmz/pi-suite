@@ -29,7 +29,7 @@ export function checkQuery(query: string, privateWords: string[] = []): string {
   if (LOCAL_PATH.test(out)) throw new Error("This query holds a path on this machine, and it would leave this machine");
   if (EMAIL.test(out)) throw new Error("This query holds an email address, and it would leave this machine");
   const lower = out.toLowerCase();
-  if (privateWords.some((word) => word && lower.includes(word))) throw new Error("This query holds a word set as private in web.json, and it would leave this machine");
+  if (privateWords.some((word) => word && lower.includes(word))) throw new Error("This query holds a word set as private in /suite, and it would leave this machine");
   return out;
 }
 
@@ -157,7 +157,7 @@ export function urlConcern(url: URL, privateWords: string[] = []): string | null
   const lowerPath = path.toLowerCase();
   if (new RegExp(LOCAL_PATH.source, "i").test(path) || EMAIL.test(path)) return "holds a local path or email address";
   const lower = `${url.hostname}${lowerPath}`;
-  if (privateWords.some((word) => word && lower.includes(word))) return "holds a word set as private in web.json";
+  if (privateWords.some((word) => word && lower.includes(word))) return "holds a word set as private in /suite";
   return null;
 }
 

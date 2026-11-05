@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import { isPart, loadSettings, type Part, PART_NAMES, PARTS, saveSettings, separateInstalls } from "./settings.ts";
+import { checkSection, type Field, FIELDS, shownValue, typedValue } from "./settings-ui.ts";
+import { isPart, loadSettings, moveOldSettings, type Part, PART_NAMES, PARTS, readSection, saveSettings, separateInstalls, writeSection } from "./settings.ts";
 
 function loadPart(part: Part): Promise<{ default: (pi: ExtensionAPI) => void | Promise<void> }> {
   return import(new URL(`../packages/${part}/src/index.ts`, import.meta.url).href);
@@ -20,8 +21,9 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 export default async function piSuite(pi: ExtensionAPI): Promise<void> {
   const agentDir = getAgentDir();
+  const moveProblems = moveOldSettings(agentDir);
   const settings = loadSettings(agentDir);
-  const notices: string[] = settings.problem === undefined ? [] : [`pi-suite: ${settings.problem}`];
+  const notices: string[] = [...moveProblems, ...(settings.problem === undefined ? [] : [`pi-suite: ${settings.problem}`])];
   const loaded = new Set<Part>();
   const failed = new Set<Part>();
   if (settings.off.has("modes")) notices.push(`pi-suite: modes is off, so ${MODES_OFF}`);
@@ -77,7 +79,12 @@ export default async function piSuite(pi: ExtensionAPI): Promise<void> {
     }
     if (on) off.delete(part);
     else off.add(part);
-    saveSettings(agentDir, off);
+    try {
+      saveSettings(agentDir, off);
+    } catch (error) {
+      ctx.ui.notify(`Nothing changed: ${(error as Error).message}`, "error");
+      return false;
+    }
     if (!on && part === "router") await leaveModels(ctx, "pi-virtual");
     if (!on && part === "subscription") await leaveModels(ctx, "claude-agent-sdk");
     return true;
@@ -103,6 +110,80 @@ export default async function piSuite(pi: ExtensionAPI): Promise<void> {
     else if (ctx.hasUI) ctx.ui.notify("Saved. Run /reload to apply it.", "info");
   }
 
+  /** Asks for a new value. True if one was saved. */
+  async function editField(part: Part, field: Field, ctx: ExtensionCommandContext): Promise<boolean> {
+    const section = readSection(agentDir, part);
+    const current = section[field.key];
+    let value: unknown;
+    const prompt = `${part}: ${field.label}`;
+    if (field.kind === "boolean" || field.kind === "choice" || field.kind === "model") {
+      const options =
+        field.kind === "boolean"
+          ? ["on", "off"]
+          : field.kind === "choice"
+            ? [...field.options, "default"]
+            : ["default", ...ctx.modelRegistry.getAvailable().filter((model) => model.api !== "pi-virtual").map((model) => `${model.provider}/${model.id}`)];
+      const picked = await ctx.ui.select(prompt, options);
+      if (picked === undefined) return false;
+      value = field.kind === "boolean" ? (picked === "on" ? true : undefined) : picked === "default" ? undefined : picked;
+    } else {
+      const shown = Array.isArray(current) ? current.join(", ") : current === undefined ? "" : String(current);
+      const typed = await ctx.ui.input(`${prompt}${field.kind === "list" ? " (separate with commas, empty clears)" : " (empty clears)"}`, shown);
+      if (typed === undefined) return false;
+      value = typedValue(field, typed);
+    }
+    const next = { ...section };
+    if (value === undefined) delete next[field.key];
+    else next[field.key] = value;
+    checkSection(part, next);
+    writeSection(agentDir, part, next);
+    return true;
+  }
+
+  /** One part: on or off, then its settings. True if anything was saved. */
+  async function partMenu(part: Part, ctx: ExtensionCommandContext): Promise<boolean> {
+    let changed = false;
+    const fields = FIELDS[part] ?? [];
+    for (;;) {
+      let section: Record<string, unknown> = {};
+      try {
+        section = readSection(agentDir, part);
+      } catch (error) {
+        ctx.ui.notify((error as Error).message, "error");
+      }
+      const off = currentOff();
+      const toggle = off.has(part) ? "Turned off. Enter turns it on" : "Turned on. Enter turns it off";
+      const extra = part === "router" ? ["Models and reasoning"] : part === "frame" ? ["Icons, frame style and more"] : [];
+      const rows = [toggle, ...extra, ...fields.map((field) => `${field.label}: ${shownValue(part, field, section)}`)];
+      const row = await ctx.ui.select(`${part}: ${PARTS[part]} (Esc to go back)`, rows);
+      if (row === undefined) return changed;
+      const index = rows.indexOf(row);
+      if (index === 0) {
+        if (await setPart(part, off.has(part), ctx)) changed = true;
+        continue;
+      }
+      if (extra.includes(row)) {
+        if (part === "frame") {
+          ctx.ui.notify("Press Ctrl+S in the editor for the frame's settings, or use /harness with the frame off.", "info");
+          continue;
+        }
+        const probe: { open?: (ctx: ExtensionCommandContext) => Promise<void> } = {};
+        pi.events.emit("pi-suite:router-settings", probe);
+        if (probe.open === undefined) ctx.ui.notify("Turn router on and reload first.", "warning");
+        else {
+          await probe.open(ctx);
+        }
+        continue;
+      }
+      const field = fields[index - 1 - extra.length] as Field;
+      try {
+        if (await editField(part, field, ctx)) changed = true;
+      } catch (error) {
+        ctx.ui.notify(`Not saved: ${(error as Error).message}`, "error");
+      }
+    }
+  }
+
   function status(): string {
     const off = currentOff();
     return PART_NAMES.map((part) => {
@@ -115,7 +196,7 @@ export default async function piSuite(pi: ExtensionAPI): Promise<void> {
   }
 
   pi.registerCommand("suite", {
-    description: "Turn parts of pi-suite on or off: /suite, /suite on web, /suite off board, /suite list",
+    description: "Settings for pi-suite, and turning its parts on or off: /suite, /suite on web, /suite off board, /suite list",
     getArgumentCompletions: (prefix) => {
       const typed = prefix.trimStart().toLowerCase();
       const options = ["list", ...PART_NAMES.flatMap((part) => [`on ${part}`, `off ${part}`])];
@@ -146,10 +227,10 @@ export default async function piSuite(pi: ExtensionAPI): Promise<void> {
       for (;;) {
         const off = currentOff();
         const rows = PART_NAMES.map((part) => `${off.has(part) ? "[ ]" : "[x]"} ${part}  ${PARTS[part]}`);
-        const row = await ctx.ui.select("pi-suite: Enter turns a part on or off (Esc when done)", rows);
+        const row = await ctx.ui.select("pi-suite: pick a part (Esc when done)", rows);
         if (row === undefined) break;
         const part = PART_NAMES[rows.indexOf(row)] as Part;
-        if (await setPart(part, off.has(part), ctx)) changed = true;
+        if (await partMenu(part, ctx)) changed = true;
       }
       await finish(changed, ctx);
     },

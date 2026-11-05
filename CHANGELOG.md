@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.3]
 
 ### Features
 
@@ -8,6 +8,8 @@
 - Up and Down with one line typed go through past prompts that start with it. With nothing typed they also reach this folder's other sessions.
 - With `hideThinkingBlock` on, reasoning shows while it's written and collapses when the message is done. `Ctrl+T` opens it.
 - New part, off until you run `/suite on subscription`: Claude models on your Claude login, based on pi-claude-subscription. It asks before anything more is billed as extra usage. See its README for the limits and what Anthropic's terms say.
+
+- One settings file, `~/.pi/agent/suite.json`, with a section for each part. `/suite` now opens each part's settings as well as turning it on or off. Old files move in the first time Pi starts, and stay as `.bak`.
 
 ### Fixes
 

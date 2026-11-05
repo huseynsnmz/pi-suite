@@ -34,7 +34,7 @@ test("saved settings load again, a missing file is empty, and a broken one throw
   assert.deepEqual(loadConfig(agent), {});
   saveConfig(agent, { plan: "a/b" });
   assert.deepEqual(loadConfig(agent), { plan: "a/b" });
-  writeFileSync(join(agent, "router.json"), "{oops");
+  writeFileSync(join(agent, "suite.json"), "{oops");
   assert.throws(() => loadConfig(agent));
 });
 

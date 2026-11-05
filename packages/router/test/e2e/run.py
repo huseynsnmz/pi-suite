@@ -114,6 +114,23 @@ def check(name, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + name + (f"  [{detail}]" if detail else ""), flush=True)
 
 
+def suite_settings():
+    path = agent / "suite.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def router_settings():
+    return suite_settings().get("router", {})
+
+
+def set_off(parts):
+    (agent / "suite.json").write_text(json.dumps({**suite_settings(), "off": parts}))
+
+
+def set_router(value):
+    (agent / "suite.json").write_text(json.dumps({**suite_settings(), "router": value}))
+
+
 def requests():
     return [json.loads(line) for line in log.read_text().splitlines()]
 
@@ -152,7 +169,7 @@ try:
         term.pump(0.5)
     term.send(ESC)
     term.pump(1)
-    saved = json.loads((agent / "router.json").read_text())
+    saved = router_settings()
     check("the choices are saved", saved.get("plan") == "mock/strong" and saved.get("build") == "mock/cheap" and saved.get("fallback") == "mock/back" and "judge" not in saved, str(saved))
     judge = json.loads(judge_file.read_text())
     check("the judge's own settings get its model, and keep the rest", judge == {"verdicts": "allow-defer", "provider": "mock", "model": "judge"}, str(judge))
@@ -235,7 +252,7 @@ try:
     run_prompt("after turning it off")
     check("after /suite off router, a session carries on with the model that last answered", [r["model"] for r in requests()[before:]] == ["strong"] and "stale" not in term.text[mark:], str(requests()[before:]) + term.text[mark:][-200:])
     term.close()
-    (agent / "suite.json").unlink()
+    set_off([])
     term = Terminal()
     term.wait("Auto", timeout=40)
     term.pump(2)
@@ -297,7 +314,7 @@ try:
     term.send("\x1b[B")
     term.pump(0.5)
 
-    plain = (agent / "router.json").read_text()
+    plain = router_settings()
     term.command("/router")
     term.wait("Router: which role", timeout=8)
     ok = term.pick("plan:") and term.pick("mock/think")
@@ -307,7 +324,7 @@ try:
     check("the row shows it", "· high" in term.text[-3000:])
     term.send(ESC)
     term.pump(1)
-    check("the level is saved", json.loads((agent / "router.json").read_text()).get("thinking") == {"plan": "high"})
+    check("the level is saved", router_settings().get("thinking") == {"plan": "high"})
     term.command("/model router/auto")
     term.pump(1)
     term.command("/new")
@@ -317,21 +334,21 @@ try:
     sent = run_prompt("hello with reasoning")
     check("the plan role uses its own level", [(r["model"], r.get("effort")) for r in sent] == [("think", "high")], str(sent))
     term.close()
-    (agent / "router.json").write_text(plain)
+    set_router(plain)
 
     judge_file.write_text("{}")
     term = Terminal()
     check("router/auto warns when the judge has no model of its own", term.wait("permission judge has no model", timeout=30))
     term.close()
 
-    (agent / "router.json").write_text('{"planner": "mock/strong"}')
+    set_router({"planner": "mock/strong"})
     term = Terminal()
-    check("a broken router.json says so", term.wait("pi-router is off", timeout=30))
+    check("broken router settings say so", term.wait("pi-router is off", timeout=30))
     term.close()
     before = len(requests())
     child = subprocess.run([str(PI), "-p", "hello"], env=env, cwd=project, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
     check("with it broken, router/auto stops rather than using another model", "pi-router is off" in child.stdout + child.stderr and len(requests()) == before, (child.stdout + child.stderr)[-200:])
-    (agent / "router.json").write_text(json.dumps({"plan": "mock/nonexistent", "build": "mock/cheap"}))
+    set_router({"plan": "mock/nonexistent", "build": "mock/cheap"})
     before = len(requests())
     child = subprocess.run([str(PI), "-p", "hello"], env=env, cwd=project, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
     check("a model that doesn't exist fails with a clear message, and calls nothing", "mock/nonexistent" in child.stdout + child.stderr and len(requests()) == before, (child.stdout + child.stderr)[-200:])
