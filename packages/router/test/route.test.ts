@@ -91,3 +91,20 @@ test("the fallback keeps the rest of the turn, and the next message tries the fi
   assert.equal(chooseModel(config, input({ reason: "continuation", previous: "b/other", state: planning })).model, "b/other");
   assert.equal(chooseModel(config, input({ reason: "user", previous: "b/other", state: planning })).model, "a/strong");
 });
+
+test("a role's own reasoning goes with its model", () => {
+  const set: RouterConfig = { ...config, thinking: { plan: "high", build: "low", fallback: "medium", subagent: "off" } };
+  assert.equal(chooseModel(set, input({})).thinking, "high");
+  assert.equal(chooseModel(set, input({ state: building })).thinking, "low");
+  assert.equal(chooseModel(set, input({ reason: "direct" })).thinking, "low");
+  assert.equal(chooseModel(set, input({ subagent: true })).thinking, "off");
+  assert.equal(chooseModel(set, input({ reason: "retry", state: building, failed: { model: "a/cheap", errorMessage: "503" } })).thinking, "medium");
+  assert.equal(chooseModel(set, input({ reason: "continuation", state: building, previous: "b/other" })).thinking, "medium");
+});
+
+test("a role with no reasoning of its own leaves it to /effort, and a retry keeps what failed", () => {
+  const set: RouterConfig = { plan: "a/strong", build: "a/cheap", thinking: { build: "low" } };
+  assert.equal("thinking" in chooseModel(set, input({})), false);
+  assert.equal(chooseModel(set, input({ subagent: true })).thinking, "low");
+  assert.equal(chooseModel(set, input({ reason: "retry", state: building, failed: { model: "a/cheap", errorMessage: "bad", thinking: "max" } })).thinking, "max");
+});

@@ -35,12 +35,22 @@ createServer((req, res) => {
     const last = body.messages?.at(-1);
     const text = typeof last?.content === "string" ? last.content : (last?.content ?? []).map((part) => part.text ?? "").join("");
     const judge = tools.includes("report_verdict");
-    appendFileSync(log, `${JSON.stringify({ model: body.model, role: last?.role, text: text.slice(0, 60), tail: text.slice(-200), judge, tools: tools.length, toolNames: tools })}\n`);
+    appendFileSync(log, `${JSON.stringify({ model: body.model, effort: body.reasoning_effort, role: last?.role, text: text.slice(0, 60), tail: text.slice(-200), judge, tools: tools.length, toolNames: tools })}\n`);
     if (judge) return reply(res, "", { name: "report_verdict", args: { verdict: "allow" } });
     if (last?.role === "tool") return reply(res, "FINISHED");
     if (text === "OVERLOAD" && body.model !== "back") {
       res.writeHead(529, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "overloaded" } }));
+    }
+    if (text === "THINK") {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      chunk(res, { role: "assistant", reasoning_content: "SECRETPLAN" });
+      return setTimeout(() => {
+        chunk(res, { content: "OK" });
+        chunk(res, {}, "stop");
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }, 1500);
     }
     return reply(res, SCRIPT[text] ? "" : "OK", SCRIPT[text]);
   });

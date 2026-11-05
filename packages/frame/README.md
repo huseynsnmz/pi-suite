@@ -44,6 +44,8 @@ Some pieces, such as rooms, boards, peers and the remote page, appear only with 
 |---|---|
 | `Ctrl+C` | Stops a run and says `Aborted`. With nothing running, it clears the editor and says to press it again within 2 seconds to exit |
 | `Ctrl+R` | Search what you've typed, here and in this folder's other sessions. `Ctrl+R` again goes further back, `Enter` sends, `Esc` cancels, any other key keeps the match to edit. It replaces Pi's Rename on this key; `/name` still renames |
+| `Up` / `Down` | With nothing typed, browse past prompts, including this folder's other sessions. With one line typed, go through prompts that start with it, as in a shell |
+| `Ctrl+T` | Open or collapse finished reasoning |
 | `Alt+O` | Scroll through the session's tool output, one call at a time |
 | `Ctrl+O` | Expand every call in the transcript |
 | `/todos` | Show the agent's todo list. `/todos clear` empties it and tells the agent |
@@ -103,3 +105,7 @@ MIT. See [LICENSE](LICENSE), which keeps the original copyright notice.
 - [pi-look and pi-harness](https://github.com/felipeadeildo/pi-harness) by [adeildo](https://adeildo.dev)
 - The framed editor comes from [pi-open-tui](https://github.com/OldSuns/pi-open-tui), by way of pi-look.
 - The segments with priorities come from [oh-my-pi](https://github.com/can1357/oh-my-pi), by way of pi-look.
+
+## Reasoning
+
+Set `"hideThinkingBlock": true` in `~/.pi/agent/settings.json`, or press `Ctrl+T` until reasoning is collapsed. It then shows while the model is writing it and collapses to one line once the message is done. `Ctrl+T` opens it again, or click it to open just that one. `Ctrl+T` is Pi's own setting, so it applies to every message and stays set in later sessions.

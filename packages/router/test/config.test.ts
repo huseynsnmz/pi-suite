@@ -64,3 +64,10 @@ test("a judge that isn't set up, or has broken settings, is left alone", () => {
   assert.throws(() => setJudgeModel(agent, "a/b"));
   assert.equal(readFileSync(file, "utf8"), "{oops");
 });
+
+test("reasoning per role must name a role and a level", () => {
+  assert.deepEqual(parseConfig({ plan: "a/b", thinking: { plan: "high" } }).thinking, { plan: "high" });
+  assert.throws(() => parseConfig({ thinking: { judge: "high" } }), /unknown role/);
+  assert.throws(() => parseConfig({ thinking: { plan: "huge" } }), /must be one of/);
+  assert.throws(() => parseConfig({ thinking: "high" }), /must be an object/);
+});

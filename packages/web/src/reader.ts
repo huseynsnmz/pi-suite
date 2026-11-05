@@ -1,4 +1,5 @@
 /** The separate model that reads web text. It has no tools, so the most a page can do to it is spoil its answer. */
+import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import { randomBytes } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WebConfig } from "./config.ts";
@@ -50,11 +51,19 @@ function readerModel(ctx: ExtensionContext, config: WebConfig, routed: string | 
   return ctx.modelRegistry.find(routed.slice(0, at), routed.slice(at + 1));
 }
 
-export async function askReader(ctx: ExtensionContext, config: WebConfig, question: string, text: string, signal?: AbortSignal, routed?: string): Promise<string> {
-  const model = readerModel(ctx, config, routed);
+export interface RoutedReader {
+  model: string;
+  thinking?: ThinkingLevel;
+}
+
+export async function askReader(ctx: ExtensionContext, config: WebConfig, question: string, text: string, signal?: AbortSignal, routed?: RoutedReader): Promise<string> {
+  const model = readerModel(ctx, config, routed?.model);
   if (!model) throw new Error("No model to read the page with, so it wasn't read. Set readerModel in web.json");
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok) throw new Error(`No key for the page reader ${model.provider}/${model.id}`);
+  // Only for the model the router chose, as web.json's own reader has no level to go by.
+  const level = routed?.model === `${model.provider}/${model.id}` ? routed.thinking : undefined;
+  const reasoning = level === "off" ? undefined : level;
   // Through the registry, because the session's model can be a virtual one.
   const response = await ctx.modelRegistry.streamSimple(
     model,
@@ -62,7 +71,7 @@ export async function askReader(ctx: ExtensionContext, config: WebConfig, questi
       systemPrompt: SYSTEM,
       messages: [{ role: "user", content: [{ type: "text", text: readerPrompt(question, text) }], timestamp: Date.now() }],
     },
-    { signal, maxTokens: 2000, cacheRetention: "none" },
+    { signal, maxTokens: 2000, cacheRetention: "none", ...(reasoning === undefined ? {} : { reasoning }) },
   ).result();
   if (response.stopReason === "error" || response.stopReason === "aborted") {
     // Not the provider's message, as some repeat part of the request, and that's page text.

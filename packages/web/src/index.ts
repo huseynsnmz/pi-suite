@@ -6,7 +6,7 @@ import { blockedLinks, checkSite } from "./dnsfilter.ts";
 import { toText } from "./extract.ts";
 import { isIP } from "node:net";
 import { fetchPublic } from "./net.ts";
-import { askReader, READ_CHARS } from "./reader.ts";
+import { askReader, READ_CHARS, type RoutedReader } from "./reader.ts";
 import { linkIsClean, looksLikeInstructions, urlsIn } from "./sanitize.ts";
 import { search } from "./search.ts";
 import { checkQuery, checkQuestion, checkUrl, givenSites, onSite, urlConcern, wasOffered } from "./validate.ts";
@@ -145,7 +145,7 @@ export default function piWeb(pi: ExtensionAPI): void {
       const key = `${url.href}\n${offset}\n${question}`;
       const known = answers.get(key);
       const fresh = known && Date.now() - known.at < CACHE_MS;
-      const answer = fresh ? known.text : await withoutBlockedLinks(await askReader(ctx, config, question, part, signal, routerReader(ctx)), signal);
+      const answer = fresh ? known.text : await withoutBlockedLinks(await askReader(ctx, config, question, part, signal, routerProbe(ctx)), signal);
       if (!fresh) remember(answers, key, answer);
       const left = page.text.length - offset - part.length;
       return reply(`From ${url.hostname}, not checked against anything else:\n${answer}${looksLikeInstructions(part) ? WARNING : ""}${left > 0 ? `\n\n${left} characters unread. Fetch again with offset ${offset + part.length} for more.` : ""}`, [...urlsIn(answer), ...pageLinks(part)]);
@@ -172,7 +172,7 @@ export default function piWeb(pi: ExtensionAPI): void {
         const links = clean.filter((link) => !blocked.has(link));
         if (!links.length) return reply(clean.length ? "Every result was on a site blocked by the site filter." : "No results.");
         const part = results.text.slice(0, SEARCH_CHARS);
-        const answer = await withoutBlockedLinks(await askReader(ctx, config, question, part, signal, routerReader(ctx)), signal);
+        const answer = await withoutBlockedLinks(await askReader(ctx, config, question, part, signal, routerProbe(ctx)), signal);
         return reply(`${answer}${looksLikeInstructions(part) ? WARNING : ""}\n\nLinks:\n${links.map((link) => `- ${link}`).join("\n")}`, [...links, ...urlsIn(answer), ...pageLinks(part)], [...new Set(links.map((link) => new URL(link).hostname))]);
       },
     });
@@ -181,12 +181,16 @@ export default function piWeb(pi: ExtensionAPI): void {
   const SESSION_MODEL = "The session's model";
 
   /** Whoever answers fills in the object, so it doesn't matter which loads first. */
-  function routerReader(ctx: ExtensionContext): string | undefined {
+  function routerProbe(ctx: ExtensionContext): RoutedReader | undefined {
     // Only while it's selected: a page must not go to a provider this session didn't choose.
     if (ctx.model?.api !== "pi-virtual") return undefined;
-    const probe: { model?: string } = {};
+    const probe: { model?: string; thinking?: RoutedReader["thinking"] } = {};
     pi.events.emit("pi-router:reader-model", probe);
-    return probe.model;
+    return probe.model === undefined ? undefined : { model: probe.model, thinking: probe.thinking };
+  }
+
+  function routerReader(ctx: ExtensionContext): string | undefined {
+    return routerProbe(ctx)?.model;
   }
 
   async function pickReader(ctx: ExtensionContext): Promise<void> {

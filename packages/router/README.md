@@ -12,7 +12,9 @@ Requires Pi 1.5 or newer.
 pi install npm:@huseynsnmz/pi-suite@0.2.2
 ```
 
-Log in to the providers you want with `/login`, run `/router` to choose a model for each role, then pick `router/auto` in `/model`.
+Log in to the providers you want with `/login`, run `/router` to choose a model for each role, then pick `router/auto` in `/model`. It's always listed there, and until `plan` and `build` are set it stops with a message telling you to run `/router`.
+
+In `/model`, `Enter` selects a model for this session and `Ctrl+S` saves it as your default for new sessions.
 
 ## Roles
 
@@ -35,7 +37,21 @@ Log in to the providers you want with `/login`, run `/router` to choose a model 
 }
 ```
 
-There's no setting per project, so a repository can't choose where your code gets sent. The thinking level you pick with `/effort` applies to every role, and Pi lowers it for a model that can't do it.
+There's no setting per project, so a repository can't choose where your code gets sent.
+
+## Reasoning per role
+
+After you choose a model for a role, `/router` asks how much reasoning it should use, offering only the levels that model has. It's saved next to the roles:
+
+```json
+{
+  "plan": "anthropic/claude-opus-5-5",
+  "build": "anthropic/claude-haiku-5-5",
+  "thinking": { "plan": "high", "build": "low" }
+}
+```
+
+A role with no level of its own uses the one you pick with `/effort`. Changing a role's model clears its level, because the new model may not have it. A retry keeps the level of the request that failed. `reader` and `subagent` with no model of their own use `build`'s level. `judge` has no level here, as it's set in the judge's own config.
 
 ## How it decides
 
