@@ -4,7 +4,7 @@ Two commands for Pi. Part of [pi-suite](../../README.md); turn them off with `/s
 
 ## /clear
 
-Clears the conversation and starts a new session, as `/new` does. If the agent is working, it stops first. The old session is kept, and `/resume` brings it back.
+Clears the conversation and starts a new session, keeping the model and reasoning level you have selected. `/new` goes back to your saved default instead. If the agent is working, it stops first. The old session is kept, and `/resume` brings it back.
 
 ## /security-review
 

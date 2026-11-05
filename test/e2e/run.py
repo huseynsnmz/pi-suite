@@ -92,13 +92,15 @@ try:
         tools, _ = tools_with([part])
         others = [other for name, other in PART_TOOLS.items() if name != part]
         check(f"turning off {part} removes {tool}, and only that", tool not in tools and all(other in tools for other in others), str(tools))
-    tools, child = tools_with(["modes", "router", "web", "memory", "frame", "board", "commands"])
+    tools, child = tools_with(["modes", "router", "web", "memory", "frame", "board", "commands", "subscription"])
     check("with every part off, Pi still works", "OK" in child.stdout and not set(PART_TOOLS.values()) & set(tools), str(tools))
     (agent / "suite.json").write_text('{"off":["modes","wbe"]}')
     child = subprocess.run([str(PI), "-p", "hello"], env=env, cwd=project, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=90)
     check("a typo in suite.json leaves everything on", "ask_questions" in json.loads(log.read_text().splitlines()[-1])["toolNames"])
 
     (agent / "suite.json").unlink()
+    child = subprocess.run([str(PI), "--list-models"], env=env, cwd=project, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    check("the subscription models stay out until asked for", "claude-sdk" not in child.stdout + child.stderr)
     term = Terminal()
     check("starts, with the frame", term.wait("Mock"))
     term.pump(3)

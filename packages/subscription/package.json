@@ -1,0 +1,23 @@
+{
+  "name": "@huseynsnmz/pi-subscription",
+  "version": "0.1.0",
+  "description": "Claude models in Pi on your Claude login, asking before anything is billed as extra usage.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test --test-timeout=20000 test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "26.6.6",
+    "typebox": "1.4.3",
+    "typescript": "7.0.2"
+  }
+}

@@ -527,6 +527,9 @@ function pressCtrlC(live: Live, clearEditor: () => void): void {
 	live.repaint?.();
 }
 
+/** Everything collapsed has finished, because live reasoning stays open. */
+const THOUGHT_LABEL = "Thought · ctrl+t to expand";
+
 function installEditor(
 	ctx: ExtensionContext,
 	screen: Screen,
@@ -535,9 +538,11 @@ function installEditor(
 ): void {
 	if (ctx.mode !== "tui") return;
 	if (frame.get(scope) === "off") {
+		ctx.ui.setHiddenThinkingLabel(undefined);
 		ctx.ui.setEditorComponent(undefined);
 		return;
 	}
+	ctx.ui.setHiddenThinkingLabel(THOUGHT_LABEL);
 	ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 		live.tui = tui;
 		applyCursor(tui, cursor);

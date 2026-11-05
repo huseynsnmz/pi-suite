@@ -15,7 +15,15 @@ import { BOXES, border } from "../render/frame.ts";
 import { paintLead, promptLead } from "../render/lead.ts";
 import { SETTINGS_KEY, SETTINGS_SHORTCUT_INPUT } from "../render/keys.ts";
 import type { CursorStyle } from "../settings.ts";
-import { findPrompt, type HistorySearch, shownText, startSearch } from "./history-search.ts";
+import {
+	findPrompt,
+	type HistorySearch,
+	type PrefixSearch,
+	shownText,
+	startPrefix,
+	startSearch,
+	stepPrefix,
+} from "./history-search.ts";
 import { type Screen, type SlotName, slotPieces } from "./screen.ts";
 
 type WorkingIndicator = Parameters<CustomEditor["setWorkingStatusIndicator"]>[0];
@@ -44,6 +52,8 @@ export class FrameEditor extends CustomEditor {
 	#hiddenBelow = 0;
 	#inset = 0;
 	#search: HistorySearch | undefined;
+	#prefix: PrefixSearch | undefined;
+	#seeded = false;
 
 	constructor(
 		tui: TUI,
@@ -77,13 +87,9 @@ export class FrameEditor extends CustomEditor {
 			this.#searchKey(this.#search, data);
 			return;
 		}
+		if (this.#prefixKey(data)) return;
 		if (matchesKey(data, SEARCH_KEY) && !this.isShowingAutocomplete()) {
-			// What Up browses, then what was typed in this folder's other sessions.
-			const own: unknown = Reflect.get(this, "history");
-			this.#search = startSearch(this.getText(), [
-				...(Array.isArray(own) ? (own as string[]) : []),
-				...this.#screen.pastPrompts(),
-			]);
+			this.#search = startSearch(this.getText(), this.#history());
 			return;
 		}
 		if (this.#keybindings.matches(data, "app.clear") && !this.isShowingAutocomplete()) {
@@ -99,6 +105,51 @@ export class FrameEditor extends CustomEditor {
 		if (this.isShowingAutocomplete() || !this.#screen.skills() || this.getText() === before) return;
 		const { line, col } = this.getCursor();
 		if (skillQueryAt(this.getLines(), line, col) !== undefined) openAutocomplete(this);
+	}
+
+	/** What Up browses, then what was typed in this folder's other sessions. Read once, on first use. */
+	#history(): readonly string[] {
+		const own: unknown = Reflect.get(this, "history");
+		if (!Array.isArray(own)) return this.#screen.pastPrompts();
+		const entries = own as string[];
+		if (!this.#seeded) {
+			this.#seeded = true;
+			for (const prompt of this.#screen.pastPrompts()) {
+				if (!entries.includes(prompt)) entries.push(prompt);
+			}
+		}
+		return entries;
+	}
+
+	/**
+	 * Up with one line typed looks back through prompts that start with it, and Down comes forward
+	 * again. Any other key keeps what's showing. An empty prompt is left to pi's own browsing.
+	 */
+	#prefixKey(data: string): boolean {
+		const up = this.#keybindings.matches(data, "tui.editor.cursorUp");
+		const down = this.#keybindings.matches(data, "tui.editor.cursorDown");
+		if (!up && !down) {
+			this.#prefix = undefined;
+			return false;
+		}
+		if (this.isShowingAutocomplete()) return false;
+		if (this.#prefix === undefined) {
+			const typed = this.getText();
+			const entries = this.#history();
+			const browsing = Reflect.get(this, "historyIndex") !== -1;
+			if (down || typed === "" || typed.includes("\n") || browsing || !onFirstVisualLine(this)) return false;
+			const search = startPrefix(typed, entries);
+			// With nothing to go through, the arrows stay pi's.
+			if (search.matches.length === 0) return false;
+			this.#prefix = search;
+		}
+		const text = stepPrefix(this.#prefix, up ? 1 : -1);
+		if (text === undefined && down) {
+			this.#prefix = undefined;
+			return false;
+		}
+		if (text !== undefined) this.setText(text);
+		return true;
 	}
 
 	/** Enter sends the match, Esc goes back, and any other key keeps the match to edit. */
@@ -246,6 +297,12 @@ export class FrameEditor extends CustomEditor {
 		if (visibleWidth(full) > 0 && visibleWidth(full) <= budget) return full;
 		return indicator.renderSpinnerInBorder(budget);
 	}
+}
+
+/** The method is private. If a pi release renames it, Up just moves the cursor as before. */
+function onFirstVisualLine(editor: CustomEditor): boolean {
+	const check: unknown = Reflect.get(editor, "isOnFirstVisualLine");
+	return typeof check === "function" && check.call(editor) === true;
 }
 
 /** The method is private; nothing opens if a pi release renames it. */

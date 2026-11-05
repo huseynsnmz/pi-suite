@@ -21,3 +21,24 @@ export function findPrompt(search: HistorySearch, from: number): number {
 export function shownText(search: HistorySearch): string {
 	return search.at < 0 ? search.draft : (search.entries[search.at] as string);
 }
+
+/** Up with text typed: older prompts that start with it, as in a shell. */
+export interface PrefixSearch {
+	typed: string;
+	matches: readonly string[];
+	at: number;
+}
+
+export function startPrefix(typed: string, entries: readonly string[]): PrefixSearch {
+	const wanted = typed.toLowerCase();
+	const matches = [...new Set(entries)].filter((entry) => entry !== typed && entry.toLowerCase().startsWith(wanted));
+	return { typed, matches, at: -1 };
+}
+
+/** One step older (1) or newer (-1), ending back on what was typed. Undefined past either end. */
+export function stepPrefix(search: PrefixSearch, step: 1 | -1): string | undefined {
+	const next = search.at + step;
+	if (next < -1 || next >= search.matches.length) return undefined;
+	search.at = next;
+	return next < 0 ? search.typed : search.matches[next];
+}

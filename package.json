@@ -28,6 +28,10 @@
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
+    "packages/subscription/src",
+    "packages/subscription/package.json",
+    "packages/subscription/README.md",
+    "packages/subscription/LICENSE",
     "packages/commands/src",
     "packages/commands/package.json",
     "packages/commands/README.md",
@@ -91,6 +95,7 @@
     "test:e2e": "python3 test/e2e/run.py"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.308",
     "@xterm/headless": "6.0.0",
     "node-pty": "1.1.0",
     "@mozilla/readability": "0.6.0",

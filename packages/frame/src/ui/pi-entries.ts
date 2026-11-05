@@ -1,5 +1,6 @@
 // Pi's own transcript entries in the harness frame instead of a background. Pi has no hook for
 // drawing them, so this wraps each component's render.
+import { showThinkingWhileLive } from "./thinking.ts";
 import { CHANGES_CUT, CHANGES_X, entryFrame, type EntryFrame, GLYPH } from "../kit/index.ts";
 import {
 	BashExecutionComponent,
@@ -63,6 +64,7 @@ export function framePiEntries(source: EntryPaint): void {
 	paint = source;
 	if (installed) return;
 	installed = true;
+	showThinkingWhileLive(() => paint() !== undefined);
 	wrap(UserMessageComponent, (self, look) =>
 		look.you ? youFrame(look, fromOf(self, look), sentInOf(self, look)) : undefined,
 	);

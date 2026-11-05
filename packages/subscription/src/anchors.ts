@@ -1,0 +1,75 @@
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+
+/**
+ * Where a conversation state lives in Claude Code's own session files: after the assistant
+ * message `messageId` of session `sessionId`. Keyed by the pi transcript chain hash, so a pi
+ * session that diverges from a live Claude Code process (abort, branch, restart) resumes the
+ * exact bytes Claude Code sent before and keeps its prompt cache. `entryUuid` is the Claude
+ * Code transcript-entry uuid streamed with that message; anchors written before it was
+ * captured carry only the API message id and are resolved by scanning the transcript.
+ */
+export interface Anchor {
+	sessionId: string;
+	messageId: string;
+	cwd: string;
+	entryUuid?: string;
+}
+
+const MAX_ENTRIES = 20_000;
+/** It names your folders and sessions. */
+const PRIVATE = 0o600;
+
+export class AnchorRegistry {
+	private map = new Map<string, Anchor>();
+	private loaded = false;
+
+	private readonly file: string;
+
+	constructor(file = join(getAgentDir(), "claude-sdk", "anchors.jsonl")) {
+		this.file = file;
+	}
+
+	private load(): void {
+		if (this.loaded) return;
+		this.loaded = true;
+		if (!existsSync(this.file)) return;
+		const lines = readFileSync(this.file, "utf8").split("\n");
+		for (const line of lines) {
+			if (!line) continue;
+			try {
+				const { k, s, m, c, u } = JSON.parse(line);
+				this.map.set(k, { sessionId: s, messageId: m, cwd: c, ...(typeof u === "string" ? { entryUuid: u } : {}) });
+			} catch {}
+		}
+		if (lines.length > MAX_ENTRIES * 2) this.compact();
+	}
+
+	private compact(): void {
+		const entries = [...this.map.entries()].slice(-MAX_ENTRIES);
+		this.map = new Map(entries);
+		writeFileSync(this.file, entries.map(([k, a]) => line(k, a)).join(""), { mode: PRIVATE });
+	}
+
+	get(key: string): Anchor | undefined {
+		this.load();
+		return this.map.get(key);
+	}
+
+	put(key: string, anchor: Anchor): void {
+		this.load();
+		this.map.delete(key);
+		this.map.set(key, anchor);
+		try {
+			mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
+			appendFileSync(this.file, line(key, anchor), { mode: PRIVATE });
+		} catch {
+			// Persistence is an optimization; the in-memory map still serves this process.
+		}
+	}
+}
+
+function line(k: string, a: Anchor): string {
+	return `${JSON.stringify({ k, s: a.sessionId, m: a.messageId, c: a.cwd, ...(a.entryUuid ? { u: a.entryUuid } : {}) })}\n`;
+}

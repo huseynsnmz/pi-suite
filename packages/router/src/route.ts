@@ -1,5 +1,5 @@
 // Which real model answers a request. Pure, so every rule can be tested without Pi.
-import type { RouterConfig } from "./config.ts";
+import type { Role, RouterConfig, ThinkingLevel } from "./config.ts";
 
 export interface RouterState {
   phase: "plan" | "build";
@@ -15,12 +15,14 @@ export interface RouteInput {
   subagent: boolean;
   state: RouterState | undefined;
   previous: string | undefined;
-  failed: { model: string; errorMessage: string | undefined } | undefined;
+  failed: { model: string; errorMessage: string | undefined; thinking?: ThinkingLevel } | undefined;
   messages: readonly { role: string; toolName?: string; isError?: boolean }[];
 }
 
 export interface RouteChoice {
   model: string;
+  /** Only when the role has its own. Otherwise the level selected with /effort applies. */
+  thinking?: ThinkingLevel;
   /** Only when it changed, because Pi stores every new object it gets. */
   state?: RouterState;
 }
@@ -42,9 +44,13 @@ function nextState(input: RouteInput): RouterState {
 }
 
 export function chooseModel(config: RouterConfig, input: RouteInput): RouteChoice {
-  const home = input.subagent ? (config.subagent ?? config.build) : config.build;
+  const forRole = (role: Role, model: string): Pick<RouteChoice, "model" | "thinking"> => {
+    const thinking = config.thinking?.[role];
+    return thinking === undefined ? { model } : { model, thinking };
+  };
+  const home = input.subagent && config.subagent !== undefined ? forRole("subagent", config.subagent) : forRole("build", config.build);
   // Compaction summaries, and any other extension's call that names the virtual model.
-  if (input.reason === "direct") return { model: home };
+  if (input.reason === "direct") return home;
 
   // Worked out first, so an edit made on the fallback or during a retry still counts.
   const state = input.subagent ? input.state : nextState(input);
@@ -52,16 +58,16 @@ export function chooseModel(config: RouterConfig, input: RouteInput): RouteChoic
 
   if (input.reason === "retry" && input.failed) {
     const overloaded = OVERLOADED.test(input.failed.errorMessage ?? "");
-    const moves = overloaded && config.fallback !== undefined && config.fallback !== input.failed.model;
-    return { model: moves ? (config.fallback as string) : input.failed.model, ...changed };
+    if (overloaded && config.fallback !== undefined && config.fallback !== input.failed.model) return { ...forRole("fallback", config.fallback), ...changed };
+    return { model: input.failed.model, ...(input.failed.thinking === undefined ? {} : { thinking: input.failed.thinking }), ...changed };
   }
 
   // Back on the first choice at the next message, not on every tool call in between.
   if (input.reason === "continuation" && input.previous !== undefined && input.previous === config.fallback) {
-    return { model: input.previous, ...changed };
+    return { ...forRole("fallback", input.previous), ...changed };
   }
 
-  if (input.subagent) return { model: home };
-  const model = input.mode === "plan" || state?.phase === "plan" ? config.plan : config.build;
-  return { model, ...changed };
+  if (input.subagent) return home;
+  const choice = input.mode === "plan" || state?.phase === "plan" ? forRole("plan", config.plan) : forRole("build", config.build);
+  return { ...choice, ...changed };
 }

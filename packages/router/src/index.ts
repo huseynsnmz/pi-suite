@@ -1,6 +1,7 @@
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import { isComplete, loadConfig, parseConfig, parseRef, type Role, ROLES, type SavedConfig, saveConfig, VIRTUAL_ID, VIRTUAL_PROVIDER } from "./config.ts";
+import { isComplete, loadConfig, parseConfig, parseRef, type Role, ROLES, type SavedConfig, saveConfig, THINKING_LEVELS, type ThinkingLevel, VIRTUAL_ID, VIRTUAL_PROVIDER } from "./config.ts";
 import { judgeModel, setJudgeModel } from "./judge.ts";
 import { chooseModel, type RouterState } from "./route.ts";
 
@@ -8,8 +9,8 @@ import { chooseModel, type RouterState } from "./route.ts";
 const READER_PROBE = "pi-router:reader-model";
 const MODE_PROBE = "pi-modes:mode";
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const VIRTUAL_API = "pi-virtual";
+const SELECTED_LEVEL = "same as /effort";
 
 const JUDGE = "judge";
 const JUDGE_HELP = "decides permission asks for pi-permission-classifier";
@@ -46,7 +47,9 @@ export default function piRouter(pi: ExtensionAPI): void {
 
   pi.events.on(READER_PROBE, (data) => {
     if (!isComplete(saved)) return;
-    (data as { model?: string }).model = saved.reader ?? saved.build;
+    const probe = data as { model?: string; thinking?: ThinkingLevel };
+    probe.model = saved.reader ?? saved.build;
+    probe.thinking = saved.thinking?.[saved.reader === undefined ? "build" : "reader"];
   });
 
   function currentMode(): string | undefined {
@@ -56,8 +59,8 @@ export default function piRouter(pi: ExtensionAPI): void {
   }
 
   function register(): void {
-    // A broken file still registers, so router/auto stops with the reason rather than Pi picking another model.
-    if (registered || (!isComplete(saved) && problem === undefined)) return;
+    // Always listed. With nothing set or a broken file it stops with the reason, rather than Pi picking another model.
+    if (registered) return;
     registered = true;
     pi.registerVirtualModel<RouterState>({
       provider: VIRTUAL_PROVIDER,
@@ -73,14 +76,14 @@ export default function piRouter(pi: ExtensionAPI): void {
           subagent: process.env.PI_SUBAGENT_CHILD === "1",
           state: request.state,
           previous: refOf(request.previous?.model),
-          failed: request.failed && { model: refOf(request.failed.model) as string, errorMessage: request.failed.message.errorMessage },
+          failed: request.failed && { model: refOf(request.failed.model) as string, errorMessage: request.failed.message.errorMessage, thinking: request.failed.thinkingLevel },
           messages: request.messages,
         });
         const { provider, id } = parseRef(choice.model);
         const model = ctx.modelRegistry.find(provider, id);
         if (model === undefined) throw new Error(`pi-router: ${choice.model} isn't a known model. Run /router`);
         if (!ctx.modelRegistry.hasConfiguredAuth(model)) throw new Error(`pi-router: no login for ${choice.model}. Run /login or /router`);
-        return { model, thinkingLevel: request.thinkingLevel, state: choice.state };
+        return { model, thinkingLevel: choice.thinking ?? request.thinkingLevel, state: choice.state };
       },
     });
   }
@@ -94,9 +97,15 @@ export default function piRouter(pi: ExtensionAPI): void {
     ctx.ui.notify("The permission judge has no model of its own, so with router/auto it can't judge and every ask comes to you. Set judge in /router.", "warning");
   }
 
+  function warnIfNotSetUp(ctx: ExtensionContext): void {
+    if (problem !== undefined || isComplete(saved) || !ctx.hasUI || refOf(ctx.model) !== `${VIRTUAL_PROVIDER}/${VIRTUAL_ID}`) return;
+    ctx.ui.notify("router/auto has no models yet. Run /router to choose plan and build.", "warning");
+  }
+
   pi.on("session_start", (_event, ctx) => {
     register();
     if (problem !== undefined && ctx.hasUI) ctx.ui.notify(problem, "error");
+    warnIfNotSetUp(ctx);
     warnAboutJudge(ctx);
   });
   // Pi keeps virtual models across a reload, so one left here would outlive this extension being turned off.
@@ -105,16 +114,43 @@ export default function piRouter(pi: ExtensionAPI): void {
     registered = false;
     pi.unregisterVirtualModel(VIRTUAL_PROVIDER, VIRTUAL_ID);
   });
-  pi.on("model_select", (_event, ctx) => warnAboutJudge(ctx));
+  pi.on("model_select", (_event, ctx) => {
+    warnIfNotSetUp(ctx);
+    warnAboutJudge(ctx);
+  });
 
   function setRole(role: Role, ref: string | undefined): void {
     // Another session may have changed it since this one read it.
     const next: SavedConfig = { ...loadConfig(agentDir) };
     if (ref === undefined) delete next[role];
     else next[role] = ref;
+    // Another model may not have the same levels, so this role's level is chosen again.
+    if (next.thinking !== undefined) {
+      const { [role]: _dropped, ...others } = next.thinking;
+      if (Object.keys(others).length > 0) next.thinking = others;
+      else delete next.thinking;
+    }
     saved = parseConfig(next);
     saveConfig(agentDir, saved);
     register();
+  }
+
+  function setThinking(role: Role, level: ThinkingLevel): void {
+    const next: SavedConfig = { ...loadConfig(agentDir) };
+    next.thinking = { ...next.thinking, [role]: level };
+    saved = parseConfig(next);
+    saveConfig(agentDir, saved);
+  }
+
+  /** Offers only what the chosen model can do. A model with no levels to choose has nothing to ask. */
+  async function chooseThinking(ctx: ExtensionContext, role: Role, ref: string): Promise<void> {
+    const { provider, id } = parseRef(ref);
+    const model = ctx.modelRegistry.find(provider, id);
+    const levels = model === undefined ? [] : getSupportedThinkingLevels(model);
+    if (levels.length < 2) return;
+    const picked = await ctx.ui.select(`Reasoning for ${role} on ${ref}`, [SELECTED_LEVEL, ...levels]);
+    if (picked === undefined || picked === SELECTED_LEVEL) return;
+    setThinking(role, picked as ThinkingLevel);
   }
 
   async function chooseJudge(ctx: ExtensionContext, models: readonly string[]): Promise<void> {
@@ -141,7 +177,11 @@ export default function piRouter(pi: ExtensionAPI): void {
     }
     for (;;) {
       const judge = judgeModel(agentDir);
-      const rows = [...ROLES.map((role) => `${role}: ${saved[role] ?? UNSET[role] ?? "not set"}`), `${JUDGE}: ${judge ?? (judge === null ? "not set" : "not installed")}`];
+      const shown = (role: Role): string => {
+        const level = saved.thinking?.[role];
+        return `${saved[role] ?? UNSET[role] ?? "not set"}${saved[role] !== undefined && level !== undefined ? ` · ${level}` : ""}`;
+      };
+      const rows = [...ROLES.map((role) => `${role}: ${shown(role)}`), `${JUDGE}: ${judge ?? (judge === null ? "not set" : "not installed")}`];
       const row = await ctx.ui.select("Router: which role? (Esc when done)", rows);
       if (row === undefined) break;
       const role = ROLES[rows.indexOf(row)];
@@ -153,13 +193,15 @@ export default function piRouter(pi: ExtensionAPI): void {
       const picked = await ctx.ui.select(`${role} ${ROLE_HELP[role]}`, [...(unset === undefined ? [] : [unset]), ...models]);
       if (picked === undefined) continue;
       try {
-        setRole(role, picked === unset ? undefined : picked);
+        const ref = picked === unset ? undefined : picked;
+        setRole(role, ref);
+        if (ref !== undefined) await chooseThinking(ctx, role, ref);
       } catch (error) {
         ctx.ui.notify((error as Error).message, "error");
       }
     }
-    if (isComplete(saved)) ctx.ui.notify(`Choose ${VIRTUAL_PROVIDER}/${VIRTUAL_ID} in /model to use these.`, "info");
-    else ctx.ui.notify("The router needs both plan and build before router/auto appears.", "warning");
+    if (!isComplete(saved)) ctx.ui.notify("router/auto needs both plan and build before it can answer.", "warning");
+    else if (refOf(ctx.model) !== `${VIRTUAL_PROVIDER}/${VIRTUAL_ID}`) ctx.ui.notify(`Choose ${VIRTUAL_PROVIDER}/${VIRTUAL_ID} in /model to use these.`, "info");
   }
 
   pi.registerCommand("router", {

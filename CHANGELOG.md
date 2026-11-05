@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- Router: each role can have its own reasoning level, chosen in `/router` from what that role's model offers.
+- Up and Down with one line typed go through past prompts that start with it. With nothing typed they also reach this folder's other sessions.
+- With `hideThinkingBlock` on, reasoning shows while it's written and collapses when the message is done. `Ctrl+T` opens it.
+- New part, off until you run `/suite on subscription`: Claude models on your Claude login, based on pi-claude-subscription. It asks before anything more is billed as extra usage. See its README for the limits and what Anthropic's terms say.
+
+### Fixes
+
+- `router/auto` is always listed in `/model`, and says to run `/router` until `plan` and `build` are set.
+- `/clear` keeps the current model and reasoning level.
+
 ## [0.2.2]
 
 ### Fixes
