@@ -25,6 +25,8 @@ export function ruleFor(rules, value) {
 /** Two words for tools with subcommands, like `git diff*`, and a narrower rule is the reviewer's to choose. */
 export function suggestPattern(command) {
   const words = command.trim().split(/\s+/);
+  // `cd*` would also match `cdk deploy`. Paths are still checked against the folder it moves to.
+  if (words[0] === "cd") return "cd *";
   const second = words[1];
   return second !== undefined && /^[a-z][\w:-]*$/i.test(second) ? `${words[0]} ${second}*` : `${words[0]}*`;
 }
@@ -47,6 +49,8 @@ export function collect(entries, permission = {}, history = []) {
     const by = entry.decidedBy;
     if (!PERSON.has(by?.kind) && !(by?.kind === "authorizer" && by.name !== "pi-modes")) continue;
     const surface = entry.surface ?? entry.toolName;
+    // Auto lets project edits through by itself, so these say nothing about a rule worth adding.
+    if (by?.kind === "authorizer" && (surface === "edit" || surface === "write")) continue;
 
     if (surface === "bash") {
       const command = entry.executedUnit ?? entry.command;
@@ -74,6 +78,44 @@ export function collect(entries, permission = {}, history = []) {
     .map((group) => ({ ...group, days: group.days.size, examples: [...group.examples] }))
     .sort((a, b) => b.approvals - a.approvals || b.ran - a.ran);
   return { candidates, skipped };
+}
+
+/**
+ * What the permission judge decided, from its entries in the log: how often, why it passed asks on,
+ * and what you then approved yourself, which is what auto could have spared you.
+ */
+export function collectJudge(entries) {
+  const decisions = entries.filter((entry) => entry.event === "classifier.decision");
+  const verdicts = { allow: 0, deny: 0, defer: 0 };
+  const reasons = new Map();
+  const deferred = new Map();
+  for (const entry of decisions) {
+    if (entry.verdict in verdicts) verdicts[entry.verdict] += 1;
+    if (entry.verdict !== "defer") continue;
+    const reason = entry.deferReason ?? "uncertain";
+    const group = reasons.get(reason) ?? { reason, count: 0, surfaces: new Set(), last: "" };
+    group.count += 1;
+    if (typeof entry.surface === "string") group.surfaces.add(entry.surface);
+    if (String(entry.timestamp ?? "") > group.last) group.last = String(entry.timestamp);
+    reasons.set(reason, group);
+    if (typeof entry.requestId === "string") deferred.set(entry.requestId, { reason, surface: entry.surface, value: entry.value });
+  }
+  const approved = new Map();
+  for (const entry of entries) {
+    const asked = deferred.get(entry.requestId);
+    if (asked === undefined || !APPROVED.has(entry.resolution) || !PERSON.has(entry.decidedBy?.kind)) continue;
+    const value = typeof asked.value === "string" && asked.surface === "bash" && !SECRET.test(asked.value) ? suggestPattern(asked.value) : "";
+    const key = `${asked.surface} ${value} ${asked.reason}`;
+    const group = approved.get(key) ?? { surface: asked.surface, ...(value === "" ? {} : { pattern: value }), reason: asked.reason, approvals: 0 };
+    group.approvals += 1;
+    approved.set(key, group);
+  }
+  return {
+    decisions: decisions.length,
+    ...verdicts,
+    deferReasons: [...reasons.values()].map((group) => ({ ...group, surfaces: [...group.surfaces] })).sort((a, b) => b.count - a.count),
+    deferredThenApproved: [...approved.values()].sort((a, b) => b.approvals - a.approvals).slice(0, MAX_CANDIDATES),
+  };
 }
 
 /**
@@ -196,7 +238,8 @@ export async function reviewData(agent) {
       blocks.push(...sandboxBlocks(entries));
     }
   }
-  const result = capped(collect(logFound ? parseLog(await readFile(logPath, "utf8")) : [], permission, history));
+  const log = logFound ? parseLog(await readFile(logPath, "utf8")) : [];
+  const result = capped(collect(log, permission, history));
   const sandboxPath = join(agent, "sandbox.json");
   let sandboxConfig = {};
   try {
@@ -204,5 +247,5 @@ export async function reviewData(agent) {
   } catch {
     // Comments are allowed there. Already-allowed entries may show up, and apply won't add them twice.
   }
-  return { logFound, ...result, sandbox: capped(collectSandbox(blocks, sandboxConfig)) };
+  return { logFound, ...result, judge: collectJudge(log), sandbox: capped(collectSandbox(blocks, sandboxConfig)) };
 }

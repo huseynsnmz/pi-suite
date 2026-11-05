@@ -23,6 +23,7 @@ In `/model`, `Enter` selects a model for this session and `Ctrl+S` saves it as y
 | `plan` | Reads and plans, up to the first edit, and everything in `plan` mode | Required |
 | `build` | Everything after that, and compaction summaries | Required |
 | `reader` | Reads web pages for [pi-web](https://github.com/huseynsnmz/pi-suite/tree/main/packages/web) | Same as `build` |
+| `mastermind` | Reviews past conversations for `/mastermind`, and writes rules for the other models | Not set |
 | `judge` | Decides permission asks for `pi-permission-classifier` | See below |
 | `subagent` | Runs subagents that use `router/auto` | Same as `build` |
 | `fallback` | Takes over when a provider is overloaded or rate limited | Retries on the same model |

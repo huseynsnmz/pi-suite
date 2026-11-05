@@ -13,7 +13,10 @@
  * that changes, `judgeGated` stays false and the extension warns.
  */
 
-import type { Mode } from "./modes.ts";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { AGENT_TOOL, type Mode } from "./modes.ts";
 
 export const JUDGE_NAMES: ReadonlySet<string> = new Set(["permission-judge", "classifier"]);
 
@@ -35,6 +38,53 @@ type ServiceMap = Map<string, ServiceLike> & { [PATCHED]?: true };
 interface SessionState {
   mode: Mode;
   judgeGated: boolean;
+  cwd?: string;
+  /** Where the model's latest edits and writes go, by call id, as an ask doesn't say. */
+  editPaths?: Map<string, string>;
+}
+
+/** Inside a project, but they run code or change what Pi does, so the judge still looks. */
+const GUARDED = new Set([".git", ".pi", ".claude", ".husky", ".github", ".vscode", ".envrc"]);
+
+/** The path with symlinks followed, as far as it exists. Undefined for a link that leads nowhere. */
+function realTarget(path: string): string | undefined {
+  if (existsSync(path)) return realpathSync(path);
+  try {
+    lstatSync(path);
+    return undefined; // It's there, and can't be followed.
+  } catch {
+    const parent = dirname(path);
+    if (parent === path) return undefined;
+    const real = realTarget(parent);
+    return real === undefined ? undefined : join(real, basename(path));
+  }
+}
+
+/** An edit or write to an ordinary file in the project: what `auto` lets through without asking anyone. */
+export function isProjectEdit(details: unknown, cwd: string | undefined): boolean {
+  const { toolName, path } = (details ?? {}) as { toolName?: unknown; path?: unknown };
+  if ((toolName !== "edit" && toolName !== "write") || typeof path !== "string" || cwd === undefined) return false;
+  const expanded = path === "~" || path.startsWith("~/") ? join(homedir(), path.slice(1)) : path;
+  const target = realTarget(resolve(cwd, expanded));
+  const root = realTarget(cwd);
+  if (target === undefined || root === undefined) return false;
+  const inside = relative(root, target);
+  if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) return false;
+  return !inside.split(sep).some((part) => GUARDED.has(part));
+}
+
+/** It does nothing by itself: what the agent then does is still checked. */
+function needsNoAsk(details: unknown): boolean {
+  return (details as { toolName?: unknown } | undefined)?.toolName === AGENT_TOOL;
+}
+
+function autoAllows(state: SessionState, details: unknown, log: unknown): boolean {
+  if (state.mode !== "auto") return false;
+  const { toolName, toolCallId } = (details ?? {}) as { toolName?: unknown; toolCallId?: unknown };
+  const path = typeof toolCallId === "string" ? state.editPaths?.get(toolCallId) : undefined;
+  if (!isProjectEdit({ toolName, path }, state.cwd)) return false;
+  (log as { review?: (event: string, fields: unknown) => void } | undefined)?.review?.("pi-modes.project_edit", { path });
+  return true;
 }
 
 type Store = Record<symbol, unknown>;
@@ -61,9 +111,12 @@ function gateService(store: Store, sessionId: string, service: ServiceLike): voi
   service.registerAuthorizer = (name, authorize) => {
     if (!JUDGE_NAMES.has(name)) return register(name, authorize);
     stateFor(store, sessionId).judgeGated = true;
-    return register(name, async (details, query, log) =>
-      stateFor(store, sessionId).mode === "auto" ? authorize(details, query, log) : { kind: "defer" },
-    );
+    return register(name, async (details, query, log) => {
+      const state = stateFor(store, sessionId);
+      if (needsNoAsk(details)) return { kind: "allow" };
+      if (state.mode !== "auto") return { kind: "defer" };
+      return autoAllows(state, details, log) ? { kind: "allow" } : authorize(details, query, log);
+    });
   };
 }
 
@@ -91,9 +144,10 @@ export function installJudgeGate(store: Store = globalThis as unknown as Store):
 export function registerYoloLink(sessionId: string, store: Store = globalThis as unknown as Store): (() => void) | undefined {
   const service = (store[SERVICES_KEY] as ServiceMap | undefined)?.get(sessionId);
   if (typeof service?.registerAuthorizer !== "function") return undefined;
-  return service.registerAuthorizer(YOLO_LINK, async () =>
-    stateFor(store, sessionId).mode === "yolo" ? { kind: "allow" } : { kind: "defer" },
-  );
+  return service.registerAuthorizer(YOLO_LINK, async (details, _query, log) => {
+    const state = stateFor(store, sessionId);
+    return needsNoAsk(details) || state.mode === "yolo" || autoAllows(state, details, log) ? { kind: "allow" } : { kind: "defer" };
+  });
 }
 
 export function hasPermissionSystem(sessionId: string, store: Store = globalThis as unknown as Store): boolean {
@@ -102,6 +156,23 @@ export function hasPermissionSystem(sessionId: string, store: Store = globalThis
 
 export function setGateMode(sessionId: string, mode: Mode, store: Store = globalThis as unknown as Store): void {
   stateFor(store, sessionId).mode = mode;
+}
+
+/** Called with each message the model finishes, which comes before any of its tools are asked about. */
+export function noteEditPaths(sessionId: string, message: unknown, store: Store = globalThis as unknown as Store): void {
+  const { role, content } = (message ?? {}) as { role?: unknown; content?: unknown };
+  if (role !== "assistant" || !Array.isArray(content)) return;
+  const paths = new Map<string, string>();
+  for (const block of content as { type?: unknown; id?: unknown; name?: unknown; arguments?: { path?: unknown } }[]) {
+    if (block?.type === "toolCall" && (block.name === "edit" || block.name === "write") && typeof block.id === "string" && typeof block.arguments?.path === "string") {
+      paths.set(block.id, block.arguments.path);
+    }
+  }
+  stateFor(store, sessionId).editPaths = paths;
+}
+
+export function setGateCwd(sessionId: string, cwd: string, store: Store = globalThis as unknown as Store): void {
+  stateFor(store, sessionId).cwd = cwd;
 }
 
 export function judgeGated(sessionId: string, store: Store = globalThis as unknown as Store): boolean {

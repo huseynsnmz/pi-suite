@@ -16,6 +16,7 @@ SUITES = {
     "modes-first": ["python3", MODES, "modes-first"],
     "modes-last": ["python3", MODES, "modes-last"],
     "classifier-last": ["python3", MODES, "classifier-last"],
+    "modes-sandbox": ["python3", MODES, "sandbox"],
 }
 wanted = sys.argv[1:] or list(SUITES)
 unknown = [name for name in wanted if name not in SUITES]

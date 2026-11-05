@@ -38,6 +38,8 @@ home, agent, project = root / "home", root / "home/.pi/agent", root / "project"
 (agent / "extensions/pi-permission-system").mkdir(parents=True)
 (agent / "extensions/pi-permission-classifier").mkdir(parents=True)
 project.mkdir()
+outside = root / "outside"
+outside.mkdir()
 log = root / "model.log"
 log.touch()
 
@@ -52,7 +54,7 @@ env = {
 }}}))
 (agent / "extensions/pi-permission-system/config.json").write_text(json.dumps({
     "doublePressToConfirm": False, "authorizerChain": [] if SOLO else ["pi-modes", "permission-judge"],
-    "permission": {"*": "ask", "bash": {"*": "ask", "touch denied*": "deny"}, "path": {"*": "allow", "*.secret": "deny"}, "read": "allow", "submit_plan": "allow", "external_directory": "allow"},
+    "permission": {"*": "ask", "bash": {"*": "ask", "touch incd*": "allow", "touch denied*": "deny"}, "path": {"*": "allow", "*.secret": "deny"}, "read": "allow", "submit_plan": "allow", "external_directory": {"*": "allow", str(outside): "ask", f"{outside}/*": "ask"}},
 }))
 (agent / "extensions/pi-permission-classifier/config.json").write_text("{}")
 (agent / "settings.json").write_text(json.dumps({
@@ -140,6 +142,11 @@ class Terminal:
             os.waitpid(self.pid, 0)
         except OSError:
             pass
+
+
+def log_results():
+    path = Path(f"{log}.results")
+    return path.read_text() if path.exists() else ""
 
 
 def judge_calls():
@@ -275,6 +282,15 @@ try:
         term.send("y")
         term.wait("FINISHED", 15)
         check("sandbox: a command in the project runs", (project / "inside.txt").exists())
+        (project / "box").mkdir()
+        term.prompt("RUN:cd box && touch incd-boxed.txt")
+        term.settle(5)
+        term.prompt("RUN:touch incd-boxed2.txt")
+        term.settle(5)
+        where = sorted(str(path.relative_to(project)) for path in project.rglob("incd-boxed*.txt"))
+        check("sandbox: the folder carries over inside it", where == ["box/incd-boxed.txt", "box/incd-boxed2.txt"], str(where))
+        term.prompt(f"RUN:cd {project}")
+        term.settle(5)
         ask_yolo()
         term.wait("YOLO")
         term.pump(0.5)
@@ -360,6 +376,14 @@ try:
         term.send("y")
         term.until((project / "normal.txt").exists, "normal.txt")
         check("normal: approving the prompt runs it", True)
+        term.settle(1)
+        mark = len(term.text)
+        term.prompt("AGENT:from-agent.txt")
+        check("an agent's ask comes to your session", term.wait(r"for 'from-agent\.txt'", 30) and not (project / "from-agent.txt").exists(), term.text[mark:][-300:])
+        term.pump(0.5)
+        term.send("\r")
+        term.until((project / "from-agent.txt").exists, "from-agent.txt", 30)
+        check("and approving it lets the agent write", True)
     term.settle(1)
 
     term.send(SHIFT_TAB)
@@ -372,6 +396,38 @@ try:
         term.prompt("RUN:touch auto.txt")
         term.until((project / "auto.txt").exists, "auto.txt")
         check("auto: judge decides and the command runs without a prompt", judge_calls() == 1, f"judge={judge_calls()}")
+        term.settle(1)
+        term.prompt("WRITE:auto-edit.txt")
+        term.until((project / "auto-edit.txt").exists, "auto-edit.txt")
+        check("auto: a file in the project is written without the judge or a prompt", judge_calls() == 1, f"judge={judge_calls()}")
+        term.settle(1)
+        term.prompt("WRITE:.husky/auto-hook")
+        term.until((project / ".husky/auto-hook").exists, "auto-hook")
+        check("auto: a guarded folder still goes to the judge", judge_calls() == 2, f"judge={judge_calls()}")
+        term.settle(1)
+        (project / "sub/deep").mkdir(parents=True)
+        def ran(command, where):
+            term.settle(1)
+            term.prompt(f"RUN:{command}")
+            term.until((project / where).exists, where)
+        ran("cd sub/deep && touch incd.txt", "sub/deep/incd.txt")
+        check("cd: the rule was added for you, so moving asks nobody", judge_calls() == 2, f"judge={judge_calls()}")
+        ran("touch incd2.txt", "sub/deep/incd2.txt")
+        check("cd: the folder carries over to the next command, and the model is told", "Bash stays in" in log_results(), log_results()[-200:])
+        ran("cd sub/deep && touch incd3.txt", "sub/deep/incd3.txt")
+        check("cd: repeating a move doesn't fail", True)
+        ran("cd .. && touch incd4.txt", "sub/incd4.txt")
+        check("cd: a relative move starts from there", ORDER == "modes-last" or judge_calls() == 2, f"judge={judge_calls()}")
+        term.settle(1)
+        asked_before = judge_calls()
+        term.prompt(f"RUN:cd {outside} && touch incd-out.txt")
+        approve_dialog_if_first()
+        term.until((outside / "incd-out.txt").exists, "incd-out.txt")
+        check("cd: a move outside the project is still gated", DIALOG_FIRST or judge_calls() == asked_before + 1, f"judge={judge_calls()}")
+        term.settle(1)
+        check("cd: leaving the project says it was reset", "Shell cwd was reset" in log_results(), log_results()[-200:])
+        ran("touch incd5.txt", "incd5.txt")
+        check("cd: and the next command runs at the top", True)
     term.settle(1)
 
     term.send(SHIFT_TAB)
@@ -536,7 +592,7 @@ try:
         )
         rules = json.loads(config.read_text())["permission"]["bash"]
         check("skill: applies a rule and keeps the deny after it",
-              applied.returncode == 0 and list(rules) == ["*", "touch normal.txt*", "touch denied*"], str(rules))
+              applied.returncode == 0 and [rule for rule in rules if not rule.startswith("cd ")] == ["*", "touch normal.txt*", "touch incd*", "touch denied*"] and list(rules)[-1] == "touch denied*", str(rules))
 
     term = Terminal()
     term.wait(r"mode: normal", 40)

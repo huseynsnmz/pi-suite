@@ -7,7 +7,7 @@ Switch [Pi](https://pi.dev) between permission modes with `Shift+Tab`.
 | Mode | What the agent can do | Who approves |
 |---|---|---|
 | `normal` | Anything your permission rules allow | You |
-| `auto` | Anything your permission rules allow | Your permission judge first, then you if it defers |
+| `auto` | Anything your permission rules allow, and edits to ordinary files in the project | Your permission judge first, then you if it defers |
 | `plan` | Read and research, then submit a plan. No edits | You, for any non-read-only command |
 | `read-only` | Read and research only | Nobody. Everything else is blocked |
 | `yolo` | Anything your `deny` rules don't block, or anything at all if you turn them off | Nobody. It doesn't ask |
@@ -117,6 +117,14 @@ In `pi -p` the agent is told nobody can answer. A client without the terminal's 
 **`@gotgenes/pi-permission-system`:** still runs in every mode. This extension only adds restrictions, so a `deny` rule always wins. With `"*": "ask"`, it asks before `ask_questions` and `todo` too. Add `"ask_questions": "allow"` and `"todo": "allow"` to its `permission` rules to skip that.
 
 **`pi-permission-classifier`:** runs only in `auto`. In every other mode it defers, and the request goes to your normal prompt. Set it up as its README describes, with `permission-judge` in `authorizerChain`. Its `perm-judge:` footer entry stays visible in all modes, so go by the `mode:` entry. If the classifier is listed after `pi-permission-system`, it only registers during your first prompt, and `auto` starts working from then on.
+
+In `auto`, `edit` and `write` on files in the project skip the judge, so you aren't asked, and a slow judge doesn't hold up each edit. `deny` rules still apply. Paths outside the project, and `.git`, `.pi`, `.claude`, `.husky`, `.github`, `.vscode` and `.envrc`, still go to the judge. Other files can run code too, such as `package.json` scripts, so use `normal` where that matters.
+
+`/review-permissions` also reads the judge's decisions from the review log, and says why `auto` keeps asking.
+
+**Moving around:** bash keeps its folder, as in Claude Code. A `cd` at the start of a command carries over to later commands while it stays in the project, and the command's result tells the model so. A move outside runs once, and then the result says `Shell cwd was reset`. Later commands run as `cd <folder> && <command>`, which the permission system follows, so paths are checked from the right place. A `cd` it can't follow, such as `cd "$DIR"`, works for that command only. `read`, `edit` and `write` paths don't move.
+
+The permission system judges each part of a chain, so with `"*": "ask"`, every `cd x && go test` would ask about the `cd`. The first time you start Pi in a project, pi-modes allows `cd` inside that project in your bash rules, keeps a backup, and tells you. The rest of the command is still checked, and so is a `cd` anywhere else or one it can't read, such as `cd "$DIR"`. A blanket `"cd *": "allow"` is not the same: the permission system doesn't follow a new file's name into the folder a `cd` reached, so `cd /elsewhere && touch new` would go unchecked. It won't overwrite a rule of your own, and if you remove the rules, they stay removed. If the permission system loaded before pi-suite, restart Pi once for them to apply. Without a permission judge, add `"agent": "allow"` too, or you'll be asked about each `agent` call.
 
 Without a classifier, `auto` behaves like `normal`, and the extension warns you when you switch to it.
 

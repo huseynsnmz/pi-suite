@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { applyRules, applySandbox, refuseBash, refuseDomain, refuseSandboxPath, refuseTool, withBashAllows } from "../src/review/apply.mjs";
-import { collect, collectSandbox, ranCommands, ruleFor, sandboxBlocks, suggestPattern } from "../src/review/collect.mjs";
+import { collect, collectJudge, collectSandbox, ranCommands, ruleFor, sandboxBlocks, suggestPattern } from "../src/review/collect.mjs";
 
 const approved = (command, extra = {}) => ({ event: "permission_request.approved", resolution: "approved", decidedBy: { kind: "user", via: "dialog" }, surface: "bash", command, timestamp: "2026-11-03T10:00:00Z", ...extra });
 
@@ -159,4 +159,34 @@ test("one refused sandbox choice stops all of them", () => {
   const { config, refusals } = applySandbox({}, { read: ["~/work", "~/.ssh"] });
   assert.equal(config, undefined);
   assert.equal(refusals.length, 1);
+});
+
+test("the judge's decisions say why it deferred, and what a person then approved", () => {
+  const decision = (requestId, verdict, deferReason, surface = "bash", value = "npm test -- x") =>
+    ({ event: "classifier.decision", timestamp: "2026-11-04T10:00:00Z", requestId, verdict, deferReason, surface, value });
+  const judge = collectJudge([
+    decision("a", "allow"),
+    decision("b", "defer", "timeout"),
+    decision("c", "defer", "timeout", "edit", "src/a.go"),
+    decision("d", "defer", "deny-capped", "bash", "curl -H token=abc"),
+    { requestId: "b", resolution: "approved", decidedBy: { kind: "user" } },
+    { requestId: "c", resolution: "denied", decidedBy: { kind: "user" } },
+    { requestId: "d", resolution: "approved", decidedBy: { kind: "user" } },
+    { requestId: "a", resolution: "approved", decidedBy: { kind: "authorizer", name: "permission-judge" } },
+  ]);
+  assert.equal(judge.decisions, 4);
+  assert.deepEqual([judge.allow, judge.deny, judge.defer], [1, 0, 3]);
+  assert.deepEqual(judge.deferReasons[0], { reason: "timeout", count: 2, surfaces: ["bash", "edit"], last: "2026-11-04T10:00:00Z" });
+  assert.deepEqual(judge.deferredThenApproved.map((group) => [group.surface, group.pattern, group.reason]), [["bash", "npm test*", "timeout"], ["bash", undefined, "deny-capped"]]);
+});
+
+test("the judge's project edits aren't approvals worth a rule", () => {
+  const { candidates } = collect([{ resolution: "approved", surface: "edit", decidedBy: { kind: "authorizer", name: "permission-judge" } }]);
+  assert.deepEqual(candidates, []);
+});
+
+test("cd gets a rule that can't match cdk, and it's allowed", () => {
+  assert.equal(suggestPattern("cd /some/where"), "cd *");
+  assert.equal(suggestPattern("cdk deploy"), "cdk deploy*");
+  assert.equal(refuseBash("cd *"), undefined);
 });

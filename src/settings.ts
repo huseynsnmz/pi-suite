@@ -11,6 +11,7 @@ export const PARTS = {
   frame: "The start card, framed editor, tool boxes, footer and todo list",
   board: "The board of agent sessions",
   commands: "/clear and /security-review",
+  subagent: "The agent tool: hand a task to a fresh agent, and get its answer back",
   subscription: "Claude models on your Claude login, asking before anything is billed as extra usage",
 } as const;
 

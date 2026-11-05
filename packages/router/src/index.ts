@@ -7,6 +7,7 @@ import { chooseModel, type RouterState } from "./route.ts";
 
 /** Other extensions emit these with an object, and whoever knows fills it in, whatever the load order. */
 const READER_PROBE = "pi-router:reader-model";
+const MASTERMIND_PROBE = "pi-router:mastermind-model";
 const MODE_PROBE = "pi-modes:mode";
 const SETTINGS_PROBE = "pi-suite:router-settings";
 
@@ -21,6 +22,7 @@ const ROLE_HELP: Record<Role, string> = {
   reader: "reads web pages for pi-web",
   subagent: "runs subagents that use this virtual model",
   fallback: "takes over when a provider is overloaded",
+  mastermind: "reviews past conversations for /mastermind, and writes rules for the other models",
 };
 
 /** What a role shows, and offers to go back to, with no model of its own. */
@@ -28,6 +30,7 @@ const UNSET: Partial<Record<Role, string>> = {
   reader: "same as build",
   subagent: "same as build",
   fallback: "none",
+  mastermind: "none",
 };
 
 function refOf(model: { provider: string; id: string } | undefined): string | undefined {
@@ -51,6 +54,12 @@ export default function piRouter(pi: ExtensionAPI): void {
     const probe = data as { model?: string; thinking?: ThinkingLevel };
     probe.model = saved.reader ?? saved.build;
     probe.thinking = saved.thinking?.[saved.reader === undefined ? "build" : "reader"];
+  });
+
+  pi.events.on(MASTERMIND_PROBE, (data) => {
+    const probe = data as { model?: string; thinking?: ThinkingLevel };
+    probe.model = saved.mastermind;
+    probe.thinking = saved.thinking?.mastermind;
   });
 
   function currentMode(): string | undefined {
