@@ -39,12 +39,20 @@ interface SessionState {
   mode: Mode;
   judgeGated: boolean;
   cwd?: string;
+  /** Whether the `agent` tool is pi-suite's own. Another package's could do anything. */
+  agentIsOurs?: boolean;
   /** Where the model's latest edits and writes go, by call id, as an ask doesn't say. */
   editPaths?: Map<string, string>;
 }
 
 /** Inside a project, but they run code or change what Pi does, so the judge still looks. */
 const GUARDED = new Set([".git", ".pi", ".claude", ".husky", ".github", ".vscode", ".envrc"]);
+
+/**
+ * Pi's edit and write tools rewrite these before opening the file, so the path as written isn't the one written to.
+ * The judge sees them rather than this copying Pi's rules, which could drift.
+ */
+const REWRITTEN_BY_PI = /^@|^file:|[\u00A0\u2000-\u200A\u202F\u205F\u3000]/;
 
 /** The path with symlinks followed, as far as it exists. Undefined for a link that leads nowhere. */
 function realTarget(path: string): string | undefined {
@@ -63,19 +71,20 @@ function realTarget(path: string): string | undefined {
 /** An edit or write to an ordinary file in the project: what `auto` lets through without asking anyone. */
 export function isProjectEdit(details: unknown, cwd: string | undefined): boolean {
   const { toolName, path } = (details ?? {}) as { toolName?: unknown; path?: unknown };
-  if ((toolName !== "edit" && toolName !== "write") || typeof path !== "string" || cwd === undefined) return false;
+  if ((toolName !== "edit" && toolName !== "write") || typeof path !== "string" || cwd === undefined || REWRITTEN_BY_PI.test(path)) return false;
   const expanded = path === "~" || path.startsWith("~/") ? join(homedir(), path.slice(1)) : path;
   const target = realTarget(resolve(cwd, expanded));
   const root = realTarget(cwd);
   if (target === undefined || root === undefined) return false;
   const inside = relative(root, target);
   if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) return false;
-  return !inside.split(sep).some((part) => GUARDED.has(part));
+  // Lowercase, as macOS finds `.GIT` at `.git` by default.
+  return !inside.split(sep).some((part) => GUARDED.has(part.toLowerCase()));
 }
 
 /** It does nothing by itself: what the agent then does is still checked. */
-function needsNoAsk(details: unknown): boolean {
-  return (details as { toolName?: unknown } | undefined)?.toolName === AGENT_TOOL;
+function needsNoAsk(state: SessionState, details: unknown): boolean {
+  return state.agentIsOurs === true && (details as { toolName?: unknown } | undefined)?.toolName === AGENT_TOOL;
 }
 
 function autoAllows(state: SessionState, details: unknown, log: unknown): boolean {
@@ -113,7 +122,7 @@ function gateService(store: Store, sessionId: string, service: ServiceLike): voi
     stateFor(store, sessionId).judgeGated = true;
     return register(name, async (details, query, log) => {
       const state = stateFor(store, sessionId);
-      if (needsNoAsk(details)) return { kind: "allow" };
+      if (needsNoAsk(state, details)) return { kind: "allow" };
       if (state.mode !== "auto") return { kind: "defer" };
       return autoAllows(state, details, log) ? { kind: "allow" } : authorize(details, query, log);
     });
@@ -146,7 +155,7 @@ export function registerYoloLink(sessionId: string, store: Store = globalThis as
   if (typeof service?.registerAuthorizer !== "function") return undefined;
   return service.registerAuthorizer(YOLO_LINK, async (details, _query, log) => {
     const state = stateFor(store, sessionId);
-    return needsNoAsk(details) || state.mode === "yolo" || autoAllows(state, details, log) ? { kind: "allow" } : { kind: "defer" };
+    return needsNoAsk(state, details) || state.mode === "yolo" || autoAllows(state, details, log) ? { kind: "allow" } : { kind: "defer" };
   });
 }
 
@@ -173,6 +182,10 @@ export function noteEditPaths(sessionId: string, message: unknown, store: Store 
 
 export function setGateCwd(sessionId: string, cwd: string, store: Store = globalThis as unknown as Store): void {
   stateFor(store, sessionId).cwd = cwd;
+}
+
+export function setGateAgentOurs(sessionId: string, ours: boolean, store: Store = globalThis as unknown as Store): void {
+  stateFor(store, sessionId).agentIsOurs = ours;
 }
 
 export function judgeGated(sessionId: string, store: Store = globalThis as unknown as Store): boolean {

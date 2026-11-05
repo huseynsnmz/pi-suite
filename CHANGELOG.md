@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.5]
+
+### Security
+
+- `auto`: a path Pi rewrites before writing, such as `@.git/hooks/pre-commit`, `@/etc/x` or `file:///etc/x`, went past the project check. These now go to the judge.
+- `auto`: `.GIT` and `.Github` on a case-insensitive disk went past the guarded folder check.
+- The `cd` rules matched `cd <project>/../x`, paths the shell works out later, and symlinks out of the project. They now ask. Projects that already have the rules get the new ones at the next start.
+- An agent started in the default mode, not its parent's, so a parent in `normal` could have a child in `auto`. It now takes its parent's mode. From `plan` it's `read-only`, and from `yolo` it's `normal`.
+- A tool named `agent` from another package no longer skips the judge and your review.
+- `/review-permissions` refuses `cd*`, which also matches `cdk deploy`.
+
+### Fixes
+
+- A `cd` to a folder that isn't there could run somewhere else: `cd build && rm -rf *` in a folder with no `build` went to the project's top `build`. It now fails as in a shell.
+- The bash folder is kept across `/reload` and `/resume`, and follows moves in `/tree`.
+- With no `bash` rules and a catch-all of `allow`, adding the `cd` rules made every command ask. `/review-permissions` had the same problem. Rules now start from your catch-all.
+- `cd` rules work in projects with a space in the path.
+- `/mastermind` no longer marks sessions as reviewed when the answer was cut off or can't be read, and a retry keeps the proposals it didn't repeat.
+- Non-English text in an agent's answer can't be garbled where it's split across chunks.
+
 ## [0.2.4]
 
 ### Features

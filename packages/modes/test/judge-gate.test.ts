@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clearGate, hasPermissionSystem, installJudgeGate, isProjectEdit, judgeGated, noteEditPaths, registerYoloLink, setGateCwd, setGateMode, YOLO_LINK } from "../src/judge-gate.ts";
+import { clearGate, hasPermissionSystem, installJudgeGate, isProjectEdit, judgeGated, noteEditPaths, registerYoloLink, setGateAgentOurs, setGateCwd, setGateMode, YOLO_LINK } from "../src/judge-gate.ts";
 
 const SERVICES = Symbol.for("@gotgenes/pi-permission-system:session-services");
 type Link = (...args: unknown[]) => Promise<unknown>;
@@ -139,6 +139,13 @@ test("auto spares the judge only for ordinary files in the project", () => {
     ["a nested guarded folder", { toolName: "edit", path: "src/.github/workflows/x.yml" }, false],
     ["direnv", { toolName: "write", path: ".envrc" }, false],
     ["the project itself", { toolName: "write", path: "." }, false],
+    ["Pi drops a leading @, so this is git's hooks", { toolName: "write", path: "@.git/hooks/pre-commit" }, false],
+    ["Pi drops a leading @, so this is outside", { toolName: "write", path: "@/etc/x" }, false],
+    ["Pi reads a file URL", { toolName: "write", path: "file:///etc/x" }, false],
+    ["Pi rewrites odd spaces", { toolName: "write", path: "a\u00A0b.go" }, false],
+    ["an @ further along is just a name", { toolName: "write", path: "src/@types/a.ts" }, true],
+    ["another case of git's hooks", { toolName: "write", path: ".GIT/hooks/pre-commit" }, false],
+    ["another case of a guarded folder", { toolName: "edit", path: "src/.Github/workflows/x.yml" }, false],
   ];
   for (const [name, details, want] of cases) assert.equal(isProjectEdit(details, project), want, name);
   assert.equal(isProjectEdit({ toolName: "edit", path: "src/a.go" }, undefined), false, "no folder known");
@@ -176,9 +183,24 @@ test("project edits are allowed in auto alone, with or without the judge in the 
   assert.equal(judged(), 3, "an older message's call");
 });
 
-test("agent needs no ask in any mode, as what it does is still checked", async () => {
+test("another package's agent tool is asked about like anything else", async () => {
   const { store, service, judge, judged } = setup();
   service.registerAuthorizer("permission-judge", judge);
+  registerYoloLink("s1", store);
+  setGateMode("s1", "normal", store);
+  assert.deepEqual(await service.links.get("permission-judge")?.({ toolName: "agent" }), { kind: "defer" }, "nothing known yet");
+  setGateAgentOurs("s1", false, store);
+  assert.deepEqual(await service.links.get("permission-judge")?.({ toolName: "agent" }), { kind: "defer" });
+  assert.deepEqual(await service.links.get(YOLO_LINK)?.({ toolName: "agent" }), { kind: "defer" });
+  setGateMode("s1", "auto", store);
+  await service.links.get("permission-judge")?.({ toolName: "agent" });
+  assert.equal(judged(), 1);
+});
+
+test("our agent needs no ask in any mode, as what it does is still checked", async () => {
+  const { store, service, judge, judged } = setup();
+  service.registerAuthorizer("permission-judge", judge);
+  setGateAgentOurs("s1", true, store);
   for (const mode of ["normal", "auto"] as const) {
     setGateMode("s1", mode, store);
     assert.deepEqual(await service.links.get("permission-judge")?.({ toolName: "agent" }), { kind: "allow" });

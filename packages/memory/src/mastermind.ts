@@ -4,7 +4,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { COMPACT_SYSTEM, compactPrompt, GLOBAL, parseProposals, PLAYBOOK_CHARS, readPlaybook, REVIEW_SYSTEM, reviewPrompt, writePlaybook } from "./playbook.ts";
+import { COMPACT_SYSTEM, compactPrompt, GLOBAL, parseProposals, PLAYBOOK_CHARS, readPlaybook, readProposals, REVIEW_SYSTEM, reviewPrompt, writePlaybook } from "./playbook.ts";
 import { nextBatch } from "./review.ts";
 import { hasSecret } from "./secrets.ts";
 import type { MemoryStore } from "./store.ts";
@@ -31,16 +31,18 @@ async function ask(ctx: ExtensionContext, chosen: Mastermind, systemPrompt: stri
   ).result();
   // Not the provider's message, as some repeat part of the request, and that's your conversations.
   if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(`${chosen.model} failed (${response.stopReason})`);
+  if (response.stopReason === "length") throw new Error(`${chosen.model} ran out of room before it finished, so nothing was marked as reviewed. Try a lower reasoning level in /router.`);
   return response.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
 }
 
 /** The model has one chance to fit the limit. After that it's yours to trim in the editor. */
 async function propose(ctx: ExtensionContext, chosen: Mastermind, system: string, text: string, allowed: ReadonlySet<string>): Promise<Map<string, string>> {
-  const first = parseProposals(await ask(ctx, chosen, system, text), allowed);
+  const first = readProposals(await ask(ctx, chosen, system, text), allowed);
   if (![...first.values()].some((doc) => doc.length > PLAYBOOK_CHARS)) return first;
   const again = `${text}\n\nYour last answer went over the limit of ${PLAYBOOK_CHARS} characters:\n\n${[...first].map(([scope, doc]) => `<playbook scope="${scope}">${doc}</playbook>`).join("\n")}\n\nAnswer again within the limit.`;
   const second = parseProposals(await ask(ctx, chosen, system, again), allowed);
-  return second.size > 0 ? second : first;
+  // It may answer again for only the ones that were too long.
+  return new Map([...first, ...second]);
 }
 
 function why(text: string): string | undefined {

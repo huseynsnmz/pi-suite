@@ -428,6 +428,23 @@ try:
         check("cd: leaving the project says it was reset", "Shell cwd was reset" in log_results(), log_results()[-200:])
         ran("touch incd5.txt", "incd5.txt")
         check("cd: and the next command runs at the top", True)
+        ran("cd sub/deep && touch saved1.txt", "sub/deep/saved1.txt")
+        term.settle(1)
+        term.prompt("/reload")
+        term.settle(4)
+        ran("touch saved2.txt", "sub/deep/saved2.txt")
+        check("cd: the folder is still there after a reload", True)
+        term.settle(1)
+        asked_before = judge_calls()
+        term.prompt(f"RUN:cd {project}/sub && cd {project}/../outside && touch incd-up.txt")
+        # The judge can't settle a path outside the project by itself here, so it can come to you as well.
+        term.settle(3)
+        gated = judge_calls() > asked_before or not (outside / "incd-up.txt").exists()
+        if not (outside / "incd-up.txt").exists():
+            term.send("y")
+        term.until((outside / "incd-up.txt").exists, "incd-up.txt")
+        check("cd: going up and out of the project later in a chain is still gated", gated, f"judge={judge_calls()}")
+        ran(f"cd {project} && touch back.txt", "back.txt")
     term.settle(1)
 
     term.send(SHIFT_TAB)
