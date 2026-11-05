@@ -1,45 +1,35 @@
-# pi-subscription
+# subscription
 
-Claude models in Pi on your Claude login, through Anthropic's Agent SDK. Pi keeps its own agent loop, tools, sessions and compaction, and Claude Code only carries the requests. It asks before anything is billed as extra usage.
+Part of [pi-suite](../../README.md). Off until you run `/suite on subscription`.
 
-Based on [pi-claude-subscription](https://github.com/jkeskikangas/pi-claude-subscription) by Jarno Keskikangas, used under the MIT license.
+Claude models in Pi on your Claude login, through Anthropic's Agent SDK. Pi keeps its own agent loop and tools. It asks before anything more is billed as extra usage.
 
-## Use it
+**Read this first.** Anthropic's [legal page](https://code.claude.com/docs/en/legal-and-compliance) says subscription logins are for ordinary use of Claude Code and Anthropic's own apps, and that products built on the Agent SDK should use API keys. It doesn't address a personal extension like this one, and says Anthropic may enforce its rules without notice. This could stop working, and the risk is to your account. An [API key](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) is the clear-cut alternative.
 
-This part is off until you run `/suite on subscription`, because its models count as logged in whether you are or not, and because of the terms below. Log in to Claude Code (`claude`, then `/login`), then pick a `claude-sdk/...` model in `/model`, such as `claude-sdk/claude-sonnet-5-5`. `/suite off subscription` removes them and moves you to another model.
+## Use
 
-It uses Claude Code's login, never Pi's. So that nothing else decides where your requests or login go, it removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` and the Bedrock, Vertex and Foundry switches from Claude Code's environment.
+1. Log in to Claude Code: `claude`, then `/login`.
+2. Run `/suite on subscription`.
+3. Pick a `claude-sdk/...` model in `/model`, such as `claude-sdk/claude-sonnet-5-5`.
+
+It only uses Claude Code's login, and removes settings such as `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` from Claude Code's environment, so nothing else decides where your requests go.
 
 ## Extra usage
 
-When Claude Code reports that requests are billed as extra usage, you're asked before going on:
+When Claude Code reports that requests are billed as extra usage, you choose:
 
-- **No, stop:** nothing more is sent, and each new message asks again, until the limit resets or a new session starts.
-- **Yes, bill extra usage for this session:** it goes on, and doesn't ask again until requests are back on your plan, or a new session starts, including `/new`, `/clear` and `/reload`.
+- **No, stop:** nothing more is sent, and each new message asks again.
+- **Yes, for this session:** it doesn't ask again until requests are back on your plan or a new session starts.
 
-The report normally comes after the reply, so that reply is kept and the next request asks before sending anything. If a report arrives while a reply is being written, the reply is stopped. After a yes it runs again if nothing had appeared, and otherwise you send your message again.
+With nobody to ask, as in `pi -p` or an agent, the answer is no.
 
-With nobody to ask, as in `pi -p` or a subagent, the answer is no.
+This isn't a hard limit:
 
-What this can't do:
-
-- **The first request over the limit is billed.** Claude Code only reports billing with a response, and in testing that report came after the whole reply, including a slow one. So one reply can be billed before you're asked, or more if a tool loop has requests in flight. Your Claude settings are the hard limit: leave extra usage off, or set a monthly cap, if that matters.
-- **It goes by what Claude Code reports.** It's been tested with the real Claude Code binary against a fake server that sends those reports, not with a real bill. Check your usage page after your first requests.
-- **The costs Pi shows are estimates** at API prices, not what your plan charges.
+- **The first request over the limit is billed**, as the report comes with the response. A tool loop can bill more. To be sure, leave extra usage off or set a monthly cap in your Claude settings.
+- **It goes by what Claude Code reports.** It's been tested against a fake server, not a real bill, so check your usage page after your first requests.
+- **The costs Pi shows are estimates** at API prices.
 
 A request can also be refused with `Third-party apps now draw from your extra usage`. Nothing runs then, and the error says what to do.
-
-## Terms
-
-Anthropic's [legal page](https://code.claude.com/docs/en/legal-and-compliance) says subscription logins are for ordinary use of Claude Code and Anthropic's own apps, and that products built on the Agent SDK should use API keys. It doesn't address a personal extension like this one, and it says Anthropic may enforce its rules without notice. So this could stop working, and the risk is to your account. An [API key](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) is the clear-cut alternative.
-
-## System prompt
-
-For `claude-sdk` models, Pi's default prompt is replaced by one written for Claude. It says it's working in Pi, and keeps every tool and guideline from Pi and other extensions, along with context files, skills and the working directory. Your own `SYSTEM.md` always wins.
-
-Requests use Pi's default prompt instead with `router/auto`, in `plan` and `read-only` modes, and when the memory part has notes to add, because those build on Pi's prompt.
-
-Anthropic's billing has been seen to depend on the prompt: upstream saw Pi's default prompt refused where this one ran on the plan. So expect the refusal above, or the question about extra usage, in those cases. To always use Pi's prompt, set **System prompt** to `pi` in `/suite`, or `PI_CLAUDE_SDK_PROMPT=pi`.
 
 ## Settings
 
@@ -49,12 +39,19 @@ All optional, in `/suite` or under `subscription` in `~/.pi/agent/suite.json`:
 { "subscription": { "pathToClaudeCodeExecutable": "/opt/homebrew/bin/claude", "maxSessions": 3, "idleMinutes": 20, "promptMode": "claude" } }
 ```
 
-There's no setting per project, so a repository can't choose which program runs. `PI_CLAUDE_SDK_CLAUDE_PATH` overrides the executable, and `PI_CLAUDE_SDK_DEBUG=/path/log` writes how each request was routed.
+`PI_CLAUDE_SDK_CLAUDE_PATH` overrides the program, and `PI_CLAUDE_SDK_DEBUG=/path/log` logs how each request was routed.
 
-## What it leaves on disk
+## System prompt
 
-Conversations are copied into Claude Code's session files under `~/.claude/projects`, readable only by you, so they can show up in Claude Code's `/resume`. `~/.pi/agent/claude-sdk/anchors.jsonl` records where each conversation is in those files.
+These models get a prompt written for Claude that says it's working in Pi, and keeps Pi's tools, guidelines, context files and skills. Your own `SYSTEM.md` always wins.
 
-## Dependencies
+They use Pi's default prompt instead with `router/auto`, in `plan` and `read-only`, and when memory or a playbook has something to add. Set **System prompt** to `pi` in `/suite` to always use Pi's. With Pi's prompt, expect the refusal above or the extra usage question more often.
 
-It needs `@anthropic-ai/claude-agent-sdk`, pinned to an exact version and loaded only on the first request to one of these models. That package includes a Claude Code binary of about 270 MB for your platform. npm also installs what it lists as required, including the MCP SDK and through it `express` and `hono`. Nothing here loads those: this part has its own small tool server, and the Agent SDK bundles its own copy.
+## What it leaves behind
+
+- **Session files:** conversations are copied to `~/.claude/projects`, readable only by you, so they can show in Claude Code's `/resume`. `~/.pi/agent/claude-sdk/anchors.jsonl` tracks where each one is.
+- **A large dependency:** `@anthropic-ai/claude-agent-sdk` includes a Claude Code binary of about 270 MB, and installs the MCP SDK, `express` and `hono`, which nothing here loads.
+
+## Credits
+
+Based on [pi-claude-subscription](https://github.com/jkeskikangas/pi-claude-subscription) by Jarno Keskikangas, under the MIT license.
