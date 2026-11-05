@@ -92,7 +92,8 @@
   "scripts": {
     "check": "tsc --noEmit && npm run --workspaces --if-present check && npm run -w packages/board typecheck",
     "test": "node --test test/*.test.ts && npm run --workspaces --if-present test",
-    "test:e2e": "python3 test/e2e/run.py"
+    "test:all": "npm test && npm run -w packages/board test:integration",
+    "test:e2e": "python3 test/e2e/all.py"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.308",

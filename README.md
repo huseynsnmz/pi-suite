@@ -89,8 +89,9 @@ Each part has its own limits, listed in its README or `SECURITY.md`. None of thi
 ```bash
 npm install --ignore-scripts
 npm run check
-npm test
-npm run test:e2e
+npm test           # seconds: logic only
+npm run test:all   # adds board's tests that start real processes
+npm run test:e2e   # real Pi in a real terminal with a fake model, every suite at once
 ```
 
-Each part keeps its own tests under `packages/<part>/test`. `frame` needs [bun](https://bun.sh) for its unit tests. `npm run test:e2e` drives real Pi in a real terminal with a fake model.
+Each part keeps its own tests under `packages/<part>/test`. `frame` needs [bun](https://bun.sh) for its unit tests. To run some end-to-end suites, name them: `python3 test/e2e/all.py router web`. Run `test:all` and `test:e2e` before a release.

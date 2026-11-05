@@ -304,7 +304,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		+ "\n"
 		+ formatBurstDiagnostics({
 			expectedRows: BURST_LINES,
-			driverTexts: outputText(observed.driver),
+			driverTexts: [outputText(observed.driver)],
 			frameText: observed.b?.snapshotReady?.[0]?.frame ?? "",
 			liveTexts: (observed.b?.output ?? []).map((data) => (typeof data === "string" ? data : (data?.data ?? ""))),
 		});
@@ -383,7 +383,8 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		};
 		collect(frameB);
 		await waitFor(() => {
-			for (const data of eventsB.output) collect(data);
+			// A PTY read can split a line, so chunks are only matched joined up.
+			collect(eventsB.output.join(""));
 			return seen.size >= BURST_LINES;
 		}, 30000, capture);
 		assert.equal(seen.size, BURST_LINES, "every burst line delivered exactly once across frame+flush+live");

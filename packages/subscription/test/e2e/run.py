@@ -58,6 +58,15 @@ class Terminal:
                 except OSError:
                     return
 
+    def settle(self, seconds):
+        """Up to `seconds`, done early once the screen has been still for a moment. Pi animates while it works."""
+        end = time.time() + seconds
+        while time.time() < end:
+            seen = len(self.text)
+            self.pump(0.7)
+            if len(self.text) == seen:
+                return
+
     def wait(self, words, since=0, timeout=40):
         end = time.time() + timeout
         while time.time() < end:
@@ -87,7 +96,7 @@ class Terminal:
 term = Terminal()
 try:
     term.wait("mode: normal")
-    term.pump(2)
+    term.settle(2)
     mark = term.prompt("hello")
     check("a request goes through the real binary and back", term.wait("OK", mark), term.text[-300:] if not requests() else "")
     sent = requests()
@@ -107,14 +116,14 @@ try:
     (project / "via-claude.txt").unlink(missing_ok=True)
     term.send(SHIFT_TAB); term.wait("mode: auto", timeout=8)
     term.send(SHIFT_TAB); term.wait("mode: plan", timeout=8)
-    term.pump(1)
+    term.settle(1)
     mark = term.prompt("WRITEIT")
     term.wait("FINISHED", mark)
     term.pump(1)
     check("plan mode blocks its tool calls", not (project / "via-claude.txt").exists())
     check("and the model is told", "blocks" in (requests()[-1].get("result") or "") or "plan mode" in (requests()[-1].get("result") or "").lower(), str(requests()[-1])[:220])
     term.send(SHIFT_TAB); term.wait("mode: read-only", timeout=8)
-    term.pump(1)
+    term.settle(1)
     mark = term.prompt("WRITEIT")
     term.wait("FINISHED", mark)
     term.pump(1)
@@ -128,12 +137,12 @@ try:
 
     term = Terminal()
     term.wait("mode: normal")
-    term.pump(2)
+    term.settle(2)
     QUESTION = "Yes, bill extra usage"
     NO, YES = "\r", "\x1b[B"
 
     def answer_question(keys):
-        term.pump(1)
+        term.settle(1)
         if keys == YES:
             term.send(YES)
             term.pump(0.4)
@@ -141,7 +150,7 @@ try:
 
     mark = term.prompt("BILLSLOW")
     check("a reply the report comes after is kept", term.wait("SLOWANSWER", mark, timeout=30), term.text[mark:][-300:])
-    term.pump(3)
+    term.settle(3)
     before = len(requests())
     mark = term.prompt("BILLME")
     asked = term.wait(QUESTION, mark, timeout=15)
@@ -153,7 +162,7 @@ try:
         term.wait(QUESTION, mark, timeout=15)
         answer_question(YES)
         check("saying yes sends it", term.wait("BILLEDANSWER", mark, timeout=30), term.text[mark:][-300:])
-        term.pump(1)
+        term.settle(1)
         mark = term.prompt("BILLME")
         check("and it doesn't ask again", term.wait("BILLEDANSWER", mark, timeout=30) and QUESTION not in term.text[mark:])
     term.close()

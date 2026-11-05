@@ -50,6 +50,15 @@ class Terminal:
                 except OSError:
                     return
 
+    def settle(self, seconds):
+        """Up to `seconds`, done early once the screen has been still for a moment. Pi animates while it works."""
+        end = time.time() + seconds
+        while time.time() < end:
+            seen = len(self.text)
+            self.pump(0.7)
+            if len(self.text) == seen:
+                return
+
     def wait(self, words, since=0, timeout=30):
         end = time.time() + timeout
         while time.time() < end:
@@ -67,7 +76,7 @@ class Terminal:
         self.send(ESC)
         self.pump(0.3)
         self.send("\r")
-        self.pump(1)
+        self.settle(1)
 
     def close(self):
         try:
@@ -103,7 +112,7 @@ try:
     check("the subscription models stay out until asked for", "claude-sdk" not in child.stdout + child.stderr)
     term = Terminal()
     check("starts, with the frame", term.wait("Mock"))
-    term.pump(3)
+    term.settle(3)
     check("skills from parts that are on are listed", "review-permissions" in term.text)
     term.command("/suite list")
     term.pump(0.5)
@@ -138,7 +147,7 @@ try:
     check("it offers to reload", term.wait("Reload Pi now", mark, 6))
     term.pump(0.3)
     term.send("\r")
-    term.pump(5)
+    term.settle(5)
     term.command("/suite list")
     term.pump(0.5)
     check("after the reload, web is off", "web: off" in term.text, term.text[-300:])
@@ -174,13 +183,13 @@ try:
 
     term = Terminal()
     term.wait("Mock")
-    term.pump(3)
+    term.settle(3)
     term.command("/mode auto")
     mark = len(term.text)
     term.command("sent while in auto")
     check("a message names the mode it was sent in", term.wait("you auto", mark, 15), term.text[-300:])
     term.wait("OK", mark, 15)
-    term.pump(1)
+    term.settle(1)
     term.command("/mode normal")
     mark = len(term.text)
     term.command("sent while in normal")
@@ -190,23 +199,23 @@ try:
     before = sessions()
     mark = len(term.text)
     term.command("/clear")
-    term.pump(2)
+    term.settle(2)
     check("/clear redraws the start card after the old conversation", term.text.rfind("Nothing new") > term.text.rfind("sent while in normal"), term.text[mark:][-300:])
     term.command("after clearing")
-    term.pump(3)
+    term.settle(3)
     check("the new session goes to its own file, and the old one is kept", before < sessions(), str(sessions()))
     check("the model doesn't see the cleared conversation", sent()[-1]["text"] == "after clearing", str(sent()[-1]))
     term.close()
     term = Terminal("--session", str(max(before, key=lambda path: path.stat().st_mtime)))
     check("a resumed session still shows the mode", term.wait("you auto", 0, 15), term.text[-300:])
-    term.pump(1)
+    term.settle(1)
     check("and only on the message sent in it", term.text.count("you auto") == 1 or "sent while in normal" in term.text)
     term.close()
 
     subprocess.run("git init -q -b main && git add . && git -c user.name=t -c user.email=t@t commit -qm first", shell=True, cwd=project, check=True)
     term = Terminal()
     term.wait("Mock")
-    term.pump(3)
+    term.settle(3)
     mark = len(term.text)
     term.command("/security-review")
     check("/security-review with no changes says so", term.wait("No changes to review", mark, 8), term.text[mark:][-300:])
@@ -216,7 +225,7 @@ try:
     term.command("/security-review focus on auth")
     check("it shows one line", term.wait("Security review of 1 changed file against", mark, 8), term.text[mark:][-300:])
     term.wait("OK", mark, 15)
-    term.pump(1)
+    term.settle(1)
     request = sent()[count]
     check("the model gets the instructions and the diff", "reviewing code changes" in request["text"] and "LINE-UNDER-REVIEW" in request["tail"], str(request))
     check("the screen doesn't get the diff", "LINE-UNDER-REVIEW" not in term.text[mark:], term.text[mark:][-300:])
