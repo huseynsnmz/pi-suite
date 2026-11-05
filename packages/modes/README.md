@@ -23,7 +23,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-suite@0.2.4
+   pi install npm:@huseynsnmz/pi-suite@0.2.5
    ```
 
 2. Move pi-suite above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
@@ -122,9 +122,9 @@ In `auto`, `edit` and `write` on files in the project skip the judge, so you are
 
 `/review-permissions` also reads the judge's decisions from the review log, and says why `auto` keeps asking.
 
-**Moving around:** bash keeps its folder, as in Claude Code. A `cd` at the start of a command carries over to later commands while it stays in the project, and the command's result tells the model so. A move outside runs once, and then the result says `Shell cwd was reset`. Later commands run as `cd <folder> && <command>`, which the permission system follows, so paths are checked from the right place. A `cd` it can't follow, such as `cd "$DIR"`, works for that command only. `read`, `edit` and `write` paths don't move.
+**Moving around:** bash keeps its folder, as in Claude Code. A `cd` at the start of a command carries over to later commands while it stays in the project, and the command's result tells the model so. A move outside runs once, and then the result says `Shell cwd was reset`. The folder is saved in the session, so it's still there after `/reload` or `/resume`, and moving in `/tree` goes back to the folder that point was in. A folder that isn't there fails as it would in a shell, unless the model is repeating the move it just made. Later commands run as `cd <folder> && <command>`, which the permission system follows, so paths are checked from the right place. A `cd` it can't follow, such as `cd "$DIR"`, works for that command only. `read`, `edit` and `write` paths don't move.
 
-The permission system judges each part of a chain, so with `"*": "ask"`, every `cd x && go test` would ask about the `cd`. The first time you start Pi in a project, pi-modes allows `cd` inside that project in your bash rules, keeps a backup, and tells you. The rest of the command is still checked, and so is a `cd` anywhere else or one it can't read, such as `cd "$DIR"`. A blanket `"cd *": "allow"` is not the same: the permission system doesn't follow a new file's name into the folder a `cd` reached, so `cd /elsewhere && touch new` would go unchecked. It won't overwrite a rule of your own, and if you remove the rules, they stay removed. If the permission system loaded before pi-suite, restart Pi once for them to apply. Without a permission judge, add `"agent": "allow"` too, or you'll be asked about each `agent` call.
+The permission system judges each part of a chain, so with `"*": "ask"`, every `cd x && go test` would ask about the `cd`. The first time you start Pi in a project, pi-modes allows `cd` inside that project in your bash rules, keeps a backup, and tells you. The rest of the command is still checked, and so is a `cd` anywhere else, one it can't read, such as `cd "$DIR"`, or one that leaves through `..` or a symlink. A blanket `"cd *": "allow"` is not the same: the permission system doesn't follow a new file's name into the folder a `cd` reached, so `cd /elsewhere && touch new` would go unchecked. It won't overwrite a rule of your own, and if you remove the rules, they stay removed. If the permission system loaded before pi-suite, restart Pi once for them to apply. Without a permission judge, add `"agent": "allow"` too, or you'll be asked about each `agent` call.
 
 Without a classifier, `auto` behaves like `normal`, and the extension warns you when you switch to it.
 

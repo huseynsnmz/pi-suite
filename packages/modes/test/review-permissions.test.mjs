@@ -189,4 +189,5 @@ test("cd gets a rule that can't match cdk, and it's allowed", () => {
   assert.equal(suggestPattern("cd /some/where"), "cd *");
   assert.equal(suggestPattern("cdk deploy"), "cdk deploy*");
   assert.equal(refuseBash("cd *"), undefined);
+  assert.match(refuseBash("cd*"), /cdk/);
 });

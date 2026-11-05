@@ -9,10 +9,10 @@ import { gitRisk } from "./git-safety.ts";
 import { registerInterview } from "./interview.ts";
 import { registerReviewTools } from "./review/tools.ts";
 import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
-import { addCdRules, registerWorkdir } from "./workdir.ts";
-import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, noteEditPaths, registerYoloLink, setGateCwd, setGateMode, YOLO_LINK } from "./judge-gate.ts";
+import { addCdGuards, addCdRules, registerWorkdir } from "./workdir.ts";
+import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, noteEditPaths, registerYoloLink, setGateAgentOurs, setGateCwd, setGateMode, YOLO_LINK } from "./judge-gate.ts";
 import { readSection, writeSection } from "../../../src/settings.ts";
-import { decideToolCall, displayCommand, fromExpectedPackage, notReadOnly, isMode, scriptedChange, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
+import { AGENT_TOOL, decideToolCall, displayCommand, fromExpectedPackage, notReadOnly, isMode, scriptedChange, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
 const DENY_STATUS_KEY = "pi-modes-deny";
@@ -108,7 +108,7 @@ function restoredMode(ctx: ExtensionContext): Mode {
     const saved: unknown = (entry.data as { mode?: unknown } | undefined)?.mode;
     if (isMode(saved)) mode = saved;
   }
-  if (mode === undefined && process.env.PI_MODES_START === "auto") return "auto"; // An agent started in auto.
+  if (mode === undefined && process.env.PI_SUBAGENT_CHILD === "1") return startingMode(process.env.PI_MODES_START); // Its parent's say, not the default.
   return mode === undefined ? startingMode(readConfig().defaultMode) : resumedMode(mode);
 }
 
@@ -119,7 +119,9 @@ export default function piModes(pi: ExtensionAPI): void {
   const project = realpathSync(process.cwd());
   const cdFolders = readConfig().cdRuleFolders;
   const handled = Array.isArray(cdFolders) ? (cdFolders as string[]) : [];
-  const cdRule = process.env.PI_SUBAGENT_CHILD === "1" || handled.includes(project) ? { handled: false } : addCdRules(getAgentDir(), project);
+  const isChild = process.env.PI_SUBAGENT_CHILD === "1";
+  if (!isChild && handled.includes(project)) addCdGuards(getAgentDir(), project);
+  const cdRule = isChild || handled.includes(project) ? { handled: false } : addCdRules(getAgentDir(), project);
   if (cdRule.handled) writeSection(getAgentDir(), "modes", { ...readConfig(), cdRuleFolders: [...handled, project] });
   let cdNotice = cdRule.notice;
 
@@ -148,6 +150,8 @@ export default function piModes(pi: ExtensionAPI): void {
     if (next !== "yolo") denyOff = false;
     setGateMode(ctx.sessionManager.getSessionId(), next);
     setGateCwd(ctx.sessionManager.getSessionId(), ctx.cwd);
+    const agentTool = pi.getAllTools().find((tool) => tool.name === AGENT_TOOL);
+    setGateAgentOurs(ctx.sessionManager.getSessionId(), agentTool !== undefined && fromExpectedPackage(AGENT_TOOL, agentTool.sourceInfo.path));
     let others = withoutAliases(pi.getActiveTools().filter((name) => name !== SUBMIT_PLAN_TOOL), replacedTools);
     replacedTools = [];
     if (denyOff) ({ active: others, replaced: replacedTools } = withAliases(others));

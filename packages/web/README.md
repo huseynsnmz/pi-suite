@@ -9,7 +9,7 @@ A web page can hold instructions aimed at the AI reading it. So a separate model
 ## Install
 
 ```bash
-pi install npm:@huseynsnmz/pi-suite@0.2.4
+pi install npm:@huseynsnmz/pi-suite@0.2.5
 ```
 
 `web_fetch` works straight away. It reads pages with the session's model, unless you set `readerModel` or use [pi-router](https://github.com/huseynsnmz/pi-suite/tree/main/packages/router), which can choose the reader. `web_search` stays off until you choose where searches go.

@@ -17,6 +17,7 @@ const REFUSED_SURFACES = new Set(["bash", "path", "external_directory", "mcp", "
 export function refuseBash(pattern) {
   const text = pattern.trim();
   if (text === "" || text.startsWith("*") || text.startsWith("?")) return "it matches any command";
+  if (text === "cd*") return "it also matches cdk and other commands, so write `cd *`";
   if (/[\n;&|`$<>()]/.test(text)) return "it holds shell syntax, and a rule matches one command";
   const words = text.split(/\s+/);
   const bare = words.length === 1 && text.endsWith("*") ? text.slice(0, -1) : words.length === 2 && words[1] === "*" ? words[0] : undefined;
@@ -36,15 +37,18 @@ export function refuseTool(tool) {
  * Rules are order-dependent and the last match wins, so new allows go straight after the
  * catch-all. Every existing `deny` or `ask` comes later and keeps overriding them.
  */
-export function withBashAllows(rules, patterns) {
+export function withBashAllows(rules, patterns, guards = []) {
   const entries = Object.entries(rules ?? { "*": "ask" });
   const fresh = patterns.filter((pattern) => !entries.some(([existing]) => existing === pattern));
   const at = entries[0]?.[0] === "*" ? 1 : 0;
   const next = [...entries.slice(0, at), ...fresh.map((pattern) => [pattern, "allow"]), ...entries.slice(at)];
+  // Guards ask about part of what those allows match, so they go after them, wherever they are.
+  const last = Math.max(...patterns.map((pattern) => next.findIndex(([existing]) => existing === pattern)));
+  next.splice(last + 1, 0, ...guards.filter((pattern) => !entries.some(([existing]) => existing === pattern)).map((pattern) => [pattern, "ask"]));
   return Object.fromEntries(next);
 }
 
-export function applyRules(config, { bash = [], tools = [] }) {
+export function applyRules(config, { bash = [], tools = [], guards = [] }) {
   const refusals = [
     ...bash.flatMap((pattern) => {
       const why = refuseBash(pattern);
@@ -60,7 +64,8 @@ export function applyRules(config, { bash = [], tools = [] }) {
   if (bash.length > 0) {
     if (permission.bash !== undefined && (typeof permission.bash !== "object" || permission.bash === null))
       return { refusals: [`bash: its rule is the single word "${permission.bash}", so convert it to a map by hand`] };
-    permission.bash = withBashAllows(permission.bash, bash);
+    // With no bash rules, bash follows the catch-all, so a new map has to start from it.
+    permission.bash = withBashAllows(permission.bash ?? { "*": permission["*"] ?? "ask" }, bash, guards);
   }
   for (const tool of tools) if (permission[tool] !== "deny") permission[tool] = "allow";
   return { config: { ...config, permission }, refusals: [] };
@@ -121,13 +126,13 @@ function writeWithBackup(path, config) {
   return backup;
 }
 
-function planChoices(agent, { bash = [], tools = [], read = [], write = [], domains = [] }) {
+function planChoices(agent, { bash = [], tools = [], guards = [], read = [], write = [], domains = [] }) {
   const path = join(agent, "extensions", "pi-permission-system", "config.json");
   const sandboxPath = join(agent, "sandbox.json");
   const wantsRules = bash.length > 0 || tools.length > 0;
   const wantsSandbox = read.length > 0 || write.length > 0 || domains.length > 0;
   if (wantsRules && !existsSync(path)) return { refusals: [`No config at ${path}.`] };
-  const rules = wantsRules ? applyRules(JSON.parse(readFileSync(path, "utf8")), { bash, tools }) : { refusals: [] };
+  const rules = wantsRules ? applyRules(JSON.parse(readFileSync(path, "utf8")), { bash, tools, guards }) : { refusals: [] };
   let sandboxConfig = {};
   if (wantsSandbox && existsSync(sandboxPath)) {
     try {

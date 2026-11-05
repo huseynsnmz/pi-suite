@@ -19,9 +19,15 @@ export function childArgs({ type, model, thinking }: ChildOptions): string[] {
   return ["-p", "--no-session", ...(model === undefined ? [] : ["--model", model]), ...(thinking === undefined ? [] : ["--thinking", thinking]), ...(type === "explore" ? ["--tools", READ_ONLY_TOOLS.join(",")] : [])];
 }
 
-/** How the permission system and pi-router know this is a child, and pi-modes knows auto carries over. */
+/** The mode a child runs in. Plan's only way out is a person, so its explore agents just read, and yolo has to be asked for. */
+function childMode(mode: string): string {
+  if (mode === "plan") return "read-only";
+  return mode === "yolo" ? "normal" : mode;
+}
+
+/** How the permission system and pi-router know this is a child, and pi-modes knows its mode. */
 export function childEnv(base: NodeJS.ProcessEnv, parentSession: string, mode: string | undefined): NodeJS.ProcessEnv {
-  return { ...base, PI_SUBAGENT_CHILD: "1", PI_SUBAGENT_PARENT_SESSION: parentSession, ...(mode === "auto" ? { PI_MODES_START: "auto" } : {}) };
+  return { ...base, PI_SUBAGENT_CHILD: "1", PI_SUBAGENT_PARENT_SESSION: parentSession, ...(mode === undefined ? {} : { PI_MODES_START: childMode(mode) }) };
 }
 
 export function trimAnswer(answer: string): string {
@@ -29,14 +35,14 @@ export function trimAnswer(answer: string): string {
   return text.length > ANSWER_CHARS ? `${text.slice(0, ANSWER_CHARS)}\n[The answer was cut at ${ANSWER_CHARS} characters.]` : text;
 }
 
-function runChild(cwd: string, args: string[], env: NodeJS.ProcessEnv, prompt: string, signal: AbortSignal | undefined): Promise<string> {
+export function runChild(cwd: string, command: string[], env: NodeJS.ProcessEnv, prompt: string, signal: AbortSignal | undefined): Promise<string> {
   return new Promise((resolve, reject) => {
-    // Pi may run from a compiled binary, with no script to name.
-    const script = process.argv[1];
-    const command = script !== undefined && existsSync(script) ? [script, ...args] : args;
     const child = spawn(process.execPath, command, { cwd, env, stdio: ["pipe", "pipe", "pipe"], signal });
     let out = "";
     let err = "";
+    // A character can be split across two chunks.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (data) => (out += data));
     child.stderr.on("data", (data) => (err = (err + data).slice(-ERROR_CHARS)));
     child.stdin.on("error", () => {}); // It can exit before reading. Its exit code says why.
@@ -69,7 +75,10 @@ export default function piSubagent(pi: ExtensionAPI): void {
       pi.events.emit("pi-modes:mode", probe);
       const model = ctx.model === undefined ? undefined : `${ctx.model.provider}/${ctx.model.id}`;
       const args = childArgs({ type: params.type ?? "explore", model, thinking: pi.getThinkingLevel() });
-      const answer = await runChild(ctx.cwd, args, childEnv(process.env, ctx.sessionManager.getSessionId(), probe.mode), params.prompt, signal);
+      // Pi may run from a compiled binary, with no script to name.
+      const script = process.argv[1];
+      const command = script !== undefined && existsSync(script) ? [script, ...args] : args;
+      const answer = await runChild(ctx.cwd, command, childEnv(process.env, ctx.sessionManager.getSessionId(), probe.mode), params.prompt, signal);
       return { content: [{ type: "text" as const, text: answer }], details: {} };
     },
   });

@@ -82,6 +82,13 @@ export function compactPrompt(playbooks: Map<string, string>): string {
 }
 
 /** What the model proposes, by scope. Only scopes it was given can come back, so it can't write to any other folder. */
+/** A reply that's neither rules nor NONE was cut off or went wrong, and must not count as having nothing to say. */
+export function readProposals(reply: string, allowed: ReadonlySet<string>): Map<string, string> {
+  const proposals = parseProposals(reply, allowed);
+  if (proposals.size === 0 && !/\bNONE\W*$/.test(reply)) throw new Error("Its answer couldn't be read, so nothing was marked as reviewed. Try again.");
+  return proposals;
+}
+
 export function parseProposals(reply: string, allowed: ReadonlySet<string>): Map<string, string> {
   const proposals = new Map<string, string>();
   for (const match of reply.matchAll(/<playbook scope="([^"]*)">([\s\S]*?)<\/playbook>/g)) {
