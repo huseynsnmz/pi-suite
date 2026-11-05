@@ -1,0 +1,582 @@
+// Offline tests for the provider's event translation and routing, driven by a fake Claude Code session
+// that replays scripted SDK events.
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+import { Type } from "typebox";
+import { normalizeContext, type AssistantMessage, type Message, type Model, type ToolResultMessage } from "@earendil-works/pi-ai";
+import { AnchorRegistry } from "../src/anchors.ts";
+import { projectDir } from "../src/cc-sessions.ts";
+import { billsExtraUsage, explainError, EXTRA_USAGE_RESEND, EXTRA_USAGE_STOPPED, stillBilling } from "../src/billing.ts";
+import { resolveConfig } from "../src/config.ts";
+import { anthropicChatModels, claudeModels } from "../src/models.ts";
+import { API, ClaudeSdkProvider } from "../src/provider.ts";
+import type { ClaudeSession, SessionSpec } from "../src/session.ts";
+import { childEnv } from "../src/session.ts";
+import { AsyncQueue } from "../src/util.ts";
+
+process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "ccdir-"));
+const model = { ...claudeModels().find((m) => m.id === "claude-sonnet-5-5")!, api: API, provider: "claude-sdk", baseUrl: "" } as unknown as Model<any>;
+const tools = [{ name: "read", description: "Read a file", parameters: Type.Object({ path: Type.String() }) }];
+const SYSTEM = "system prompt";
+
+// ---- SDK event builders --------------------------------------------------------------------
+
+type Block = { text: string } | { tool: string; id: string; args: object };
+const usage = (input: number, output: number, cacheRead = 0, cacheWrite = 0) => ({
+	input_tokens: input,
+	output_tokens: output,
+	cache_read_input_tokens: cacheRead,
+	cache_creation_input_tokens: cacheWrite,
+});
+const ev = (event: object) => ({ type: "stream_event", event, parent_tool_use_id: null });
+function apiMessage(id: string, blocks: Block[], stop: string, u = usage(10, 5, 100, 1)): object[] {
+	const out: object[] = [ev({ type: "message_start", message: { id, model: "claude-sonnet-5-5", usage: { ...u, output_tokens: 1 } } })];
+	blocks.forEach((b, index) => {
+		if ("text" in b) {
+			out.push(ev({ type: "content_block_start", index, content_block: { type: "text", text: "" } }));
+			out.push(ev({ type: "content_block_delta", index, delta: { type: "text_delta", text: b.text } }));
+		} else {
+			out.push(ev({ type: "content_block_start", index, content_block: { type: "tool_use", id: b.id, name: `mcp__pi__${b.tool}`, input: {} } }));
+			out.push(ev({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(b.args) } }));
+		}
+		out.push(ev({ type: "content_block_stop", index }));
+	});
+	out.push(ev({ type: "message_delta", delta: { stop_reason: stop }, usage: u }));
+	out.push(ev({ type: "message_stop" }));
+	return out;
+}
+const result = { type: "result", subtype: "success", is_error: false };
+
+// ---- Fake session ---------------------------------------------------------------------------
+
+class FakeSession implements ClaudeSession {
+	readonly sessionId: string;
+	readonly systemPrompt: string;
+	model: string;
+	chain: string;
+	count: number;
+	awaiting = new Set<string>();
+	servedByClaude = new Set<string>();
+	dead = false;
+	busy = false;
+	lastUsed = Date.now();
+	readonly events = new AsyncQueue<any>();
+	readonly exited: Promise<void>;
+	private markExited!: () => void;
+	readonly sent: any[][] = [];
+	readonly delivered: ToolResultMessage[] = [];
+	interrupted = false;
+	stderr = "";
+
+	readonly spec: SessionSpec;
+	private readonly script: object[][];
+
+	constructor(spec: SessionSpec, chain: string, count: number, script: object[][]) {
+		this.spec = spec;
+		this.script = script;
+		this.sessionId = spec.resume?.sessionId ?? `fake-${Math.random().toString(36).slice(2)}`;
+		this.systemPrompt = spec.systemPrompt;
+		this.model = spec.model;
+		this.chain = chain;
+		this.count = count;
+		this.exited = new Promise((r) => (this.markExited = r));
+	}
+	private readonly entryUuids = new Map<string, string>();
+	private reply(): void {
+		for (const e of this.script.shift() ?? []) {
+			const sdkMessage = e as any;
+			if (sdkMessage.type === "assistant" && !sdkMessage.parent_tool_use_id && sdkMessage.message?.id && sdkMessage.uuid) this.entryUuids.set(sdkMessage.message.id, sdkMessage.uuid);
+			this.events.push(e);
+		}
+	}
+	send(content: any[]): void {
+		this.sent.push(content);
+		this.reply();
+	}
+	deliver(r: ToolResultMessage): void {
+		this.delivered.push(r);
+		this.awaiting.delete(r.toolCallId);
+		if (this.awaiting.size === 0) this.reply();
+	}
+	async setModel(m: string) {
+		this.model = m;
+	}
+	async entryUuid(messageId: string) {
+		return this.entryUuids.get(messageId);
+	}
+	async interrupt() {
+		this.interrupted = true;
+	}
+	close(): void {
+		this.dead = true;
+		this.events.close();
+		this.markExited();
+	}
+}
+
+function harness(script: object[][], registry = new AnchorRegistry(join(mkdtempSync(join(tmpdir(), "anch-")), "a.jsonl")), opts: object = {}) {
+	const cwd = mkdtempSync(join(tmpdir(), "cwd-"));
+	const created: FakeSession[] = [];
+	const forkCalls: { sessionId: string; cwd: string; at: string }[] = [];
+	const provider = new ClaudeSdkProvider({
+		registry,
+		cwd: () => cwd,
+		forkSession: async (sessionId: string, forkCwd: string, at: string) => {
+			forkCalls.push({ sessionId, cwd: forkCwd, at });
+			return { sessionId: `fork-${sessionId}` };
+		},
+		...opts,
+		createSession: (spec, chain, count) => {
+			const s = new FakeSession(spec, chain, count, script);
+			created.push(s);
+			return s;
+		},
+	});
+	const call = async (messages: Message[], signal?: AbortSignal) => {
+		const s = provider.streamSimple(model, normalizeContext({ systemPrompt: SYSTEM, tools, messages }), { reasoning: "medium" as any, signal });
+		const msg = (await s.result()) as AssistantMessage;
+		return { msg, route: provider.lastRoute };
+	};
+	return { provider, created, call, cwd, registry, forkCalls };
+}
+
+const user = (text: string): Message => ({ role: "user", content: text, timestamp: 1 });
+const toolResult = (id: string, text: string): Message => ({ role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text }], isError: false, timestamp: 1 });
+const text = (m: AssistantMessage) => m.content.map((c: any) => c.text ?? "").join("");
+
+// ---- Event translation ----------------------------------------------------------------------
+
+describe("event translation", () => {
+	it("runs a tool loop on one live session", async () => {
+		const h = harness([apiMessage("m1", [{ tool: "read", id: "toolu_1", args: { path: "a.txt" } }], "tool_use"), [...apiMessage("m2", [{ text: "done" }], "end_turn"), result]]);
+		const hist: Message[] = [user("read a.txt")];
+		const a1 = await h.call(hist);
+		assert.equal(a1.route, "fresh");
+		assert.equal(a1.msg.stopReason, "toolUse");
+		assert.deepEqual(a1.msg.content, [{ type: "toolCall", id: "toolu_1", name: "read", arguments: { path: "a.txt" } }]);
+		hist.push(a1.msg, toolResult("toolu_1", "hello"));
+		const a2 = await h.call(hist);
+		assert.equal(a2.route, "live");
+		assert.equal(h.created.length, 1);
+		assert.equal(h.created[0].delivered[0].toolCallId, "toolu_1");
+		assert.equal(text(a2.msg), "done");
+		assert.equal(a2.msg.stopReason, "stop");
+	});
+
+	it("folds Claude Code's own continuation of a turn into the same message (F2)", async () => {
+		const h = harness([
+			[...apiMessage("m1", [{ text: "part one, " }], "max_tokens", usage(10, 50, 100, 2)), ...apiMessage("m2", [{ text: "part two" }], "end_turn", usage(3, 20, 120, 4)), result],
+			[...apiMessage("m3", [{ text: "second answer" }], "end_turn"), result],
+		]);
+		const hist: Message[] = [user("long answer please")];
+		const a1 = await h.call(hist);
+		assert.equal(text(a1.msg), "part one, part two");
+		assert.equal(a1.msg.stopReason, "stop");
+		assert.equal(a1.msg.usage.output, 70);
+		assert.equal(a1.msg.usage.input, 13);
+		assert.equal(a1.msg.usage.cacheRead, 220);
+		assert.equal(a1.msg.usage.cacheWrite, 6);
+		assert.equal(a1.msg.usage.totalTokens, 3 + 20 + 120 + 4, "totalTokens is the context size of the last response, which pi uses for compaction");
+		hist.push(a1.msg, user("next"));
+		const a2 = await h.call(hist);
+		assert.equal(a2.route, "live");
+		assert.equal(text(a2.msg), "second answer", "the next turn gets its own response, not leftovers");
+	});
+
+	it("ends at a tool call even when it follows a continuation", async () => {
+		const h = harness([[...apiMessage("m1", [{ text: "thinking out loud" }], "max_tokens"), ...apiMessage("m2", [{ tool: "read", id: "toolu_9", args: { path: "b" } }], "tool_use")]]);
+		const a = await h.call([user("go")]);
+		assert.equal(a.msg.stopReason, "toolUse");
+		assert.deepEqual(a.msg.content.map((c) => c.type), ["text", "toolCall"]);
+	});
+
+	it("keeps only the retry when a response restarts mid-stream", async () => {
+		const unfinished = apiMessage("m1", [{ text: "garbled" }], "end_turn").slice(0, 3); // start, block start, delta
+		const h = harness([[...unfinished, ...apiMessage("m1b", [{ text: "clean" }], "end_turn"), result]]);
+		const a = await h.call([user("hi")]);
+		assert.equal(text(a.msg), "clean");
+	});
+
+	it("property: folded text and usage are the concatenation and sum of every response in the turn", async () => {
+		let seed = 7;
+		const rand = (n: number) => {
+			seed = (seed * 1103515245 + 12345) % 2 ** 31;
+			return Math.floor(seed / 65536) % n;
+		};
+		for (let round = 0; round < 25; round++) {
+			const parts = Array.from({ length: 1 + rand(4) }, (_, i) => `p${round}.${i}:${"x".repeat(rand(5))} `);
+			const outs = parts.map(() => 1 + rand(100));
+			const events = parts.flatMap((p, i) => apiMessage(`m${i}`, [{ text: p }], i === parts.length - 1 ? "end_turn" : "max_tokens", usage(1, outs[i], 0, 0)));
+			const h = harness([[...events, result]]);
+			const a = await h.call([user("q")]);
+			assert.equal(text(a.msg), parts.join(""));
+			assert.equal(a.msg.usage.output, outs.reduce((x, y) => x + y, 0));
+		}
+	});
+
+	it("reports an error result and drops the session", async () => {
+		const h = harness([[{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["boom"] }], [...apiMessage("m2", [{ text: "ok" }], "end_turn"), result]]);
+		const a = await h.call([user("hi")]);
+		assert.equal(a.msg.stopReason, "error");
+		assert.match(a.msg.errorMessage ?? "", /boom/);
+		assert.equal(h.created[0].dead, true);
+	});
+
+	it("aborts: interrupts Claude Code, closes the session and does not reuse it", async () => {
+		const h = harness([[ev({ type: "message_start", message: { id: "m1", model: "x", usage: usage(1, 1) } })], [...apiMessage("m2", [{ text: "fresh" }], "end_turn"), result]]);
+		const ac = new AbortController();
+		const p = h.call([user("hi")], ac.signal);
+		await new Promise((r) => setTimeout(r, 20));
+		ac.abort();
+		const a = await p;
+		assert.equal(a.msg.stopReason, "aborted");
+		assert.equal(h.created[0].interrupted, true);
+		assert.equal(h.created[0].dead, true);
+		const b = await h.call([user("hi")]);
+		assert.equal(h.created.length, 2);
+		assert.equal(text(b.msg), "fresh");
+	});
+});
+
+// ---- Routing ----------------------------------------------------------------------------------
+
+describe("routing", () => {
+	it("forks Claude Code's transcript at a legacy anchor after a restart", async () => {
+		const h = harness([[...apiMessage("msg_A", [{ text: "first" }], "end_turn"), result]]);
+		const hist: Message[] = [user("one")];
+		const a1 = await h.call(hist);
+		h.provider.shutdown();
+		// What Claude Code would have persisted for that session. This anchor predates streamed
+		// uuid capture, so its entry uuid is resolved from the transcript file.
+		const sid = h.created[0].sessionId;
+		mkdirSync(projectDir(h.cwd), { recursive: true });
+		writeFileSync(join(projectDir(h.cwd), `${sid}.jsonl`), `${JSON.stringify({ type: "assistant", uuid: "uuid-A", isSidechain: false, message: { id: "msg_A" } })}\n`);
+		const h2 = harness([[...apiMessage("msg_B", [{ text: "second" }], "end_turn"), result]], h.registry);
+		(h2 as any).provider.opts.cwd = () => h.cwd;
+		hist.push(a1.msg, user("two"));
+		const a2 = await h2.call(hist);
+		assert.equal(a2.route, "resume");
+		assert.deepEqual(h2.forkCalls, [{ sessionId: sid, cwd: h.cwd, at: "uuid-A" }]);
+		assert.deepEqual(h2.created[0].spec.resume, { sessionId: `fork-${sid}` });
+		assert.equal(text(a2.msg), "second");
+	});
+
+	it("forks at the uuid streamed with the assistant message, without reading its transcript", async () => {
+		const streamedAssistant = { type: "assistant", uuid: "uuid-streamed", parent_tool_use_id: null, message: { id: "msg_A" } };
+		const h = harness([[...apiMessage("msg_A", [{ text: "first" }], "end_turn"), streamedAssistant, result]]);
+		const hist: Message[] = [user("one")];
+		const a1 = await h.call(hist);
+		h.provider.shutdown();
+		const sid = h.created[0].sessionId;
+		const h2 = harness([[...apiMessage("msg_B", [{ text: "second" }], "end_turn"), result]], h.registry);
+		(h2 as any).provider.opts.cwd = () => h.cwd;
+		hist.push(a1.msg, user("two"));
+		const a2 = await h2.call(hist);
+		assert.equal(a2.route, "resume");
+		assert.deepEqual(h2.forkCalls, [{ sessionId: sid, cwd: h.cwd, at: "uuid-streamed" }]);
+		assert.deepEqual(h2.created[0].spec.resume, { sessionId: `fork-${sid}` });
+		assert.equal(text(a2.msg), "second");
+	});
+
+	it("falls back to resuming the source session when forking its transcript fails", async () => {
+		const h = harness([[...apiMessage("msg_A", [{ text: "first" }], "end_turn"), result]]);
+		const hist: Message[] = [user("one")];
+		const a1 = await h.call(hist);
+		h.provider.shutdown();
+		const sid = h.created[0].sessionId;
+		mkdirSync(projectDir(h.cwd), { recursive: true });
+		writeFileSync(join(projectDir(h.cwd), `${sid}.jsonl`), `${JSON.stringify({ type: "assistant", uuid: "uuid-A", isSidechain: false, message: { id: "msg_A" } })}\n`);
+		const h2 = harness([[...apiMessage("msg_B", [{ text: "second" }], "end_turn"), result]], h.registry, { forkSession: async () => { throw new Error("fork unavailable"); } });
+		(h2 as any).provider.opts.cwd = () => h.cwd;
+		hist.push(a1.msg, user("two"));
+		const a2 = await h2.call(hist);
+		assert.equal(a2.route, "resume");
+		assert.deepEqual(h2.created[0].spec.resume, { sessionId: sid, at: "uuid-A" });
+		assert.equal(text(a2.msg), "second");
+	});
+
+	it("synthesizes a session for history from another provider", async () => {
+		const h = harness([[...apiMessage("m", [{ text: "ok" }], "end_turn"), result]]);
+		const foreign = { role: "assistant", content: [{ type: "text", text: "hi from gpt" }], api: "openai-responses", provider: "openai", model: "gpt", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 1 } as AssistantMessage;
+		const a = await h.call([user("hello"), foreign, user("continue")]);
+		assert.equal(a.route, "synth");
+		assert.ok(h.created[0].spec.resume?.at);
+		assert.deepEqual(h.created[0].sent[0], [{ type: "text", text: "continue" }]);
+	});
+
+	it("never attaches a second concurrent request to a busy session (F4)", async () => {
+		const h = harness([[], [...apiMessage("m2", [{ text: "b" }], "end_turn"), result]]);
+		const ac = new AbortController();
+		const first = h.call([user("same")], ac.signal);
+		await new Promise((r) => setTimeout(r, 10));
+		const second = await h.call([user("same")]);
+		assert.equal(h.created.length, 2, "the busy session was not shared");
+		assert.equal(text(second.msg), "b");
+		ac.abort();
+		await first;
+	});
+});
+
+// ---- Configuration, environment, models ------------------------------------------------------
+
+describe("busy sessions", () => {
+	it("a resume never closes a session another call is reading (R5)", async () => {
+		const h = harness([[...apiMessage("msg_A", [{ text: "first" }], "end_turn"), result], [], [...apiMessage("msg_C", [{ text: "other branch" }], "end_turn"), result]]);
+		const a1 = await h.call([user("one")]);
+		const ac = new AbortController();
+		const pending = h.call([user("one"), a1.msg, user("two")], ac.signal); // stays busy: no reply scripted
+		await new Promise((r) => setTimeout(r, 10));
+		const b = await h.call([user("one"), a1.msg, user("branch")]);
+		assert.equal(h.created[0].dead, false, "the busy session survived");
+		assert.equal(h.created.length, 2);
+		assert.equal(text(b.msg), "other branch");
+		ac.abort();
+		await pending;
+	});
+
+	it("is busy from the moment it is selected, even while the model switch is pending (R2)", async () => {
+		const h = harness([[...apiMessage("m1", [{ text: "a" }], "end_turn"), result], [...apiMessage("m2", [{ text: "b" }], "end_turn"), result], [...apiMessage("m3", [{ text: "c" }], "end_turn"), result]]);
+		const a1 = await h.call([user("one")]);
+		let release!: () => void;
+		h.created[0].setModel = (m: string) => new Promise<void>((r) => (release = () => ((h.created[0].model = m), r())));
+		const opus = { ...model, id: "claude-opus-5-5" } as Model<any>;
+		const hist = [user("one"), a1.msg, user("two")];
+		const first = h.provider.streamSimple(opus, normalizeContext({ systemPrompt: SYSTEM, tools, messages: hist }), { reasoning: "medium" as any }).result();
+		await new Promise((r) => setTimeout(r, 10));
+		const second = h.provider.streamSimple(opus, normalizeContext({ systemPrompt: SYSTEM, tools, messages: hist }), { reasoning: "medium" as any }).result();
+		await new Promise((r) => setTimeout(r, 10));
+		release();
+		await Promise.all([first, second]);
+		assert.equal(h.created.length, 2, "the second call did not share the session being switched");
+	});
+
+	it("eviction and the idle sweep skip busy sessions (R3)", async () => {
+		const h = harness([[], [], [...apiMessage("m", [{ text: "c" }], "end_turn"), result]]);
+		(h.provider as any).opts.maxSessions = 1;
+		const ac = new AbortController();
+		const a = h.call([user("a")], ac.signal);
+		const b = h.call([user("b")], ac.signal);
+		await new Promise((r) => setTimeout(r, 10));
+		assert.equal(h.created.length, 2);
+		assert.equal(h.created.filter((s) => s.dead).length, 0, "no in-flight session was evicted");
+		ac.abort();
+		await Promise.all([a, b]);
+	});
+});
+
+describe("process lifetime", () => {
+	const reply = (id: string) => [...apiMessage(id, [{ text: id }], "end_turn"), result];
+	const running = (h: ReturnType<typeof harness>) => h.created.filter((s) => !s.dead).length;
+
+	it("a failed model switch closes the session instead of leaving it busy", async () => {
+		const h = harness([reply("m1"), reply("m2")]);
+		const a1 = await h.call([user("one")]);
+		h.created[0].setModel = async () => {
+			throw new Error("switch failed");
+		};
+		const opus = { ...model, id: "claude-opus-5-5" } as Model<any>;
+		const failed = (await h.provider.streamSimple(opus, normalizeContext({ systemPrompt: SYSTEM, tools, messages: [user("one"), a1.msg, user("two")] }), { reasoning: "medium" as any }).result()) as AssistantMessage;
+		assert.equal(failed.stopReason, "error");
+		assert.equal(h.created[0].dead, true, "the session was closed");
+		assert.equal(h.created[0].busy, false);
+		const again = await h.call([user("one"), a1.msg, user("two")]);
+		assert.equal(text(again.msg), "m2");
+	});
+
+	it("many conversations never leave more than maxSessions processes running", async () => {
+		const h = harness(Array.from({ length: 40 }, (_, i) => reply(`m${i}`)));
+		for (let i = 0; i < 40; i++) await h.call([user(`conversation ${i}`)]);
+		assert.equal(h.created.length, 40);
+		assert.ok(running(h) <= 3, `${running(h)} processes still running`);
+	});
+
+	it("concurrent calls (parallel samples) are bounded once they finish", async () => {
+		const h = harness(Array.from({ length: 30 }, (_, i) => reply(`m${i}`)));
+		for (let round = 0; round < 10; round++) await Promise.all([0, 1, 2].map((k) => h.call([user(`round ${round} sample ${k}`)])));
+		assert.ok(running(h) <= 3, `${running(h)} processes still running`);
+	});
+
+	it("a session whose busy flag outlived its call is still closed", async () => {
+		const h = harness(Array.from({ length: 10 }, (_, i) => reply(`m${i}`)));
+		await h.call([user("stuck")]);
+		h.created[0].busy = true; // as if a path forgot to release it
+		for (let i = 0; i < 6; i++) await h.call([user(`other ${i}`)]);
+		assert.equal(h.created[0].dead, true);
+		assert.ok(running(h) <= 3, `${running(h)} processes still running`);
+	});
+
+	it("an undefined idleMs (the extension's unconfigured shape) never sweeps an in-flight call", async () => {
+		const h = harness([[]], undefined, { idleMs: undefined });
+		const ac = new AbortController();
+		const pending = h.call([user("silent")], ac.signal);
+		await new Promise((r) => setTimeout(r, 10));
+		h.provider.sweep(Date.now() + 60_000);
+		assert.equal(h.created[0].dead, false, "the sweep left the in-flight session running");
+		ac.abort();
+		await pending;
+	});
+
+	it("the idle sweep ends a call that Claude Code stopped answering", async () => {
+		const h = harness([[]]);
+		const pending = h.call([user("silent")]);
+		await new Promise((r) => setTimeout(r, 10));
+		h.provider.sweep(Date.now() + 21 * 60_000);
+		const r = await pending;
+		assert.equal(r.msg.stopReason, "error");
+		assert.equal(running(h), 0);
+	});
+
+	it("shutdown closes every process, pooled or not", async () => {
+		const h = harness(Array.from({ length: 5 }, (_, i) => reply(`m${i}`)));
+		for (let i = 0; i < 5; i++) await h.call([user(`c${i}`)]);
+		(h.provider as any).sessions = []; // a path that lost track of the pool
+		h.provider.shutdown();
+		assert.equal(running(h), 0);
+	});
+});
+
+describe("configuration", () => {
+	it("comes only from the agent directory or the environment, and bad values are ignored", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "agent-"));
+		const read = (env: Record<string, string> = {}) => resolveConfig({ agentDir, env });
+		assert.deepEqual(read(), { promptMode: "claude" });
+		for (const bad of [[], null, { maxSessions: "lots", idleMinutes: -1 }, { maxSessions: 0.5, idleMinutes: 1e9 }, { pathToClaudeCodeExecutable: 5 }]) {
+			writeFileSync(join(agentDir, "claude-sdk.json"), JSON.stringify(bad));
+			assert.deepEqual(read(), { promptMode: "claude" }, JSON.stringify(bad));
+		}
+		writeFileSync(join(agentDir, "claude-sdk.json"), JSON.stringify({ pathToClaudeCodeExecutable: "/opt/claude", maxSessions: 5 }));
+		assert.equal(read().pathToClaudeCodeExecutable, "/opt/claude");
+		assert.equal(read().maxSessions, 5);
+		assert.equal(read({ PI_CLAUDE_SDK_CLAUDE_PATH: "/usr/bin/claude" }).pathToClaudeCodeExecutable, "/usr/bin/claude");
+	});
+});
+
+describe("extra usage", () => {
+	const billed = { type: "rate_limit_event", rate_limit_info: { status: "allowed", isUsingOverage: true } };
+	const onPlan = { type: "rate_limit_event", rate_limit_info: { status: "allowed", isUsingOverage: false } };
+	const answer = (id: string, words = "done") => [...apiMessage(id, [{ text: words }], "end_turn"), result];
+	const asking = (allowed: boolean) => {
+		const asked: unknown[] = [];
+		return { asked, confirmExtraUsage: async (info: unknown) => (asked.push(info), allowed) };
+	};
+
+	it("stops, closing the session, when nobody can approve it", async () => {
+		const h = harness([[billed, ...answer("m1")]]);
+		const { msg } = await h.call([user("hi")]);
+		assert.equal(msg.stopReason, "error");
+		assert.equal(msg.errorMessage, EXTRA_USAGE_STOPPED);
+		assert.equal(msg.content.length, 0);
+		assert.equal(h.created[0].dead, true);
+	});
+
+	it("when you say no, nothing more is sent, and the next request asks first", async () => {
+		const ask = asking(false);
+		const h = harness([[billed]], undefined, ask);
+		assert.equal((await h.call([user("hi")])).msg.errorMessage, EXTRA_USAGE_STOPPED);
+		assert.equal((await h.call([user("hi")])).msg.errorMessage, EXTRA_USAGE_STOPPED);
+		assert.equal(ask.asked.length, 2);
+		assert.equal(h.created.length, 1);
+	});
+
+	it("when you say yes, runs the request again on a new session and doesn't ask again", async () => {
+		const ask = asking(true);
+		const h = harness([[billed], [billed, ...answer("m1", "first")], [billed, ...answer("m2", "second")]], undefined, ask);
+		const hist: Message[] = [user("hi")];
+		const first = await h.call(hist);
+		assert.equal(text(first.msg), "first");
+		assert.equal(first.msg.stopReason, "stop");
+		assert.equal(h.created.length, 2);
+		assert.equal(h.created[0].dead, true);
+		hist.push(first.msg, user("more"));
+		assert.equal(text((await h.call(hist)).msg), "second");
+		assert.equal(ask.asked.length, 1);
+	});
+
+	it("a reply that's cut off isn't run twice", async () => {
+		const ask = asking(true);
+		const h = harness([[...apiMessage("m1", [{ text: "partial" }], "tool_use").slice(0, 3), billed]], undefined, ask);
+		const { msg } = await h.call([user("hi")]);
+		assert.equal(msg.errorMessage, EXTRA_USAGE_RESEND);
+		assert.equal(h.created.length, 1);
+	});
+
+	it("a reply that finished before the report is kept, and the next request asks before sending", async () => {
+		const ask = asking(false);
+		const h = harness([[...apiMessage("m1", [{ text: "whole" }], "end_turn"), billed, result]], undefined, ask);
+		const hist: Message[] = [user("hi")];
+		const first = await h.call(hist);
+		assert.equal(text(first.msg), "whole");
+		assert.equal(first.msg.stopReason, "stop");
+		assert.equal(ask.asked.length, 0);
+		hist.push(first.msg, user("more"));
+		assert.equal((await h.call(hist)).msg.errorMessage, EXTRA_USAGE_STOPPED);
+		assert.equal(ask.asked.length, 1);
+		assert.equal(h.created[0].sent.length, 1);
+	});
+
+	it("approval ends when requests go back on the plan", async () => {
+		const ask = asking(true);
+		const h = harness([[billed], [billed, onPlan, ...answer("m1")], [billed], [...answer("m2")]], undefined, ask);
+		const hist: Message[] = [user("hi")];
+		const first = await h.call(hist);
+		hist.push(first.msg, user("more"));
+		assert.equal(text((await h.call(hist)).msg), "done");
+		assert.equal(ask.asked.length, 2);
+	});
+
+	it("once the limit has reset, it stops asking first", () => {
+		assert.equal(stillBilling({ resetsAt: 100 }, 99), true);
+		assert.equal(stillBilling({ resetsAt: 100 }, 101), false);
+		assert.equal(stillBilling({}, 101), true);
+		assert.equal(stillBilling(undefined, 1), false);
+	});
+
+	it("doesn't ask about a request on the plan, or one that's refused anyway", () => {
+		assert.equal(billsExtraUsage(onPlan.rate_limit_info), false);
+		assert.equal(billsExtraUsage({ status: "rejected", isUsingOverage: false, rateLimitType: "overage" }), false);
+		assert.equal(billsExtraUsage({ status: "rejected", isUsingOverage: true }), true);
+		assert.equal(billsExtraUsage({ status: "allowed_warning", rateLimitType: "overage" }), true);
+		assert.equal(billsExtraUsage({ status: "allowed", overageInUse: true }), true);
+		assert.equal(billsExtraUsage(undefined), false);
+	});
+
+	it("explains Anthropic's refusal, and leaves other errors alone", async () => {
+		assert.equal(explainError("boom"), "boom");
+		const h = harness([[{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["400 Third-party apps now draw from your extra usage"] }]]);
+		assert.match((await h.call([user("hi")])).msg.errorMessage ?? "", /asked here before it's billed/);
+	});
+});
+
+describe("child environment (F5, F6)", () => {
+	const spec = { maxOutputTokens: 1000 } as SessionSpec;
+	it("removes every switch that would move Claude Code off the subscription", () => {
+		const env = childEnv(
+			{ PATH: "/bin", ANTHROPIC_API_KEY: "k", ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_BASE_URL: "http://gateway", ANTHROPIC_CUSTOM_HEADERS: "x: y", CLAUDE_CODE_USE_BEDROCK: "1", CLAUDE_CODE_USE_VERTEX: "1", CLAUDE_CODE_USE_FOUNDRY: "1" },
+			spec,
+		);
+		for (const k of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"]) assert.equal(env[k], undefined, k);
+		assert.equal(env.PATH, "/bin");
+		assert.equal(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "1000");
+	});
+	it("ignores the removed experiment switches", () => {
+		const env = childEnv({ PI_CLAUDE_SDK_EXTRA_ENV: '{"ANTHROPIC_API_KEY":"k"}' }, spec);
+		assert.equal(env.ANTHROPIC_API_KEY, undefined);
+	});
+});
+
+describe("model refresh (F7)", () => {
+	it("keeps only Anthropic chat models", () => {
+		const base = { reasoning: true, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1, maxTokens: 1 };
+		const picked = anthropicChatModels([
+			{ ...base, id: "claude-new-6", name: "New", provider: "anthropic" },
+			{ ...base, id: "claude-new-6", name: "New", provider: "anthropic", type: "chat" },
+			{ ...base, id: "claude-img", name: "Img", provider: "anthropic", type: "image" },
+			{ ...base, id: "claude-cls", name: "Cls", provider: "anthropic", type: "classifier" },
+			{ ...base, id: "gpt-x", name: "G", provider: "openai" },
+		] as any);
+		assert.deepEqual(picked.map((m) => m.id), ["claude-new-6", "claude-new-6"]);
+	});
+});

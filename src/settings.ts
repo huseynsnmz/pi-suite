@@ -10,6 +10,7 @@ export const PARTS = {
   frame: "The start card, framed editor, tool boxes, footer and todo list",
   board: "The board of agent sessions",
   commands: "/clear and /security-review",
+  subscription: "Claude models on your Claude login, asking before anything is billed as extra usage",
 } as const;
 
 export type Part = keyof typeof PARTS;

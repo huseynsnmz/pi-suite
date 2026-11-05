@@ -1,0 +1,69 @@
+import { appendFileSync } from "node:fs";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir, getDocsPath, getExamplesPath, getReadmePath } from "@earendil-works/pi-coding-agent";
+import { EXTRA_USAGE_NO, EXTRA_USAGE_QUESTION, EXTRA_USAGE_YES } from "./billing.ts";
+import { resolveConfig } from "./config.ts";
+import { anthropicChatModels, claudeModels } from "./models.ts";
+import { applyClaudePrompt } from "./prompt.ts";
+import { API, ClaudeSdkProvider } from "./provider.ts";
+
+export const PROVIDER = "claude-sdk";
+
+/**
+ * pi extension: Claude models through the Claude Agent SDK, authenticated by the local Claude
+ * Code login (Pro/Max subscription). pi keeps its own agent loop, tools, prompt and compaction;
+ * Claude Code is used only as the authenticated model transport.
+ */
+export default function (pi: ExtensionAPI) {
+	const config = resolveConfig({ agentDir: getAgentDir(), env: process.env });
+	const debugPath = process.env.PI_CLAUDE_SDK_DEBUG;
+	let session: ExtensionContext | undefined;
+	const provider = new ClaudeSdkProvider({
+		// With nobody to ask, as in `pi -p` or a subagent, it stops rather than spend your money.
+		confirmExtraUsage: async (_info, signal) => {
+			if (!session?.hasUI) return false;
+			return (await session.ui.select(EXTRA_USAGE_QUESTION, [EXTRA_USAGE_NO, EXTRA_USAGE_YES], { signal })) === EXTRA_USAGE_YES;
+		},
+		pathToClaudeCodeExecutable: config.pathToClaudeCodeExecutable,
+		...(config.maxSessions ? { maxSessions: config.maxSessions } : {}),
+		...(config.idleMinutes ? { idleMs: config.idleMinutes * 60_000 } : {}),
+		debug: debugPath ? (msg) => appendFileSync(debugPath, `${new Date().toISOString()} ${msg}\n`) : undefined,
+	});
+
+	const register = (models = claudeModels()) =>
+		pi.registerProvider(PROVIDER, {
+			name: "Claude (subscription via Agent SDK)",
+			// Claude Code authenticates itself; pi only needs a non-empty key to treat the provider as configured.
+			apiKey: "claude-code-login",
+			api: API as any,
+			baseUrl: "claude-agent-sdk://local",
+			models,
+			streamSimple: provider.streamSimple,
+		});
+	register();
+
+	// Pick up Claude models newer than the bundled snapshot from pi's own catalog.
+	let refreshed = false;
+	pi.on("session_start", (_event, ctx) => {
+		session = ctx;
+		if (refreshed) return;
+		refreshed = true;
+		try {
+			const live = anthropicChatModels(ctx.modelRegistry.getAll());
+			const known = new Set(claudeModels().map((m) => m.id));
+			if (live.some((m) => !/-\d{8}$/.test(m.id) && !known.has(m.id))) register(claudeModels(live));
+		} catch {
+			// The snapshot stays registered.
+		}
+	});
+
+	const docs = { readme: getReadmePath(), docs: getDocsPath(), examples: getExamplesPath() };
+	pi.on("before_agent_start", (event, ctx) => applyClaudePrompt(event, ctx.model, config.promptMode ?? "claude", docs));
+
+	const shutdown = () => provider.shutdown();
+	process.once("exit", shutdown);
+	pi.on("session_shutdown", () => {
+		session = undefined;
+		process.off("exit", shutdown);
+		shutdown();
+	});
+}

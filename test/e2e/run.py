@@ -92,7 +92,7 @@ try:
         tools, _ = tools_with([part])
         others = [other for name, other in PART_TOOLS.items() if name != part]
         check(f"turning off {part} removes {tool}, and only that", tool not in tools and all(other in tools for other in others), str(tools))
-    tools, child = tools_with(["modes", "router", "web", "memory", "frame", "board", "commands"])
+    tools, child = tools_with(["modes", "router", "web", "memory", "frame", "board", "commands", "subscription"])
     check("with every part off, Pi still works", "OK" in child.stdout and not set(PART_TOOLS.values()) & set(tools), str(tools))
     (agent / "suite.json").write_text('{"off":["modes","wbe"]}')
     child = subprocess.run([str(PI), "-p", "hello"], env=env, cwd=project, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=90)
@@ -105,7 +105,7 @@ try:
     check("skills from parts that are on are listed", "review-permissions" in term.text)
     term.command("/suite list")
     term.pump(0.5)
-    check("/suite list shows every part", all(f"{part}: on" in term.text for part in ("modes", "router", "web", "memory", "frame", "board", "commands")), term.text[-400:])
+    check("/suite list shows every part", all(f"{part}: on" in term.text for part in ("subscription", "modes", "router", "web", "memory", "frame", "board", "commands")), term.text[-400:])
     mark = len(term.text)
     term.command("/suite")
     check("/suite opens a list", term.wait("Enter turns a part on or off", mark, 8))

@@ -11,6 +11,7 @@ One package for [Pi](https://pi.dev): modes and permissions, a framed screen, a 
 | `frame` | The start card, framed editor, tool boxes, footer and the agent's todo list | [README](packages/frame/README.md) |
 | `board` | A board for starting, watching and attaching to background sessions | [README](packages/board/README.md) |
 | `commands` | `/clear` and `/security-review` | [README](packages/commands/README.md) |
+| `subscription` | Claude models on your Claude login, asking before anything more is billed as extra usage | [README](packages/subscription/README.md) |
 
 ## Install
 
