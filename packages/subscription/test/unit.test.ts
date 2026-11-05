@@ -8,7 +8,7 @@ import { normalizeContext, type AssistantMessage, type Message } from "@earendil
 import { AnchorRegistry } from "../src/anchors.ts";
 import { synthesizeSession } from "../src/cc-sessions.ts";
 import { fingerprint, piToolName, readTranscript, toolUseId, userTurnBlocks } from "../src/convert.ts";
-import { claudeModels, thinkingOptions } from "../src/models.ts";
+import { claudeModels, fitThinking, thinkingOptions } from "../src/models.ts";
 import { AsyncQueue, stableStringify } from "../src/util.ts";
 
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -129,9 +129,9 @@ describe("models", () => {
 		assert.ok(!ids.some((id) => /-\d{8}$/.test(id)));
 	});
 	it("maps thinking levels", () => {
-		assert.deepEqual(thinkingOptions("high", true), { thinking: { type: "adaptive" }, effort: "high" });
+		assert.deepEqual(thinkingOptions("high", true), { thinking: { type: "adaptive", display: "summarized" }, effort: "high" });
 		assert.deepEqual(thinkingOptions(undefined, true), { thinking: { type: "disabled" } });
-		assert.deepEqual(thinkingOptions("low", false), { thinking: { type: "enabled", budgetTokens: 4096 } });
+		assert.deepEqual(thinkingOptions("low", false), { thinking: { type: "enabled", budgetTokens: 2048, display: "summarized" } });
 	});
 });
 
@@ -166,3 +166,19 @@ import { readdirSync } from "node:fs";
 function readdirOne(dir: string): string {
 	return join(dir, readdirSync(dir)[0]);
 }
+
+describe("thinking budgets and the output cap", () => {
+	const budget = (budgetTokens: number) => ({ type: "enabled", budgetTokens, display: "summarized" }) as const;
+	it("grows the cap to fit the budget, up to what the model allows", () => {
+		assert.equal(fitThinking(budget(16384), 13107, 64000).maxOutputTokens, 29491);
+		assert.equal(fitThinking(budget(16384), 60000, 64000).maxOutputTokens, 64000);
+	});
+	it("always leaves room for the answer", () => {
+		const fitted = fitThinking(budget(48000), 2000, 32000);
+		assert.equal(fitted.maxOutputTokens, 32000);
+		assert.equal(fitted.thinking.type === "enabled" && fitted.thinking.budgetTokens, 30976);
+	});
+	it("leaves other kinds of thinking alone", () => {
+		assert.equal(fitThinking({ type: "disabled" }, 2000, 32000).maxOutputTokens, 2000);
+	});
+});

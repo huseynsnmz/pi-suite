@@ -438,6 +438,36 @@ describe("process lifetime", () => {
 	});
 });
 
+describe("a session Claude Code has cleaned up", () => {
+	it("falls back to writing the history out when the fork fails and the file is gone", async () => {
+		const h = harness([[...apiMessage("m1", [{ text: "one" }], "end_turn"), result], [...apiMessage("m2", [{ text: "two" }], "end_turn"), result]], undefined, {
+			forkSession: async () => {
+				throw new Error("no such session");
+			},
+		});
+		const hist: Message[] = [user("hi")];
+		const first = await h.call(hist);
+		h.provider.shutdown();
+		hist.push(first.msg, user("more"));
+		const second = await h.call(hist);
+		assert.equal(second.route, "synth");
+		assert.equal(text(second.msg), "two");
+	});
+});
+
+describe("output cap", () => {
+	it("a different cap needs a different process", async () => {
+		const h = harness([[...apiMessage("m1", [{ text: "one" }], "end_turn"), result], [...apiMessage("m2", [{ text: "two" }], "end_turn"), result]]);
+		const hist: Message[] = [user("hi")];
+		const stream = (maxTokens: number, messages: Message[]) => h.provider.streamSimple(model as any, normalizeContext({ systemPrompt: SYSTEM, tools, messages }), { maxTokens }).result();
+		const first = (await stream(1000, hist)) as AssistantMessage;
+		hist.push(first, user("more"));
+		await stream(2000, hist);
+		assert.equal(h.created.length, 2);
+		assert.equal(h.created[1].spec.maxOutputTokens, 2000);
+	});
+});
+
 describe("configuration", () => {
 	it("comes only from the agent directory or the environment, and bad values are ignored", () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "agent-"));
@@ -525,6 +555,37 @@ describe("extra usage", () => {
 		hist.push(first.msg, user("more"));
 		assert.equal(text((await h.call(hist)).msg), "done");
 		assert.equal(ask.asked.length, 2);
+	});
+
+	it("a report waiting from the last response is seen before tool results send another request", async () => {
+		const ask = asking(false);
+		const h = harness([apiMessage("m1", [{ tool: "read", id: "toolu_1", args: { path: "a" } }], "tool_use"), [...answer("m2")]], undefined, ask);
+		const hist: Message[] = [user("read")];
+		const first = await h.call(hist);
+		h.created[0].events.push(billed);
+		hist.push(first.msg, toolResult("toolu_1", "hello"));
+		assert.equal((await h.call(hist)).msg.errorMessage, EXTRA_USAGE_STOPPED);
+		assert.equal(ask.asked.length, 1);
+		assert.equal(h.created[0].delivered.length, 0);
+	});
+
+	it("a request that gives up doesn't answer for another one waiting on the same question", async () => {
+		let answer_: (allowed: boolean) => void = () => {};
+		let dismissed = false;
+		const confirmExtraUsage = (_info: unknown, signal?: AbortSignal) => {
+			signal?.addEventListener("abort", () => (dismissed = true));
+			return new Promise<boolean>((resolve) => (answer_ = resolve));
+		};
+		const h = harness([[billed], [billed], [...answer("m3")], [...answer("m4")]], undefined, { confirmExtraUsage });
+		const stop = new AbortController();
+		const gaveUp = h.call([user("one")], stop.signal);
+		const waits = h.call([user("two")]);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		stop.abort();
+		assert.equal((await gaveUp).msg.stopReason, "aborted");
+		assert.equal(dismissed, false);
+		answer_(true);
+		assert.equal((await waits).msg.stopReason, "stop");
 	});
 
 	it("once the limit has reset, it stops asking first", () => {

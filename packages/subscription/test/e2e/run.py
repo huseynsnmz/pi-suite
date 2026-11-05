@@ -23,7 +23,7 @@ wrapper.write_text(f'#!/bin/sh\nANTHROPIC_BASE_URL=http://127.0.0.1:{PORT} CLAUD
 wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
 (agent / "claude-sdk.json").write_text(json.dumps({"pathToClaudeCodeExecutable": str(wrapper)}))
 (agent / "settings.json").write_text(json.dumps({"defaultProvider": "claude-sdk", "defaultModel": "claude-haiku-5-5", "defaultThinkingLevel": "off", "packages": [str(REPO)]}))
-(agent / "suite.json").write_text(json.dumps({"off": ["router", "web", "memory", "frame", "board", "commands"]}))
+(agent / "suite.json").write_text(json.dumps({"off": ["router", "web", "memory", "frame", "board", "commands"], "on": ["subscription"]}))
 env = {"PATH": os.environ["PATH"], "HOME": str(home), "TERM": "xterm-256color", "LANG": "en_US.UTF-8", "PI_CODING_AGENT_DIR": str(agent), "PI_SKIP_VERSION_CHECK": "1", "PI_OFFLINE": "1", "CLAUDE_CONFIG_DIR": str(home / ".claude"), "ANTHROPIC_API_KEY": "must-not-arrive", "PI_CLAUDE_SDK_DEBUG": str(root / "routes.log")}
 server = subprocess.Popen(["node", str(Path(__file__).parent / "fake-anthropic.mjs"), str(PORT), str(log)])
 time.sleep(0.5)

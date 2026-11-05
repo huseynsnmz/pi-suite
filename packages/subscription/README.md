@@ -6,7 +6,7 @@ Based on [pi-claude-subscription](https://github.com/jkeskikangas/pi-claude-subs
 
 ## Use it
 
-Log in to Claude Code (`claude`, then `/login`), then pick a `claude-sdk/...` model in `/model`, such as `claude-sdk/claude-sonnet-5-5`. `/suite off subscription` removes these models.
+This part is off until you run `/suite on subscription`, because its models count as logged in whether you are or not, and because of the terms below. Log in to Claude Code (`claude`, then `/login`), then pick a `claude-sdk/...` model in `/model`, such as `claude-sdk/claude-sonnet-5-5`. `/suite off subscription` removes them and moves you to another model.
 
 It uses Claude Code's login, never Pi's. So that nothing else decides where your requests or login go, it removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` and the Bedrock, Vertex and Foundry switches from Claude Code's environment.
 

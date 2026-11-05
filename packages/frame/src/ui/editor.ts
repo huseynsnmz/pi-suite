@@ -137,10 +137,17 @@ export class FrameEditor extends CustomEditor {
 			const typed = this.getText();
 			const entries = this.#history();
 			const browsing = Reflect.get(this, "historyIndex") !== -1;
-			if (down || typed === "" || typed.includes("\n") || browsing) return false;
-			this.#prefix = startPrefix(typed, entries);
+			if (down || typed === "" || typed.includes("\n") || browsing || !onFirstVisualLine(this)) return false;
+			const search = startPrefix(typed, entries);
+			// With nothing to go through, the arrows stay pi's.
+			if (search.matches.length === 0) return false;
+			this.#prefix = search;
 		}
 		const text = stepPrefix(this.#prefix, up ? 1 : -1);
+		if (text === undefined && down) {
+			this.#prefix = undefined;
+			return false;
+		}
 		if (text !== undefined) this.setText(text);
 		return true;
 	}
@@ -290,6 +297,12 @@ export class FrameEditor extends CustomEditor {
 		if (visibleWidth(full) > 0 && visibleWidth(full) <= budget) return full;
 		return indicator.renderSpinnerInBorder(budget);
 	}
+}
+
+/** The method is private. If a pi release renames it, Up just moves the cursor as before. */
+function onFirstVisualLine(editor: CustomEditor): boolean {
+	const check: unknown = Reflect.get(editor, "isOnFirstVisualLine");
+	return typeof check === "function" && check.call(editor) === true;
 }
 
 /** The method is private; nothing opens if a pi release renames it. */

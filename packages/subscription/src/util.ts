@@ -18,6 +18,13 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 		for (const w of this.waiters.splice(0)) w({ value: undefined as never, done: true });
 	}
 
+	/** Takes out the waiting items that match, and leaves the rest in order. */
+	take(matches: (item: T) => boolean): T[] {
+		const taken = this.items.filter(matches);
+		this.items = this.items.filter((item) => !matches(item));
+		return taken;
+	}
+
 	get isClosed(): boolean {
 		return this.closed;
 	}

@@ -7,7 +7,7 @@
 - Router: each role can have its own reasoning level, chosen in `/router` from what that role's model offers.
 - Up and Down with one line typed go through past prompts that start with it. With nothing typed they also reach this folder's other sessions.
 - With `hideThinkingBlock` on, reasoning shows while it's written and collapses when the message is done. `Ctrl+T` opens it.
-- New part, `subscription`: Claude models on your Claude login, based on pi-claude-subscription. It asks before anything more is billed as extra usage. See its README for the limits and what Anthropic's terms say.
+- New part, off until you run `/suite on subscription`: Claude models on your Claude login, based on pi-claude-subscription. It asks before anything more is billed as extra usage. See its README for the limits and what Anthropic's terms say.
 
 ### Fixes
 

@@ -33,6 +33,8 @@ export function anthropicChatModels(models: readonly (CatalogModel & { provider:
 	return models.filter((m) => m.provider === "anthropic" && (m.type === undefined || m.type === "chat"));
 }
 
+export type ThinkingOption = { type: "adaptive"; display: "summarized" } | { type: "disabled" } | { type: "enabled"; budgetTokens: number; display: "summarized" };
+
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 /**
@@ -43,13 +45,21 @@ const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 export function thinkingOptions(
 	level: string | undefined,
 	hasLevelMap: boolean,
-): { thinking: { type: "adaptive" } | { type: "disabled" } | { type: "enabled"; budgetTokens: number }; effort?: "low" | "medium" | "high" | "xhigh" | "max" } {
+): { thinking: ThinkingOption; effort?: "low" | "medium" | "high" | "xhigh" | "max" } {
 	if (!level || level === "off") return { thinking: { type: "disabled" } };
 	if (hasLevelMap) {
 		const effort = EFFORTS.has(level) ? (level as any) : level === "minimal" ? "low" : "medium";
-		return { thinking: { type: "adaptive" }, effort };
+		return { thinking: { type: "adaptive", display: "summarized" }, effort };
 	}
 	// Budget-based models (e.g. Haiku 4.5).
-	const budgets: Record<string, number> = { minimal: 1024, low: 4096, medium: 10240, high: 20480, xhigh: 32000, max: 48000 };
-	return { thinking: { type: "enabled", budgetTokens: budgets[level] ?? 10240 } };
+	const budgets: Record<string, number> = { minimal: 1024, low: 2048, medium: 8192, high: 16384, xhigh: 32000, max: 48000 };
+	return { thinking: { type: "enabled", budgetTokens: budgets[level] ?? 8192, display: "summarized" } };
+}
+
+/** A budget counts toward the output cap, so the cap grows to fit it, as in pi's Anthropic provider, up to what the model allows. */
+export function fitThinking(thinking: ThinkingOption, maxTokens: number, modelMax: number): { thinking: ThinkingOption; maxOutputTokens: number } {
+	if (thinking.type !== "enabled") return { thinking, maxOutputTokens: maxTokens };
+	const maxOutputTokens = Math.min(maxTokens + thinking.budgetTokens, modelMax);
+	const budgetTokens = maxOutputTokens > thinking.budgetTokens ? thinking.budgetTokens : Math.max(1024, maxOutputTokens - 1024);
+	return { thinking: { ...thinking, budgetTokens }, maxOutputTokens };
 }

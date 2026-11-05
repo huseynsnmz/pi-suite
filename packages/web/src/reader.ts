@@ -71,12 +71,14 @@ export async function askReader(ctx: ExtensionContext, config: WebConfig, questi
       systemPrompt: SYSTEM,
       messages: [{ role: "user", content: [{ type: "text", text: readerPrompt(question, text) }], timestamp: Date.now() }],
     },
-    { signal, maxTokens: 2000, cacheRetention: "none", ...(reasoning === undefined ? {} : { reasoning }) },
+    // Reasoning uses the same tokens as the answer, and could leave none for it.
+    { signal, maxTokens: reasoning === undefined ? 2000 : 16000, cacheRetention: "none", ...(reasoning === undefined ? {} : { reasoning }) },
   ).result();
   if (response.stopReason === "error" || response.stopReason === "aborted") {
     // Not the provider's message, as some repeat part of the request, and that's page text.
     throw new Error(`The page reader failed (${response.stopReason}), so the page wasn't read`);
   }
   const raw = response.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+  if (raw.trim() === "") throw new Error("The page reader gave no answer, so the page wasn't read");
   return checkAnswer(raw, text, config.minConfidence);
 }

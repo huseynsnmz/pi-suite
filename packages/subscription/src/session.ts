@@ -4,6 +4,7 @@ import type { Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-age
 import type { Tool, ToolResultMessage } from "@earendil-works/pi-ai";
 import { MCP_PREFIX, MCP_SERVER, toolUseId } from "./convert.ts";
 import { type ToolResult, ToolServer } from "./mcp.ts";
+import type { ThinkingOption } from "./models.ts";
 import { AsyncQueue } from "./util.ts";
 
 export interface SessionSpec {
@@ -13,7 +14,7 @@ export interface SessionSpec {
 	tools: Tool[];
 	toolsHash: string;
 	thinkingKey: string;
-	thinking: { type: "adaptive" } | { type: "disabled" } | { type: "enabled"; budgetTokens: number };
+	thinking: ThinkingOption;
 	effort?: "low" | "medium" | "high" | "xhigh" | "max";
 	maxOutputTokens?: number;
 	/** pi asked for no prompt caching (cacheRetention "none"). */

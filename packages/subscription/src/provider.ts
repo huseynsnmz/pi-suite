@@ -14,9 +14,9 @@ import type {
 import { calculateCost, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { AnchorRegistry } from "./anchors.ts";
 import { billsExtraUsage, explainError, EXTRA_USAGE_RESEND, EXTRA_USAGE_STOPPED, type RateLimitInfo, stillBilling } from "./billing.ts";
-import { findMessageUuid, synthesizeSession } from "./cc-sessions.ts";
+import { findMessageUuid, sessionFile, synthesizeSession } from "./cc-sessions.ts";
 import { piToolName, readTranscript, type Transcript, type TurnMessage, userTurnBlocks, fingerprint } from "./convert.ts";
-import { thinkingOptions } from "./models.ts";
+import { fitThinking, thinkingOptions } from "./models.ts";
 import { type ClaudeSession, errorText, LiveSession, type SessionSpec } from "./session.ts";
 import { sha } from "./util.ts";
 
@@ -55,7 +55,7 @@ export class ClaudeSdkProvider {
 	private extraUsageApproved = false;
 	/** The latest report that requests are billed as extra usage, until one says they're not. */
 	private billing?: RateLimitInfo;
-	private asking?: Promise<boolean>;
+	private question?: { answer: Promise<boolean>; dismiss: AbortController; waiting: number };
 
 	constructor(opts: ProviderOptions = {}) {
 		this.registry = opts.registry ?? new AnchorRegistry();
@@ -106,30 +106,26 @@ export class ClaudeSdkProvider {
 				stream.end();
 				return;
 			}
-			if (!stillBilling(this.billing, Date.now() / 1000)) {
-				this.billing = undefined;
-				this.extraUsageApproved = false;
-			}
-			if (this.billing !== undefined && !this.extraUsageApproved) {
-				const allowed = await this.askExtraUsage(this.billing, options?.signal);
-				if (options?.signal?.aborted) return fail("aborted", "Request was aborted");
-				if (!allowed) return fail("error", EXTRA_USAGE_STOPPED);
-			}
+			const stopped = await this.needsStopping(options?.signal);
+			if (stopped) return fail(...stopped);
 			const t = readTranscript(context);
 			if (t.messages.length === 0 || t.messages[t.messages.length - 1].role === "assistant") {
 				return fail("error", "The transcript must end with a user message or tool results");
 			}
-			const thinking = thinkingOptions(options?.reasoning, !!(model as any).thinkingLevelMap);
+			const effort = thinkingOptions(options?.reasoning, !!(model as any).thinkingLevelMap);
+			const fitted = fitThinking(effort.thinking, options?.maxTokens ?? model.maxTokens, model.maxTokens);
+			const thinking = { ...effort, thinking: fitted.thinking };
 			const spec = {
 				cwd: this.opts.cwd(),
 				model: model.id,
 				systemPrompt: t.systemPrompt,
 				tools: t.tools,
 				toolsHash: t.toolsHash,
-				thinkingKey: JSON.stringify([thinking, options?.cacheRetention === "none"]),
+				// The output cap is fixed when the process starts, so a different one needs a different process.
+				thinkingKey: JSON.stringify([thinking, options?.cacheRetention === "none", fitted.maxOutputTokens]),
 				noCache: options?.cacheRetention === "none",
 				...thinking,
-				maxOutputTokens: options?.maxTokens ?? model.maxTokens,
+				maxOutputTokens: fitted.maxOutputTokens,
 				pathToClaudeCodeExecutable: this.opts.pathToClaudeCodeExecutable,
 				debug: this.opts.debug,
 			} satisfies SessionSpec;
@@ -139,6 +135,11 @@ export class ClaudeSdkProvider {
 				session = attached.session;
 				this.lastRoute = attached.route;
 				this.log(`route=${attached.route} session=${session.sessionId} prefix=${attached.prefix}/${t.messages.length}`);
+
+				// A report may be waiting from the last response. Tool results would send another request.
+				for (const report of session.events.take((event: any) => event.type === "rate_limit_event")) this.noteBilling((report as any).rate_limit_info);
+				const stoppedNow = await this.needsStopping(options?.signal);
+				if (stoppedNow) return fail(...stoppedNow);
 
 				const payload = await options?.onPayload?.({ sessionId: session.sessionId, route: attached.route, model: model.id, tail: t.messages.length - attached.prefix }, model);
 				void payload; // The request body is built inside Claude Code; there is nothing to replace.
@@ -167,9 +168,8 @@ export class ClaudeSdkProvider {
 					this.release(session);
 					this.drop(session);
 					session = undefined;
-					const allowed = await this.askExtraUsage(step.extraUsage, options?.signal);
-					if (options?.signal?.aborted) return fail("aborted", "Request was aborted");
-					if (!allowed) return fail("error", EXTRA_USAGE_STOPPED);
+					const stoppedHere = await this.needsStopping(options?.signal);
+					if (stoppedHere) return fail(...stoppedHere);
 					if (output.content.length > 0) return fail("error", EXTRA_USAGE_RESEND);
 					continue;
 				}
@@ -208,16 +208,56 @@ export class ClaudeSdkProvider {
 		this.active.delete(session);
 	}
 
-	/** One question at a time, however many requests are waiting on the answer. */
+	private noteBilling(info: RateLimitInfo | undefined): void {
+		this.log(`rate_limit ${JSON.stringify(info)}`);
+		if (billsExtraUsage(info)) {
+			this.billing = info;
+			return;
+		}
+		this.billing = undefined;
+		this.extraUsageApproved = false;
+	}
+
+	/** What to end a request with, if requests are billed and that isn't approved. Asks you if need be. */
+	private async needsStopping(signal?: AbortSignal): Promise<["error" | "aborted", string] | undefined> {
+		if (!stillBilling(this.billing, Date.now() / 1000)) {
+			this.billing = undefined;
+			this.extraUsageApproved = false;
+		}
+		if (this.billing === undefined || this.extraUsageApproved) return undefined;
+		const allowed = await this.askExtraUsage(this.billing, signal);
+		if (signal?.aborted) return ["aborted", "Request was aborted"];
+		return allowed ? undefined : ["error", EXTRA_USAGE_STOPPED];
+	}
+
+	/** One question at a time, however many requests wait on it. It stays open until the last of them gives up. */
 	private askExtraUsage(info: RateLimitInfo, signal?: AbortSignal): Promise<boolean> {
-		this.asking ??= (this.opts.confirmExtraUsage?.(info, signal) ?? Promise.resolve(false))
-			.catch(() => false)
-			.then((allowed) => {
-				this.asking = undefined;
-				this.extraUsageApproved = allowed;
-				return allowed;
+		if (this.question === undefined) {
+			const dismiss = new AbortController();
+			const answer = (this.opts.confirmExtraUsage?.(info, dismiss.signal) ?? Promise.resolve(false))
+				.catch(() => false)
+				.then((allowed) => {
+					this.question = undefined;
+					this.extraUsageApproved = allowed;
+					return allowed;
+				});
+			this.question = { answer, dismiss, waiting: 0 };
+		}
+		const question = this.question;
+		question.waiting += 1;
+		return new Promise((resolve) => {
+			const giveUp = () => {
+				question.waiting -= 1;
+				if (question.waiting === 0) question.dismiss.abort();
+				resolve(false);
+			};
+			if (signal?.aborted) return giveUp();
+			signal?.addEventListener("abort", giveUp, { once: true });
+			void question.answer.then((allowed) => {
+				signal?.removeEventListener("abort", giveUp);
+				resolve(allowed);
 			});
-		return this.asking;
+		});
 	}
 
 	/**
@@ -277,6 +317,11 @@ export class ClaudeSdkProvider {
 				if (forked.sessionId && forked.sessionId !== a.sessionId) resume = { sessionId: forked.sessionId };
 			} catch (e) {
 				this.log(`fork anchor ${a.sessionId}/${a.messageId} failed (${errorText(e)}); resuming source session`);
+				// Claude Code may have cleaned it up. A shorter prefix, or writing the history out, still works.
+				if (!sessionFile(a.cwd, a.sessionId)) {
+					resume = undefined;
+					continue;
+				}
 			}
 			prefix = k;
 			route = "resume";
@@ -368,16 +413,11 @@ export class ClaudeSdkProvider {
 				if (m === undefined) return { ok: false, error: errorText(new Error("Claude Code exited unexpectedly"), session.stderr) };
 				if (m.type === "pi_error") return { ok: false, error: m.error };
 				if (m.type === "rate_limit_event") {
-					this.log(`rate_limit ${JSON.stringify(m.rate_limit_info)}`);
-					if (!billsExtraUsage(m.rate_limit_info)) {
-						this.billing = undefined;
-						this.extraUsageApproved = false;
-						continue;
-					}
-					this.billing = m.rate_limit_info;
+					this.noteBilling(m.rate_limit_info);
+					if (this.billing === undefined) continue;
 					// A finished reply is already paid for, so it's kept, and the next request asks first.
 					const finished = !inResponse && blocks.length > 0;
-					if (!this.extraUsageApproved && !finished) return { extraUsage: m.rate_limit_info };
+					if (!this.extraUsageApproved && !finished) return { extraUsage: this.billing };
 					continue;
 				}
 				if (m.type === "stream_event" && !m.parent_tool_use_id) {

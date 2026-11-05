@@ -78,19 +78,20 @@ export default async function piSuite(pi: ExtensionAPI): Promise<void> {
     if (on) off.delete(part);
     else off.add(part);
     saveSettings(agentDir, off);
-    if (!on && part === "router") await leaveRouter(ctx);
+    if (!on && part === "router") await leaveModels(ctx, "pi-virtual");
+    if (!on && part === "subscription") await leaveModels(ctx, "claude-agent-sdk");
     return true;
   }
 
   /** The session would otherwise stay on a model that's gone after the reload, and every prompt would fail. */
-  async function leaveRouter(ctx: ExtensionCommandContext): Promise<void> {
-    if (ctx.model?.api !== "pi-virtual") return;
+  async function leaveModels(ctx: ExtensionCommandContext, api: string): Promise<void> {
+    if (ctx.model?.api !== api) return;
     const lastAnswer = ctx.sessionManager
       .getBranch()
       .flatMap((entry) => (entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason !== "error" && entry.message.stopReason !== "aborted" ? [entry.message] : []))
       .at(-1);
     const answered = lastAnswer && ctx.modelRegistry.find(lastAnswer.provider, lastAnswer.model);
-    const next = answered ?? ctx.modelRegistry.getAvailable().find((model) => model.api !== "pi-virtual");
+    const next = (answered?.api === api ? undefined : answered) ?? ctx.modelRegistry.getAvailable().find((model) => model.api !== "pi-virtual" && model.api !== api);
     if (next === undefined) return;
     await pi.setModel(next);
     if (ctx.hasUI) ctx.ui.notify(`Now on ${next.provider}/${next.id}.`, "info");

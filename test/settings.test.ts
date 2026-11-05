@@ -13,8 +13,10 @@ test("modes loads first, so its checks see tool calls before anything else", () 
 });
 
 test("listed parts are off, and everything else is on", () => {
-  assert.deepEqual([...parseSettings('{"off":["web","board"]}').off], ["web", "board"]);
-  assert.deepEqual([...parseSettings("{}").off], []);
+  assert.deepEqual([...parseSettings('{"off":["web","board"],"on":["subscription"]}').off], ["web", "board"]);
+  assert.deepEqual([...parseSettings("{}").off], ["subscription"]);
+  assert.deepEqual([...parseSettings('{"on":["subscription"]}').off], []);
+  assert.deepEqual([...parseSettings('{"on":["subscription"],"off":["subscription"]}').off], ["subscription"]);
 });
 
 for (const [name, text] of [
@@ -27,17 +29,20 @@ for (const [name, text] of [
 ] as const) {
   test(`${name} leaves everything on and says so, so a typo can't turn off plan mode`, () => {
     const loaded = parseSettings(text);
-    assert.equal(loaded.off.size, 0);
+    assert.deepEqual([...loaded.off], ["subscription"]);
     assert.ok(loaded.problem);
   });
 }
 
 test("no file means everything is on, and what's saved loads again", () => {
   const agent = dir();
-  assert.equal(loadSettings(agent).off.size, 0);
-  saveSettings(agent, new Set(["board", "web"]));
+  assert.deepEqual([...loadSettings(agent).off], ["subscription"]);
+  saveSettings(agent, new Set(["board", "web", "subscription"]));
   assert.deepEqual(JSON.parse(readFileSync(join(agent, "suite.json"), "utf8")), { off: ["web", "board"] });
-  assert.deepEqual([...loadSettings(agent).off].sort(), ["board", "web"]);
+  assert.deepEqual([...loadSettings(agent).off].sort(), ["board", "subscription", "web"]);
+  saveSettings(agent, new Set(["board"]));
+  assert.deepEqual(JSON.parse(readFileSync(join(agent, "suite.json"), "utf8")), { off: ["board"], on: ["subscription"] });
+  assert.deepEqual([...loadSettings(agent).off], ["board"]);
   writeFileSync(join(agent, "suite.json"), "{oops");
   assert.ok(loadSettings(agent).problem);
 });
