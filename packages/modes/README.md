@@ -23,7 +23,7 @@ Requires Pi 1.5 or newer.
 1. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-suite@0.2.2
+   pi install npm:@huseynsnmz/pi-suite@0.2.3
    ```
 
 2. Move pi-suite above `@gotgenes/pi-permission-system`, because `pi install` adds packages last. Otherwise, in `plan` and `read-only` you may be asked to approve an action that is then blocked anyway. It stays blocked either way, and the extension warns you at startup. Skip this step if you don't use that package.
@@ -55,7 +55,7 @@ To install from git instead, use `pi install git:github.com/huseynsnmz/pi-suite@
 | `/mode default` | Pick the mode new sessions start in |
 | `/mode default plan` | Set it directly |
 
-The default is saved as `defaultMode` in `~/.pi/agent/extensions/pi-modes/config.json`. A resumed session keeps the mode it was in. `yolo` can't be the default, because it has to be asked for each time.
+The default is saved as `defaultMode` under `modes` in `~/.pi/agent/suite.json`, and you can also set it in `/suite`. A resumed session keeps the mode it was in. `yolo` can't be the default, because it has to be asked for each time.
 
 `Shift+Tab` normally cycles the thinking level, and this extension takes it over. To keep that action on another key, add this to `~/.pi/agent/keybindings.json`:
 

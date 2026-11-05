@@ -10,6 +10,7 @@ import { registerInterview } from "./interview.ts";
 import { registerReviewTools } from "./review/tools.ts";
 import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
 import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "./judge-gate.ts";
+import { readSection, writeSection } from "../../../src/settings.ts";
 import { decideToolCall, displayCommand, fromExpectedPackage, notReadOnly, isMode, scriptedChange, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
@@ -87,20 +88,16 @@ function packagesLoadThisFirst(): boolean {
   }
 }
 
-const configPath = () => join(getAgentDir(), "extensions", "pi-modes", "config.json");
-
 function readConfig(): Record<string, unknown> {
   try {
-    const config: unknown = JSON.parse(readFileSync(configPath(), "utf8"));
-    return typeof config === "object" && config !== null ? (config as Record<string, unknown>) : {};
+    return readSection(getAgentDir(), "modes");
   } catch {
     return {};
   }
 }
 
 function saveDefaultMode(mode: Mode): void {
-  mkdirSync(dirname(configPath()), { recursive: true });
-  writeFileSync(configPath(), `${JSON.stringify({ ...readConfig(), defaultMode: mode }, null, 2)}\n`);
+  writeSection(getAgentDir(), "modes", { ...readConfig(), defaultMode: mode });
 }
 
 function restoredMode(ctx: ExtensionContext): Mode {

@@ -53,15 +53,15 @@ function readerModel(ctx: ExtensionContext, config: WebConfig, routed: string | 
 
 export interface RoutedReader {
   model: string;
-  thinking?: ThinkingLevel;
+  thinking?: ThinkingLevel | "off";
 }
 
 export async function askReader(ctx: ExtensionContext, config: WebConfig, question: string, text: string, signal?: AbortSignal, routed?: RoutedReader): Promise<string> {
   const model = readerModel(ctx, config, routed?.model);
-  if (!model) throw new Error("No model to read the page with, so it wasn't read. Set readerModel in web.json");
+  if (!model) throw new Error("No model to read the page with, so it wasn't read. Set readerModel in /suite");
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok) throw new Error(`No key for the page reader ${model.provider}/${model.id}`);
-  // Only for the model the router chose, as web.json's own reader has no level to go by.
+  // Only for the model the router chose, as suite.json's own reader has no level to go by.
   const level = routed?.model === `${model.provider}/${model.id}` ? routed.thinking : undefined;
   const reasoning = level === "off" ? undefined : level;
   // Through the registry, because the session's model can be a virtual one.

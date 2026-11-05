@@ -1,4 +1,4 @@
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import {
 	ACCOUNT,
@@ -23,7 +23,7 @@ import type {
 	ExtensionContext,
 	ReadonlyFooterDataProvider,
 } from "@earendil-works/pi-coding-agent";
-import { keyText, parseSkillBlock } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, keyText, parseSkillBlock } from "@earendil-works/pi-coding-agent";
 import { Key, type KeyId, type TUI } from "@earendil-works/pi-tui";
 
 import { type GitState, readGit } from "./data/git.ts";
@@ -157,7 +157,7 @@ export const frameFeature = defineFeature({
 
 		for (const entry of FRAME_SETTINGS) entry.listen(scope, repaint);
 		frame.listen(scope, () => live.ctx && installEditor(live.ctx, screen, live, scope));
-		const visitsFile = join(dirname(scope.settings.globalPath), "frame-visits.json");
+		const visitsFile = join(getAgentDir(), "extensions", "pi-harness", "frame-visits.json");
 		let visited = false;
 		let lastVisit: LastVisit | undefined;
 

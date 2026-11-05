@@ -13,12 +13,18 @@ One package for [Pi](https://pi.dev): modes and permissions, a framed screen, a 
 | `commands` | `/clear` and `/security-review` | [README](packages/commands/README.md) |
 | `subscription` | Off until you turn it on. Claude models on your Claude login, asking before anything more is billed as extra usage | [README](packages/subscription/README.md) |
 
+## Settings
+
+Run `/suite` to turn parts on or off and change their settings. They're all kept in `~/.pi/agent/suite.json`, with a section for each part, so you can also edit it by hand. Older files such as `router.json` and `web.json` move in the first time Pi starts, and stay beside it as `.bak`. If one can't be read it stays where it is, and you're told, so a broken file can't silently turn off a setting.
+
+There's no setting per project, so a repository can't choose where your code goes. The only exception is the frame's look, in `.pi/extensions/pi-harness/settings.json`, once you trust the project. Pi's own files, and the settings of other packages, such as `pi-permission-system`, stay where they are.
+
 ## Install
 
 Requires Pi 1.5 or newer.
 
 ```bash
-pi install npm:@huseynsnmz/pi-suite@0.2.2
+pi install npm:@huseynsnmz/pi-suite@0.2.3
 ```
 
 If you installed any of these separately, remove them first:

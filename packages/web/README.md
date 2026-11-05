@@ -9,19 +9,19 @@ A web page can hold instructions aimed at the AI reading it. So a separate model
 ## Install
 
 ```bash
-pi install npm:@huseynsnmz/pi-suite@0.2.2
+pi install npm:@huseynsnmz/pi-suite@0.2.3
 ```
 
 `web_fetch` works straight away. It reads pages with the session's model, unless you set `readerModel` or use [pi-router](https://github.com/huseynsnmz/pi-suite/tree/main/packages/router), which can choose the reader. `web_search` stays off until you choose where searches go.
 
 ## Search
 
-Everything you search for leaves your machine, so nothing is chosen for you. Settings go in `~/.pi/agent/web.json`, and are read when Pi starts, so restart it after editing the file.
+Everything you search for leaves your machine, so nothing is chosen for you. Settings go in `~/.pi/agent/the web settings`, and are read when Pi starts, so restart it after editing the file.
 
 **Your own SearXNG server** needs no account, but it does pass your searches on to the search engines it uses:
 
 ```json
-{ "searxngUrl": "http://localhost:8888" }
+{ "web": { "searxngUrl": "http://localhost:8888" } }
 ```
 
 SearXNG only answers in JSON if you list it under `search.formats` in its `settings.yml`. Public SearXNG servers almost always refuse this.
@@ -29,7 +29,7 @@ SearXNG only answers in JSON if you list it under `search.formats` in its `setti
 **markdown.new** is free and needs no key: 30 searches a minute and 500 a day for your IP, with a shared cap across everyone using it. Your searches go to its operator, then Serper and Google. This is behind a flag:
 
 ```json
-{ "companySearch": true }
+{ "web": { "companySearch": true } }
 ```
 
 ## Settings
@@ -49,7 +49,7 @@ SearXNG only answers in JSON if you list it under `search.formats` in its `setti
 | `strictUrls` | Set to `true` to be asked about every URL the agent wasn't given |
 | `askNewDomains` | Set to `true` to be asked before the first fetch from each site |
 
-`/web` shows what's in use, and `/web reader` lets you pick the page reader from your models. It saves to `web.json` and applies straight away. If `web.json` can't be read or has a wrong value, the web tools stay off and Pi says why.
+`/web` shows what's in use, and `/web reader` lets you pick the page reader from your models. It saves it and applies straight away. If the web settings can't be read or has a wrong value, the web tools stay off and Pi says why.
 
 ## What it checks
 

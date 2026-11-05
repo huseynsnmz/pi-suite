@@ -39,14 +39,14 @@ For `claude-sdk` models, Pi's default prompt is replaced by one written for Clau
 
 Requests use Pi's default prompt instead with `router/auto`, in `plan` and `read-only` modes, and when the memory part has notes to add, because those build on Pi's prompt.
 
-Anthropic's billing has been seen to depend on the prompt: upstream saw Pi's default prompt refused where this one ran on the plan. So expect the refusal above, or the question about extra usage, in those cases. To always use Pi's prompt, set `"promptMode": "pi"` in `claude-sdk.json`, or `PI_CLAUDE_SDK_PROMPT=pi`.
+Anthropic's billing has been seen to depend on the prompt: upstream saw Pi's default prompt refused where this one ran on the plan. So expect the refusal above, or the question about extra usage, in those cases. To always use Pi's prompt, set **System prompt** to `pi` in `/suite`, or `PI_CLAUDE_SDK_PROMPT=pi`.
 
 ## Settings
 
-`~/.pi/agent/claude-sdk.json`, all optional:
+All optional, in `/suite` or under `subscription` in `~/.pi/agent/suite.json`:
 
 ```json
-{ "pathToClaudeCodeExecutable": "/opt/homebrew/bin/claude", "maxSessions": 3, "idleMinutes": 20, "promptMode": "claude" }
+{ "subscription": { "pathToClaudeCodeExecutable": "/opt/homebrew/bin/claude", "maxSessions": 3, "idleMinutes": 20, "promptMode": "claude" } }
 ```
 
 There's no setting per project, so a repository can't choose which program runs. `PI_CLAUDE_SDK_CLAUDE_PATH` overrides the executable, and `PI_CLAUDE_SDK_DEBUG=/path/log` writes how each request was routed.

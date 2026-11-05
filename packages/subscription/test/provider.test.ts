@@ -474,10 +474,10 @@ describe("configuration", () => {
 		const read = (env: Record<string, string> = {}) => resolveConfig({ agentDir, env });
 		assert.deepEqual(read(), { promptMode: "claude" });
 		for (const bad of [[], null, { maxSessions: "lots", idleMinutes: -1 }, { maxSessions: 0.5, idleMinutes: 1e9 }, { pathToClaudeCodeExecutable: 5 }]) {
-			writeFileSync(join(agentDir, "claude-sdk.json"), JSON.stringify(bad));
+			writeFileSync(join(agentDir, "suite.json"), JSON.stringify({ subscription: bad }));
 			assert.deepEqual(read(), { promptMode: "claude" }, JSON.stringify(bad));
 		}
-		writeFileSync(join(agentDir, "claude-sdk.json"), JSON.stringify({ pathToClaudeCodeExecutable: "/opt/claude", maxSessions: 5 }));
+		writeFileSync(join(agentDir, "suite.json"), JSON.stringify({ subscription: { pathToClaudeCodeExecutable: "/opt/claude", maxSessions: 5 } }));
 		assert.equal(read().pathToClaudeCodeExecutable, "/opt/claude");
 		assert.equal(read().maxSessions, 5);
 		assert.equal(read({ PI_CLAUDE_SDK_CLAUDE_PATH: "/usr/bin/claude" }).pathToClaudeCodeExecutable, "/usr/bin/claude");

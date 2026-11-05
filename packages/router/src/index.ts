@@ -8,6 +8,7 @@ import { chooseModel, type RouterState } from "./route.ts";
 /** Other extensions emit these with an object, and whoever knows fills it in, whatever the load order. */
 const READER_PROBE = "pi-router:reader-model";
 const MODE_PROBE = "pi-modes:mode";
+const SETTINGS_PROBE = "pi-suite:router-settings";
 
 const VIRTUAL_API = "pi-virtual";
 const SELECTED_LEVEL = "same as /effort";
@@ -167,7 +168,7 @@ export default function piRouter(pi: ExtensionAPI): void {
   async function chooseRoles(ctx: ExtensionContext): Promise<void> {
     if (problem !== undefined) {
       // Saving over it would throw away whatever the file held.
-      ctx.ui.notify(`${problem}. Fix or delete ~/.pi/agent/router.json, then /reload.`, "error");
+      ctx.ui.notify(`${problem}. Fix the router section of ~/.pi/agent/suite.json, then /reload.`, "error");
       return;
     }
     const models = ctx.modelRegistry.getAvailable().filter((model) => model.api !== VIRTUAL_API).map((model) => `${model.provider}/${model.id}`);
@@ -203,6 +204,11 @@ export default function piRouter(pi: ExtensionAPI): void {
     if (!isComplete(saved)) ctx.ui.notify("router/auto needs both plan and build before it can answer.", "warning");
     else if (refOf(ctx.model) !== `${VIRTUAL_PROVIDER}/${VIRTUAL_ID}`) ctx.ui.notify(`Choose ${VIRTUAL_PROVIDER}/${VIRTUAL_ID} in /model to use these.`, "info");
   }
+
+  // /suite opens this screen too, without knowing how it works.
+  pi.events.on(SETTINGS_PROBE, (data) => {
+    (data as { open?: (ctx: ExtensionContext) => Promise<void> }).open = chooseRoles;
+  });
 
   pi.registerCommand("router", {
     description: "Choose which model does what for router/auto",

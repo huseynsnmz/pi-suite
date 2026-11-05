@@ -1,5 +1,5 @@
 // Every app shares the settings files, so a write keeps every key it does not know.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -14,7 +14,7 @@ export interface SettingsFile {
 }
 
 export function globalSettingsPath(): string {
-	return join(getAgentDir(), "extensions", "pi-harness", "settings.json");
+	return join(getAgentDir(), "suite.json");
 }
 
 export function projectSettingsPath(cwd: string): string {
@@ -40,12 +40,12 @@ export function writeSettingsFile(
 	options: { mode?: number } = {},
 ): void {
 	mkdirSync(dirname(path), { recursive: true });
-	const temporary = `${path}.${process.pid}.tmp`;
-	writeFileSync(temporary, `${JSON.stringify(data, null, "\t")}\n`, {
-		encoding: "utf8",
-		mode: options.mode,
-	});
-	renameSync(temporary, path);
+	// A linked file stays linked, and a private one stays private. Other parts' settings share it.
+	const target = existsSync(path) ? realpathSync(path) : path;
+	const mode = options.mode ?? (existsSync(target) ? statSync(target).mode & 0o777 : undefined);
+	const temporary = `${target}.${process.pid}.tmp`;
+	writeFileSync(temporary, `${JSON.stringify(data, null, "\t")}\n`, { encoding: "utf8", mode });
+	renameSync(temporary, target);
 }
 
 export function lookup(data: SettingsData, id: string): unknown {

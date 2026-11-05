@@ -135,7 +135,9 @@ export class SettingsStore {
 	}
 
 	#edit(path: string, change: (data: SettingsData) => void): string | undefined {
-		const { data } = readSettingsFile(path);
+		const { data, warnings } = readSettingsFile(path);
+		// Reading a broken file gives nothing, and writing that would wipe what else it holds.
+		if (warnings.length > 0) return warnings[0];
 		change(data);
 		try {
 			writeSettingsFile(path, data);

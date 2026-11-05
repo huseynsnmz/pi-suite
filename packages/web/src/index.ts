@@ -79,7 +79,7 @@ export default function piWeb(pi: ExtensionAPI): void {
     const known = [...givenSites(entries), ...config.trustedDomains, ...config.allowDomains, ...approvedSites].some((site) => onSite(host, site));
     const written = writtenOnSite.get(host) ?? 0;
     if (!known || written >= MAX_WRITTEN_PER_SITE) {
-      if (!ctx.hasUI) throw new Error(`The agent wrote this address itself, on a site nobody has named or approved, and there's nobody here to approve it. Add ${host} to trustedDomains in web.json, or use a link you were given`);
+      if (!ctx.hasUI) throw new Error(`The agent wrote this address itself, on a site nobody has named or approved, and there's nobody here to approve it. Add ${host} to trustedDomains in /suite, or use a link you were given`);
       const why = known ? `The agent has written ${written} addresses of its own on this site.` : "The agent found this site itself. Allowing it lets the agent fetch from it for the rest of this session.";
       if (!(await ctx.ui.confirm("Fetch from this site?", `${host}\n\n${url.href}\n\n${why}`))) throw new Error(`The user declined fetching from ${host}`);
       approvedSites.add(host);

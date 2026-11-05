@@ -73,17 +73,19 @@ test("search results keep only real web links", () => {
 test("choosing a reader changes only that setting, and a broken file is left alone", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "piweb-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const path = join(dir, "web.json");
+  const path = join(dir, "suite.json");
+  const saved = () => JSON.parse(readFileSync(path, "utf8")).web;
   assert.deepEqual(saveReaderModel(dir, "a/small").readerModel, { provider: "a", id: "small" });
-  writeFileSync(path, JSON.stringify({ companySearch: true, denyDomains: ["bad.com"], futureSetting: 1, readerModel: "a/small" }));
+  writeFileSync(path, JSON.stringify({ off: ["board"], web: { companySearch: true, denyDomains: ["bad.com"], futureSetting: 1, readerModel: "a/small" } }));
   assert.equal(saveReaderModel(dir, "b/tiny/v2").readerModel?.id, "tiny/v2");
-  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { companySearch: true, denyDomains: ["bad.com"], futureSetting: 1, readerModel: "b/tiny/v2" });
+  assert.deepEqual(saved(), { companySearch: true, denyDomains: ["bad.com"], futureSetting: 1, readerModel: "b/tiny/v2" });
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).off, ["board"]);
   assert.equal(saveReaderModel(dir, null).readerModel, null);
-  assert.equal("readerModel" in JSON.parse(readFileSync(path, "utf8")), false);
+  assert.equal("readerModel" in saved(), false);
   writeFileSync(path, "{ broken");
   assert.throws(() => saveReaderModel(dir, "a/small"));
   assert.equal(readFileSync(path, "utf8"), "{ broken");
-  writeFileSync(path, JSON.stringify({ allowDomains: "wrong" }));
+  writeFileSync(path, JSON.stringify({ web: { allowDomains: "wrong" } }));
   assert.throws(() => saveReaderModel(dir, "a/small"), /allowDomains/);
-  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { allowDomains: "wrong" });
+  assert.deepEqual(saved(), { allowDomains: "wrong" });
 });
