@@ -19,7 +19,7 @@ Requires Pi 1.5 or newer.
 2. Install it:
 
    ```bash
-   pi install npm:@huseynsnmz/pi-suite@0.2.3
+   pi install npm:@huseynsnmz/pi-suite@0.2.4
    ```
 
 3. Restart Pi. The start card says `π-frame`.

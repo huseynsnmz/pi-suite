@@ -9,7 +9,7 @@ Long-term memory for [Pi](https://pi.dev). It reviews your past conversations, k
 Requires Pi 1.5 or newer, on Node 22.18 or newer.
 
 ```bash
-pi install npm:@huseynsnmz/pi-suite@0.2.3
+pi install npm:@huseynsnmz/pi-suite@0.2.4
 ```
 
 ## Use

@@ -25,7 +25,7 @@ There's no setting per project, so a repository can't choose where your code goe
 Requires Pi 1.5 or newer.
 
 ```bash
-pi install npm:@huseynsnmz/pi-suite@0.2.3
+pi install npm:@huseynsnmz/pi-suite@0.2.4
 ```
 
 If you installed any of these separately, remove them first:

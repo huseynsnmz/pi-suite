@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.4]
+
+### Features
+
+- `/mastermind`: a strong model, chosen as the new `mastermind` role in `/router`, reads past conversations and writes a short playbook that other models get on every run. You approve every rule in an editor. `/mastermind compact` shortens it, and `/mastermind show` shows it.
+- New part, `subagent`: the `agent` tool hands a task to a fresh agent and gives back its answer. `explore` can only read, and also works in `plan` and `read-only`. `general` can do everything, and its permission asks come to your session.
+- A `cd` at the start of a bash command carries over to later commands while it stays in the project.
+- `/review-permissions` reports what the permission judge decided, and why it deferred.
+
+### Changes
+
+- `auto` no longer sends `edit` and `write` on ordinary project files to the judge. `.git`, `.pi`, `.claude`, `.husky`, `.github`, `.vscode`, `.envrc` and paths outside the project still go to it.
+- The first time you start Pi in a project, pi-modes allows `cd` inside that project in your bash rules, with a backup, so you aren't asked about each one. A `cd` elsewhere still asks.
+
+### Development
+
+- `npm test` takes seconds. Board's tests that start real processes moved to `npm run test:all`, and `npm run test:e2e` runs every suite at once.
+
 ## [0.2.3]
 
 ### Features
