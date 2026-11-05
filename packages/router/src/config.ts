@@ -2,7 +2,7 @@
 import { readSection, writeSection } from "../../../src/settings.ts";
 
 /** The judge's model lives only in the judge's own config, so there's one answer to which model judges. */
-export const ROLES = ["plan", "build", "reader", "subagent", "fallback"] as const;
+export const ROLES = ["plan", "build", "reader", "subagent", "fallback", "mastermind"] as const;
 export type Role = (typeof ROLES)[number];
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -16,6 +16,7 @@ export interface RouterConfig {
   reader?: string;
   subagent?: string;
   fallback?: string;
+  mastermind?: string;
   thinking?: RoleThinking;
 }
 

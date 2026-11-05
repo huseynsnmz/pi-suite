@@ -45,9 +45,10 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
+    "test:integration": "node scripts/run-tests.mjs --integration",
     "test:perf": "node scripts/run-perf-gate.mjs",
     "pack:dry": "npm pack --dry-run",
-    "verify": "npm run typecheck && npm run test:perf && npm test && npm run pack:dry"
+    "verify": "npm run typecheck && npm run test:perf && npm test && npm run test:integration && npm run pack:dry"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

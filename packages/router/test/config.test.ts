@@ -71,3 +71,10 @@ test("reasoning per role must name a role and a level", () => {
   assert.throws(() => parseConfig({ thinking: { plan: "huge" } }), /must be one of/);
   assert.throws(() => parseConfig({ thinking: "high" }), /must be an object/);
 });
+
+test("mastermind is a role with its own level, and routing works without it", () => {
+  const saved = parseConfig({ plan: "a/b", build: "a/c", mastermind: "a/strong", thinking: { mastermind: "max" } });
+  assert.equal(saved.mastermind, "a/strong");
+  assert.equal(parseConfig({ mastermind: "a/strong" }).plan, undefined);
+  assert.throws(() => parseConfig({ mastermind: "router/auto" }), /virtual/);
+});

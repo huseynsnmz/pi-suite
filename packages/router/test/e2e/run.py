@@ -61,6 +61,15 @@ class Terminal:
                 except OSError:
                     return
 
+    def settle(self, seconds):
+        """Up to `seconds`, done early once the screen has been still for a moment. Pi animates while it works."""
+        end = time.time() + seconds
+        while time.time() < end:
+            seen = len(self.text)
+            self.pump(0.7)
+            if len(self.text) == seen:
+                return
+
     def wait(self, words, since=0, timeout=25):
         end = time.time() + timeout
         while time.time() < end:
@@ -85,12 +94,19 @@ class Terminal:
         self.send(ESC)
         self.pump(0.3)
         self.send("\r")
-        self.pump(1)
+        self.settle(1)
+
+    def redraw(self):
+        """Waits for the next repaint, for a moment at most."""
+        seen, end = len(self.text), time.time() + 0.3
+        while len(self.text) == seen and time.time() < end:
+            self.pump(0.02)
+        self.pump(0.03)
 
     def pick(self, name):
         """Moves down a list until `name` is the marked row, then chooses it."""
         for _ in range(12):
-            self.pump(0.3)
+            self.redraw()
             if re.search(r"(→|>) " + re.escape(name) + r"(\s|$)", self.text[-3000:]):
                 self.send("\r")
                 self.pump(0.8)
@@ -139,28 +155,21 @@ def run_prompt(text):
     """Sends a prompt, waits for Pi to go quiet, and gives the requests it made."""
     before = len(requests())
     term.prompt(text)
-    term.pump(1)
-    settled = time.time()
-    seen = len(requests())
-    while time.time() - settled < 2 and time.time() < settled + 25:
-        term.pump(0.3)
-        if len(requests()) != seen:
-            seen = len(requests())
-            settled = time.time()
+    term.settle(25)
     return requests()[before:]
 
 
 term = Terminal()
 try:
     check("starts", term.wait("Strong", timeout=40))
-    term.pump(2)
+    term.settle(2)
     term.command("/model router/auto")
     check("router/auto can be selected with nothing set", term.wait("has no models yet", timeout=10))
     before = len(requests())
     mark = term.prompt("hello")
     check("with nothing set, it says to run /router, and calls nothing", term.wait("Run /router", mark, timeout=10) and len(requests()) == before)
     term.command("/model mock/strong")
-    term.pump(1)
+    term.settle(1)
     term.command("/router")
     check("/router opens, with nothing set", term.wait("Router: which role", timeout=8) and "plan: not set" in term.text)
     for role, chosen in (("plan", "strong"), ("build", "cheap"), ("reader", "cheap"), ("judge", "judge"), ("subagent", "sub"), ("fallback", "back")):
@@ -168,7 +177,7 @@ try:
         check(f"/router sets {role}", ok)
         term.pump(0.5)
     term.send(ESC)
-    term.pump(1)
+    term.settle(1)
     saved = router_settings()
     check("the choices are saved", saved.get("plan") == "mock/strong" and saved.get("build") == "mock/cheap" and saved.get("fallback") == "mock/back" and "judge" not in saved, str(saved))
     judge = json.loads(judge_file.read_text())
@@ -191,7 +200,7 @@ try:
     sent = run_prompt("WRITE")
     check("the first edit moves to the build model", [r["model"] for r in sent] == ["strong", "cheap"], str([r["model"] for r in sent]))
     check("the file was written", (project / "made.txt").exists())
-    term.pump(1)
+    term.settle(1)
     check("the frame shows the change", "Auto → Cheap" in term.text)
     sent = run_prompt("hello again")
     check("building lasts into the next message", [r["model"] for r in sent] == ["cheap"], str(sent))
@@ -215,7 +224,7 @@ try:
     term.pump(0.5)
     before = len(requests())
     term.send("\r")
-    term.pump(3)
+    term.settle(3)
     after = [r["model"] for r in requests()[before:]]
     check("an approved plan moves to the build model at once", after == ["cheap"], str(after))
 
@@ -227,7 +236,7 @@ try:
 
     before = len(requests())
     term.command("/compact")
-    term.pump(4)
+    term.settle(4)
     after = requests()[before:]
     check("compaction uses the build model", bool(after) and all(r["model"] == "cheap" for r in after), str(after))
     term.close()
@@ -239,14 +248,14 @@ try:
 
     term = Terminal()
     term.wait("Auto", timeout=40)
-    term.pump(2)
+    term.settle(2)
     run_prompt("before turning it off")
     mark = len(term.text)
     term.command("/suite off router")
     term.wait("Reload Pi now", mark, 8)
     term.pump(0.3)
     term.send("\r")
-    term.pump(6)
+    term.settle(6)
     before = len(requests())
     mark = len(term.text)
     run_prompt("after turning it off")
@@ -255,9 +264,9 @@ try:
     set_off([])
     term = Terminal()
     term.wait("Auto", timeout=40)
-    term.pump(2)
+    term.settle(2)
     term.command("/new")
-    term.pump(3)
+    term.settle(3)
     sent = run_prompt("hello in a new session")
     check("router/auto still works after /new", [r["model"] for r in sent] == ["strong"], str(sent))
     term.close()
@@ -268,10 +277,10 @@ try:
     (agent / "settings.json").write_text(json.dumps(current))
     term = Terminal("--model", "mock/think", "--thinking", "high")
     term.wait("Think", timeout=40)
-    term.pump(2)
+    term.settle(2)
     run_prompt("hello before clear")
     term.command("/clear")
-    term.pump(3)
+    term.settle(3)
     sent = run_prompt("hello after clear")
     check("/clear keeps the model and the reasoning", [(r["model"], r.get("effort")) for r in sent] == [("think", "high")], str(sent))
     current = json.loads((agent / "settings.json").read_text())
@@ -280,12 +289,12 @@ try:
     mark = term.prompt("THINK")
     check("reasoning shows while it's written", term.wait("SECRETPLAN", mark, timeout=10))
     check("it collapses once done", term.wait("Thought · ctrl+t to expand", mark, timeout=10))
-    term.pump(1)
+    term.settle(1)
     mark = len(term.text)
     term.send("\x14")
     check("ctrl+t opens it again", term.wait("SECRETPLAN", mark, timeout=8))
     term.send("\x14")
-    term.pump(1)
+    term.settle(1)
 
     mark = len(term.text)
     term.send("hello a")
@@ -306,8 +315,8 @@ try:
     term.pump(0.5)
     term.close()
     term = Terminal()
-    term.wait("Strong", timeout=40)
-    term.pump(2)
+    term.wait("Auto", timeout=40)
+    term.settle(2)
     mark = len(term.text)
     term.send("\x1b[A")
     check("Up in a new Pi reaches what was typed before", term.wait("THINK", mark, timeout=5) or term.wait("hello after clear", mark, timeout=1))
@@ -320,21 +329,100 @@ try:
     ok = term.pick("plan:") and term.pick("mock/think")
     check("choosing a model asks for its reasoning", ok and term.wait("Reasoning for plan on mock/think", timeout=8))
     check("it offers what the model can do", term.pick("high"))
-    term.pump(1)
+    term.settle(1)
     check("the row shows it", "· high" in term.text[-3000:])
     term.send(ESC)
-    term.pump(1)
+    term.settle(1)
     check("the level is saved", router_settings().get("thinking") == {"plan": "high"})
     term.command("/model router/auto")
-    term.pump(1)
+    term.settle(1)
     term.command("/new")
-    term.pump(3)
+    term.settle(3)
     term.command("/model router/auto")
-    term.pump(1)
+    term.settle(1)
     sent = run_prompt("hello with reasoning")
     check("the plan role uses its own level", [(r["model"], r.get("effort")) for r in sent] == [("think", "high")], str(sent))
     term.close()
     set_router(plain)
+
+    term = Terminal()
+    term.wait("Auto", timeout=40)
+    term.settle(2)
+    mark = len(term.text)
+    term.command("/mastermind")
+    check("/mastermind asks for a model first", term.wait("set mastermind in /router", mark, 8))
+    term.close()
+    set_router({**plain, "mastermind": "mock/strong"})
+    term = Terminal()
+    term.wait("Auto", timeout=40)
+    term.settle(2)
+    before = len(requests())
+    mark = len(term.text)
+    term.command("/mastermind")
+    check("it offers what the strong model wrote", term.wait("It has rules for global", mark, 20), term.text[mark:][-300:])
+    asked = requests()[before:]
+    check("the strong model gets it, without the session's tools", [r["model"] for r in asked] == ["strong"] and asked[0]["tools"] == 0, str(asked))
+    check("the review reads past conversations", asked[0]["carried"], str(asked))
+    term.send("\r")
+    check("the rules open in an editor", term.wait("Delete what you don't want", mark, 8))
+    check("nothing is saved until you do", not list((agent / "memory/playbook").glob("*")) if (agent / "memory/playbook").exists() else True)
+    term.pump(0.3)
+    term.send("\r")
+    term.wait("Keep going", mark, 8)
+    term.settle(1)
+    if "Keep going" in term.text[mark:]:
+        term.send(ESC)
+        term.settle(1)
+    saved_rules = [path.read_text() for path in (agent / "memory/playbook").glob("*.md")]
+    check("your approval saves them", saved_rules == ["- Always run the tests.\n"], str(saved_rules))
+    sent = run_prompt("hello with rules")
+    check("the next message has the rules", bool(sent) and all(r["rules"] for r in sent), str(sent))
+    check("and none of what the review read", not any(r["carried"] for r in sent), str(sent))
+    term.command("/model mock/strong")
+    term.settle(1)
+    sent = run_prompt("hello as the mastermind")
+    check("the mastermind itself goes without them", bool(sent) and not any(r["rules"] for r in sent), str(sent))
+    mark = len(term.text)
+    term.command("/mastermind compact")
+    check("compact offers a shorter version", term.wait("Delete what you don't want", mark, 20))
+    term.send(ESC)
+    term.settle(1)
+    saved_rules = [path.read_text() for path in (agent / "memory/playbook").glob("*.md")]
+    check("escape leaves it as it was", saved_rules == ["- Always run the tests.\n"], str(saved_rules))
+    term.close()
+    set_router(plain)
+
+    term = Terminal()
+    term.wait("Auto", timeout=40)
+    term.settle(2)
+    before = len(requests())
+    answered = lambda: any("CHILD-ANSWER" in r["tail"] for r in requests()[before:])
+    def until_answered():
+        end = time.time() + 40
+        while not answered() and time.time() < end:
+            term.pump(0.3)
+        term.settle(2)
+    term.prompt("AGENTREAD")
+    until_answered()
+    sent = requests()[before:]
+    child = next((r for r in sent if "CHILDREAD" in r["text"]), None)
+    check("an agent runs on the subagent role, with only read tools", bool(child) and child["model"] == "sub" and child["tools"] == 4, str(sent))
+    check("its answer comes back to the parent", any("CHILD-ANSWER" in r["tail"] for r in sent), str(sent))
+    before = len(requests())
+    mark = term.prompt("AGENTWRITE")
+    term.wait("FINISHED", mark, 40)
+    term.settle(2)
+    check("a general agent can write", (project / "from-child.txt").exists(), term.text[mark:][-300:])
+    term.send(SHIFT_TAB)
+    term.send(SHIFT_TAB)
+    term.wait("mode: plan", len(term.text) - 2000, 5)
+    mark = term.prompt("AGENTWRITE")
+    check("plan mode blocks a general agent", term.wait("blocks agent", mark, 10), term.text[mark:][-300:])
+    before = len(requests())
+    term.prompt("AGENTREAD")
+    until_answered()
+    check("and allows an explore agent", answered(), str(requests()[before:]))
+    term.close()
 
     judge_file.write_text("{}")
     term = Terminal()

@@ -14,10 +14,11 @@ const CODEMODE_TOOL = "codemode";
 
 // pi-web's tools only read, and a separate model reads the page for them.
 // Each tool a codemode script calls comes through this check itself, so the script needs none of its own.
+export const AGENT_TOOL = "agent";
 const READ_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search", "todo", ASK_TOOL, CODEMODE_TOOL]);
 
 /** Allowed for what pi-suite's own do. Another package's tool with the name could do anything. */
-const SUITE_TOOLS: ReadonlySet<string> = new Set(["todo", "web_fetch", "web_search", ASK_TOOL]);
+const SUITE_TOOLS: ReadonlySet<string> = new Set(["todo", "web_fetch", "web_search", ASK_TOOL, AGENT_TOOL]);
 const SUITE_ENTRY = fileURLToPath(new URL("../../../src/index.ts", import.meta.url));
 
 function realPath(path: string): string | undefined {
@@ -75,6 +76,8 @@ export function decideToolCall(mode: Mode, toolName: string, input: unknown): To
   if (mode === "normal" || mode === "auto" || mode === "yolo") return ALLOW;
   const leave = "Press Shift+Tab to change mode.";
   if (READ_TOOLS.has(toolName)) return ALLOW;
+  // Its explore type can only read, as the child gets no other tools.
+  if (toolName === AGENT_TOOL && (input as { type?: unknown } | null)?.type !== "general") return ALLOW;
   if (toolName === SUBMIT_PLAN_TOOL && mode === "plan") return ALLOW;
 
   if (toolName === "bash") {

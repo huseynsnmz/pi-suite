@@ -9,7 +9,7 @@ const OUTWARD = /^(?:git\s+(?:push|reset|clean|rebase|filter-branch)|gh\s+(?:pr\
  * Commands with no subcommands that only read, so a trailing `*` adds just their options. Not `rg`,
  * whose --pre runs a program, `file`, whose -C writes, or `date`, whose -s sets the clock.
  */
-const READERS = new Set(["ls", "pwd", "wc", "head", "tail", "which", "grep", "tree", "du", "df", "stat", "diff"]);
+const READERS = new Set(["cd", "ls", "pwd", "wc", "head", "tail", "which", "grep", "tree", "du", "df", "stat", "diff"]);
 const BUILT_IN_TOOLS = new Set(["read", "grep", "find", "ls", "submit_plan"]);
 const REFUSED_SURFACES = new Set(["bash", "path", "external_directory", "mcp", "skill", "*"]);
 

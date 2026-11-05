@@ -1,6 +1,6 @@
 {
   "name": "@huseynsnmz/pi-suite",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "One Pi package for all of it: modes and permissions, a framed screen, an agent board, memory, web tools with a separate page reader, and a model router. Turn off what you don't want with /suite.",
   "type": "module",
   "license": "MIT",
@@ -36,6 +36,10 @@
     "packages/commands/package.json",
     "packages/commands/README.md",
     "packages/commands/LICENSE",
+    "packages/subagent/src",
+    "packages/subagent/package.json",
+    "packages/subagent/README.md",
+    "packages/subagent/LICENSE",
     "packages/board/src",
     "packages/board/runner",
     "packages/board/docs",
@@ -92,7 +96,8 @@
   "scripts": {
     "check": "tsc --noEmit && npm run --workspaces --if-present check && npm run -w packages/board typecheck",
     "test": "node --test test/*.test.ts && npm run --workspaces --if-present test",
-    "test:e2e": "python3 test/e2e/run.py"
+    "test:all": "npm test && npm run -w packages/board test:integration",
+    "test:e2e": "python3 test/e2e/all.py"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.308",

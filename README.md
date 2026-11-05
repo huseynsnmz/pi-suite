@@ -11,6 +11,7 @@ One package for [Pi](https://pi.dev): modes and permissions, a framed screen, a 
 | `frame` | The start card, framed editor, tool boxes, footer and the agent's todo list | [README](packages/frame/README.md) |
 | `board` | A board for starting, watching and attaching to background sessions | [README](packages/board/README.md) |
 | `commands` | `/clear` and `/security-review` | [README](packages/commands/README.md) |
+| `subagent` | The `agent` tool: hand a task to a fresh agent, and get its answer back | [README](packages/subagent/README.md) |
 | `subscription` | Off until you turn it on. Claude models on your Claude login, asking before anything more is billed as extra usage | [README](packages/subscription/README.md) |
 
 ## Settings
@@ -24,7 +25,7 @@ There's no setting per project, so a repository can't choose where your code goe
 Requires Pi 1.5 or newer.
 
 ```bash
-pi install npm:@huseynsnmz/pi-suite@0.2.3
+pi install npm:@huseynsnmz/pi-suite@0.2.4
 ```
 
 If you installed any of these separately, remove them first:
@@ -89,8 +90,9 @@ Each part has its own limits, listed in its README or `SECURITY.md`. None of thi
 ```bash
 npm install --ignore-scripts
 npm run check
-npm test
-npm run test:e2e
+npm test           # seconds: logic only
+npm run test:all   # adds board's tests that start real processes
+npm run test:e2e   # real Pi in a real terminal with a fake model, every suite at once
 ```
 
-Each part keeps its own tests under `packages/<part>/test`. `frame` needs [bun](https://bun.sh) for its unit tests. `npm run test:e2e` drives real Pi in a real terminal with a fake model.
+Each part keeps its own tests under `packages/<part>/test`. `frame` needs [bun](https://bun.sh) for its unit tests. To run some end-to-end suites, name them: `python3 test/e2e/all.py router web`. Run `test:all` and `test:e2e` before a release.

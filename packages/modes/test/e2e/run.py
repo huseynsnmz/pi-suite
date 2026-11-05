@@ -38,6 +38,8 @@ home, agent, project = root / "home", root / "home/.pi/agent", root / "project"
 (agent / "extensions/pi-permission-system").mkdir(parents=True)
 (agent / "extensions/pi-permission-classifier").mkdir(parents=True)
 project.mkdir()
+outside = root / "outside"
+outside.mkdir()
 log = root / "model.log"
 log.touch()
 
@@ -52,7 +54,7 @@ env = {
 }}}))
 (agent / "extensions/pi-permission-system/config.json").write_text(json.dumps({
     "doublePressToConfirm": False, "authorizerChain": [] if SOLO else ["pi-modes", "permission-judge"],
-    "permission": {"*": "ask", "bash": {"*": "ask", "touch denied*": "deny"}, "path": {"*": "allow", "*.secret": "deny"}, "read": "allow", "submit_plan": "allow", "external_directory": "allow"},
+    "permission": {"*": "ask", "bash": {"*": "ask", "touch incd*": "allow", "touch denied*": "deny"}, "path": {"*": "allow", "*.secret": "deny"}, "read": "allow", "submit_plan": "allow", "external_directory": {"*": "allow", str(outside): "ask", f"{outside}/*": "ask"}},
 }))
 (agent / "extensions/pi-permission-classifier/config.json").write_text("{}")
 (agent / "settings.json").write_text(json.dumps({
@@ -97,6 +99,15 @@ class Terminal:
                     return
                 self.text += ANSI.sub("", data.decode("utf8", "replace"))
 
+    def settle(self, seconds):
+        """Up to `seconds`, done early once the screen has been still for a moment. Pi animates while it works."""
+        end = time.time() + seconds
+        while time.time() < end:
+            seen = len(self.text)
+            self.pump(0.7)
+            if len(self.text) == seen:
+                return
+
     def wait(self, pattern, timeout=25):
         end = time.time() + timeout
         while time.time() < end:
@@ -133,6 +144,11 @@ class Terminal:
             pass
 
 
+def log_results():
+    path = Path(f"{log}.results")
+    return path.read_text() if path.exists() else ""
+
+
 def judge_calls():
     return log.read_text().splitlines().count("judge")
 
@@ -161,7 +177,7 @@ def ask_yolo():
 
 def confirm_yolo():
     term.send("\r")
-    term.pump(1)
+    term.settle(1)
     # pi-look keeps its footer drawing for 100 ms, so a key makes it show the new mode.
     term.send(" ")
     term.pump(0.2)
@@ -171,7 +187,7 @@ def confirm_yolo():
 
 def approve_dialog_if_first():
     if DIALOG_FIRST:
-        term.pump(2)
+        term.settle(2)
         term.send("y")
 
 
@@ -182,7 +198,7 @@ class SandboxRunDone(Exception):
 term = Terminal()
 try:
     term.wait(r"mode: normal", 40)
-    term.pump(1.5)
+    term.settle(1.5)
     check("footer shows the mode", True)
     if SOLO:
         UP, DOWN = "\x1b[A", "\x1b[B"
@@ -205,7 +221,7 @@ try:
         term.pump(0.5)
         term.send("ship friday\r")
         term.wait("FINISHED")
-        term.pump(1)
+        term.settle(1)
         shown = re.sub(r"\s+", " ", term.text[term.text.rindex("FINISHED"):])
         check("interview: the model gets each answer", all(part in shown for part in ("A: Postgres", "A: No", 'A: ["web","android"]', "A: ship friday")), shown[:300])
         mark = len(term.text)
@@ -213,13 +229,13 @@ try:
         term.until(lambda: "Which database" in term.text[mark:], "the question")
         term.pump(0.5)
         term.send(DOWN + DOWN + "\r")
-        term.pump(1)
+        term.settle(1)
         term.send("MariaDB\r")
         term.until(lambda: "Add tests" in term.text[mark:], "the second question")
         term.pump(0.5)
         term.send("\x1b")
         term.until(lambda: "FINISHED" in term.text[mark:], "the model's answer")
-        term.pump(1)
+        term.settle(1)
         shown = re.sub(r"\s+", " ", term.text[mark:])
         check("interview: an answer of your own reaches the model", "A: MariaDB" in shown, shown[-300:])
         check("interview: esc stops the rest and says not to guess", "closed the questions at: Add tests" in shown and "(3/4)" not in shown)
@@ -227,14 +243,14 @@ try:
         term.prompt("ASKBAD")
         term.until(lambda: "2 to 10" in term.text[mark:], "the refusal")
         check("interview: a bad call goes back to the model, not to the user", True)
-        term.pump(2)
+        term.settle(2)
         check("interview: a dialog says who is asking", "Agent question 1/4" in term.text)
         term.send("\x1b[Z")
         term.until(lambda: "mode: auto" in term.text, "auto")
-        term.pump(1)
+        term.settle(1)
         term.send("\x1b[Z")
         term.until(lambda: "mode: plan" in term.text, "plan")
-        term.pump(1)
+        term.settle(1)
         mark = len(term.text)
         term.prompt("ASK")
         term.until(lambda: "Which database" in term.text[mark:], "the question in plan mode")
@@ -242,14 +258,14 @@ try:
         term.pump(0.5)
         term.send("\x1b")
         term.until(lambda: "FINISHED" in term.text[mark:], "plan mode's answer")
-        term.pump(1)
+        term.settle(1)
         for _ in range(2):
             term.send("\x1b[Z")
-            term.pump(1)
+            term.settle(1)
     if not SOLO and ORDER != "sandbox":
         mark = len(term.text)
         term.prompt("ASK")
-        term.pump(4)
+        term.settle(4)
         asked_first = "Which database" not in term.text[mark:].split("Agent question")[-1] or "Agent question" not in term.text[mark:]
         if "Agent question" not in term.text[mark:]:
             term.send("y")
@@ -258,14 +274,23 @@ try:
         term.pump(0.5)
         term.send("\x1b")
         term.until(lambda: "FINISHED" in term.text[mark:], "the closed interview")
-        term.pump(1)
+        term.settle(1)
     if ORDER == "sandbox":
         outside = home / "outside.txt"
         term.prompt("RUN:touch inside.txt")
-        term.pump(3)
+        term.settle(3)
         term.send("y")
         term.wait("FINISHED", 15)
         check("sandbox: a command in the project runs", (project / "inside.txt").exists())
+        (project / "box").mkdir()
+        term.prompt("RUN:cd box && touch incd-boxed.txt")
+        term.settle(5)
+        term.prompt("RUN:touch incd-boxed2.txt")
+        term.settle(5)
+        where = sorted(str(path.relative_to(project)) for path in project.rglob("incd-boxed*.txt"))
+        check("sandbox: the folder carries over inside it", where == ["box/incd-boxed.txt", "box/incd-boxed2.txt"], str(where))
+        term.prompt(f"RUN:cd {project}")
+        term.settle(5)
         ask_yolo()
         term.wait("YOLO")
         term.pump(0.5)
@@ -287,7 +312,7 @@ try:
         check("sandbox: yolo keeps deny rules", not (project / "denied.txt").exists())
         term.send("\x1bs")
         term.wait("Sandbox disabled", 10)
-        term.pump(1)
+        term.settle(1)
         if WITH_FRAME:
             check("sandbox: pi-frame shows it off", "sandbox: off" in term.text[mark:])
         term.prompt("RUN:touch after-off.txt")
@@ -300,17 +325,17 @@ try:
         check("sandbox: yolo is refused while it's off", True)
         term.send("\x1bs")
         term.wait("Sandbox enabled", 10)
-        term.pump(1)
+        term.settle(1)
         # Enter would pick the first choice, which allows it. Esc keeps it blocked.
         elsewhere = REPO / "README.md"
         # The permission system asks about the last two first, and the sandbox only sees what it lets by.
         for prompt, asks in ((f"READ:{elsewhere}", False), (f"WRITE:{outside}", True), ("RUN:curl -s https://blocked.example.test/x", True)):
             mark = len(term.text)
             term.prompt(prompt)
-            term.pump(3)
+            term.settle(3)
             if asks:
                 term.send("y")
-                term.pump(3)
+                term.settle(3)
             term.send("\x1b")
             term.until(lambda: "FINISHED" in term.text[mark:], "result", 25)
         check("sandbox: a refused write stays out", not outside.exists())
@@ -336,7 +361,7 @@ try:
         for name in ("plan", "read-only", "normal"):
             term.send(SHIFT_TAB)
             term.wait(f"mode: {name}")
-        term.pump(1)
+        term.settle(1)
     check("warns only when loaded after the permission system", ("loads after pi-permission-system" in term.text) == DIALOG_FIRST)
 
     term.prompt("RUN:touch normal.txt")
@@ -351,19 +376,59 @@ try:
         term.send("y")
         term.until((project / "normal.txt").exists, "normal.txt")
         check("normal: approving the prompt runs it", True)
-    term.pump(1)
+        term.settle(1)
+        mark = len(term.text)
+        term.prompt("AGENT:from-agent.txt")
+        check("an agent's ask comes to your session", term.wait(r"for 'from-agent\.txt'", 30) and not (project / "from-agent.txt").exists(), term.text[mark:][-300:])
+        term.pump(0.5)
+        term.send("\r")
+        term.until((project / "from-agent.txt").exists, "from-agent.txt", 30)
+        check("and approving it lets the agent write", True)
+    term.settle(1)
 
     term.send(SHIFT_TAB)
     term.wait(r"mode: auto")
     check("shift+tab switches to auto", True)
     if SOLO:
-        term.pump(1)
+        term.settle(1)
         check("auto warns when no judge is installed", "Auto has no permission judge" in term.text)
     else:
         term.prompt("RUN:touch auto.txt")
         term.until((project / "auto.txt").exists, "auto.txt")
         check("auto: judge decides and the command runs without a prompt", judge_calls() == 1, f"judge={judge_calls()}")
-    term.pump(1)
+        term.settle(1)
+        term.prompt("WRITE:auto-edit.txt")
+        term.until((project / "auto-edit.txt").exists, "auto-edit.txt")
+        check("auto: a file in the project is written without the judge or a prompt", judge_calls() == 1, f"judge={judge_calls()}")
+        term.settle(1)
+        term.prompt("WRITE:.husky/auto-hook")
+        term.until((project / ".husky/auto-hook").exists, "auto-hook")
+        check("auto: a guarded folder still goes to the judge", judge_calls() == 2, f"judge={judge_calls()}")
+        term.settle(1)
+        (project / "sub/deep").mkdir(parents=True)
+        def ran(command, where):
+            term.settle(1)
+            term.prompt(f"RUN:{command}")
+            term.until((project / where).exists, where)
+        ran("cd sub/deep && touch incd.txt", "sub/deep/incd.txt")
+        check("cd: the rule was added for you, so moving asks nobody", judge_calls() == 2, f"judge={judge_calls()}")
+        ran("touch incd2.txt", "sub/deep/incd2.txt")
+        check("cd: the folder carries over to the next command, and the model is told", "Bash stays in" in log_results(), log_results()[-200:])
+        ran("cd sub/deep && touch incd3.txt", "sub/deep/incd3.txt")
+        check("cd: repeating a move doesn't fail", True)
+        ran("cd .. && touch incd4.txt", "sub/incd4.txt")
+        check("cd: a relative move starts from there", ORDER == "modes-last" or judge_calls() == 2, f"judge={judge_calls()}")
+        term.settle(1)
+        asked_before = judge_calls()
+        term.prompt(f"RUN:cd {outside} && touch incd-out.txt")
+        approve_dialog_if_first()
+        term.until((outside / "incd-out.txt").exists, "incd-out.txt")
+        check("cd: a move outside the project is still gated", DIALOG_FIRST or judge_calls() == asked_before + 1, f"judge={judge_calls()}")
+        term.settle(1)
+        check("cd: leaving the project says it was reset", "Shell cwd was reset" in log_results(), log_results()[-200:])
+        ran("touch incd5.txt", "incd5.txt")
+        check("cd: and the next command runs at the top", True)
+    term.settle(1)
 
     term.send(SHIFT_TAB)
     term.wait(r"mode: plan")
@@ -377,7 +442,7 @@ try:
     chat = log.read_text().splitlines()
     check("plan: instructions and submit tool reach the model", any("plan=true" in l and "submit=true" in l for l in chat))
     check("normal: submit tool was hidden from the model", "submit=false" in chat[0])
-    term.pump(1)
+    term.settle(1)
 
     term.prompt("RUN:touch planask.txt")
     approve_dialog_if_first()
@@ -386,7 +451,7 @@ try:
     term.send("\x1b")
     term.wait(r"Plan mode blocked this command")
     check("plan: declining a command blocks it", not (project / "planask.txt").exists())
-    term.pump(1)
+    term.settle(1)
 
     term.prompt("PLAN")
     term.wait(r"Approve this plan")
@@ -396,7 +461,7 @@ try:
     term.wait(r"approved the plan and switched to normal")
     term.wait(r"mode: normal")
     check("approving the plan returns to normal", True)
-    term.pump(1)
+    term.settle(1)
 
     term.send(SHIFT_TAB); term.wait(r"mode: auto")
     term.send(SHIFT_TAB); term.wait(r"mode: plan")
@@ -408,14 +473,14 @@ try:
     term.wait(r"read-only mode blocked this command")
     check("read-only: other bash stays blocked", not (project / "readonly.txt").exists())
     check("read-only: judge stays out", judge_calls() == before, f"judge={judge_calls()}")
-    term.pump(1)
+    term.settle(1)
     term.prompt("RUN:echo READONLY_OK")
     if not SOLO:
-        term.pump(2)
+        term.settle(2)
         term.send("y")
     term.wait(r"FINISHED READONLY_OK")
     check("read-only: read-only bash runs", True)
-    term.pump(1)
+    term.settle(1)
     term.send(SHIFT_TAB)
     term.wait(r"mode: normal")
     check("shift+tab wraps back to normal", True)
@@ -439,7 +504,7 @@ try:
     term.until((project / "yolo.txt").exists, "yolo.txt")
     check("yolo: a command runs without a prompt", True)
     check("yolo: judge stays out", judge_calls() == before, f"judge={judge_calls()}")
-    term.pump(1)
+    term.settle(1)
     if not SOLO:
         term.prompt("RUN:touch denied.txt")
         term.wait(r"FINISHED")
@@ -452,7 +517,7 @@ try:
     term.wait(r"mode: normal")
     check("shift+tab leaves yolo for normal", True)
     if not SOLO:
-        term.pump(1)
+        term.settle(1)
         ask_yolo()
         term.mark = len(term.text)
         term.wait(r"Enter start")
@@ -466,23 +531,23 @@ try:
         term.prompt("RUN:touch denied.txt")
         term.until((project / "denied.txt").exists, "denied.txt")
         check("deny off: a denied command runs", True)
-        term.pump(1)
+        term.settle(1)
         term.prompt("WRITE:deny.secret")
         term.until((project / "deny.secret").exists, "deny.secret")
         check("deny off: a denied path can be written", True)
         chat = log.read_text().splitlines()
         check("deny off: the model gets the other tools instead of bash", "bash=false alias=true" in chat[-1], chat[-1])
-        term.pump(1)
+        term.settle(1)
         term.send(SHIFT_TAB)
         term.wait(r"mode: normal")
-        term.pump(1)
+        term.settle(1)
         (project / "denied.txt").unlink()
         term.prompt("RUN:touch denied.txt")
         term.pump(3)
         chat = log.read_text().splitlines()
         check("leaving yolo restores deny", not (project / "denied.txt").exists())
         check("leaving yolo restores the tools", "bash=true alias=false" in chat[-1], chat[-1])
-        term.pump(1)
+        term.settle(1)
     term.send(SHIFT_TAB); term.wait(r"mode: auto")
     term.send(SHIFT_TAB); term.wait(r"mode: plan")
     term.send(SHIFT_TAB); term.wait(r"mode: read-only")
@@ -491,19 +556,19 @@ try:
     term.send(SHIFT_TAB); term.wait(r"mode: auto")
     term.send(SHIFT_TAB); term.wait(r"mode: plan")
     term.send(SHIFT_TAB); term.wait(r"mode: read-only")
-    term.pump(1)
+    term.settle(1)
     full_text = term.text
     term.close()
 
     term = Terminal("--continue")
     term.wait(r"mode: read-only", 40)
     check("mode is restored when the session resumes", True)
-    term.pump(1)
+    term.settle(1)
     ask_yolo()
     term.wait(r"Enter start")
     term.pump(0.5)
     confirm_yolo()
-    term.pump(1)
+    term.settle(1)
     term.close()
     term = Terminal("--continue")
     term.wait(r"mode: normal", 40)
@@ -527,7 +592,7 @@ try:
         )
         rules = json.loads(config.read_text())["permission"]["bash"]
         check("skill: applies a rule and keeps the deny after it",
-              applied.returncode == 0 and list(rules) == ["*", "touch normal.txt*", "touch denied*"], str(rules))
+              applied.returncode == 0 and [rule for rule in rules if not rule.startswith("cd ")] == ["*", "touch normal.txt*", "touch incd*", "touch denied*"] and list(rules)[-1] == "touch denied*", str(rules))
 
     term = Terminal()
     term.wait(r"mode: normal", 40)

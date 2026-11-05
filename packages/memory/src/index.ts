@@ -2,9 +2,14 @@
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { compact, type Mastermind, review, REVIEWED_KEY } from "./mastermind.ts";
+import { GLOBAL, playbookSection, readPlaybook } from "./playbook.ts";
 import { promptSection } from "./prompt.ts";
 import { countUnreviewed, nextBatch, sessionFiles, type ReviewBatch } from "./review.ts";
 import { CATEGORIES, MemoryStore, type Category, type Memory } from "./store.ts";
+
+/** Enough new material for a review to be worth what it costs. */
+const NUDGE_SESSIONS = 10;
 
 const text = (value: string, details: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: value }], details });
 
@@ -22,12 +27,35 @@ export default function piMemory(pi: ExtensionAPI): void {
   let lastBatch: ReviewBatch | null = null;
   // Worked out once a session: a system prompt that changes mid-session would throw away the provider's prompt cache.
   let section: string | null = null;
+  let playbook: string | null = null;
+  let nudged = false;
 
   const store = () => (storePromise ??= MemoryStore.open(dbPath));
 
   pi.on("session_start", () => {
     section = null;
+    playbook = null;
     lastBatch = null;
+  });
+
+  /** The strong model the router has for this, whichever part loads first. */
+  const mastermind = (): Mastermind | undefined => {
+    const probe: { model?: string; thinking?: string } = {};
+    pi.events.emit("pi-router:mastermind-model", probe);
+    return probe.model === undefined ? undefined : { model: probe.model, thinking: probe.thinking };
+  };
+
+  // After the first reply rather than at start, as it walks every session file.
+  pi.on("agent_end", async (_event, ctx) => {
+    if (nudged || !ctx.hasUI || mastermind() === undefined) return;
+    nudged = true;
+    try {
+      const memories = await store();
+      const waiting = countUnreviewed(sessionFiles(roots), (path) => memories.reviewedBytes(REVIEWED_KEY + path), ctx.sessionManager.getSessionFile());
+      if (waiting >= NUDGE_SESSIONS) ctx.ui.notify(`${waiting} sessions haven't been reviewed. /mastermind can turn them into rules for your models.`, "info");
+    } catch {
+      // A reminder isn't worth an error.
+    }
   });
 
   pi.on("session_shutdown", async () => {
@@ -44,7 +72,10 @@ export default function piMemory(pi: ExtensionAPI): void {
       section = "";
       ctx.ui.notify(`pi-memory: ${err instanceof Error ? err.message : String(err)}`, "warning");
     }
-    return section ? { systemPrompt: event.systemPrompt + section } : undefined;
+    playbook ??= playbookSection(readPlaybook(agentDir, GLOBAL), readPlaybook(agentDir, ctx.cwd));
+    // The model that writes the playbook doesn't need it.
+    const rules = ctx.model !== undefined && `${ctx.model.provider}/${ctx.model.id}` === mastermind()?.model ? "" : playbook;
+    return section || rules ? { systemPrompt: event.systemPrompt + section + rules } : undefined;
   });
 
   pi.registerTool({
@@ -140,6 +171,34 @@ export default function piMemory(pi: ExtensionAPI): void {
     const body = found.length > 0 ? found.map(line).join("\n") : "No memories found.";
     ctx.ui.notify(`${body}\n\nSessions not reviewed yet: ${pending}. /memory review goes through them.`, "info");
   };
+
+  let reviewing = false;
+
+  pi.registerCommand("mastermind", {
+    description: "A strong model turns past conversations into rules for your other models. Or: compact | show",
+    handler: async (args, ctx) => {
+      if (!ctx.hasUI) return;
+      const action = args.trim();
+      if (action === "show") {
+        const shown = [GLOBAL, ctx.cwd].map((scope) => `${scope}:\n${readPlaybook(agentDir, scope) || "(empty)"}`).join("\n\n");
+        return ctx.ui.notify(shown, "info");
+      }
+      if (action !== "" && action !== "compact") return ctx.ui.notify("Usage: /mastermind [compact | show]", "warning");
+      const chosen = mastermind();
+      if (chosen === undefined) return ctx.ui.notify("Choose a strong model first: set mastermind in /router.", "warning");
+      if (reviewing) return ctx.ui.notify("/mastermind is already running.", "warning");
+      reviewing = true;
+      try {
+        if (action === "compact") await compact(ctx, agentDir, chosen, [GLOBAL, ctx.cwd]);
+        else await review(ctx, agentDir, chosen, await store(), sessionFiles(roots));
+        playbook = null;
+      } catch (err) {
+        ctx.ui.notify(`/mastermind: ${err instanceof Error ? err.message : String(err)}`, "error");
+      } finally {
+        reviewing = false;
+      }
+    },
+  });
 
   pi.registerCommand("memory", {
     description: "Show memories, or: /memory <words> | review | forget <id>",

@@ -125,6 +125,15 @@ class Terminal:
             self.answered = True
             os.write(self.fd, b"\x1b[?1u")
 
+    def settle(self, seconds):
+        """Up to `seconds`, done early once the screen has been still for a moment. Pi animates while it works."""
+        end = time.time() + seconds
+        while time.time() < end:
+            seen = len(self.raw)
+            self.pump(0.7)
+            if len(self.raw) == seen:
+                return
+
     def wait(self, text, timeout=30):
         end = time.time() + timeout
         while time.time() < end:
@@ -148,7 +157,7 @@ class Terminal:
         end = time.time() + 30
         while time.time() < end and self.plain().count("FINISHED") + self.plain().count("OK") <= mark:
             self.pump(0.2)
-        self.pump(1)
+        self.settle(1)
 
     def close(self):
         try:
@@ -168,7 +177,7 @@ def slash(text):
     term.send("\x1b")
     term.pump(0.3)
     term.send("\r")
-    term.pump(1.5)
+    term.settle(1.5)
 
 
 checks = []
@@ -195,7 +204,7 @@ def check(name, ok, detail=""):
 term = Terminal()
 try:
     check("starts", term.wait("Mock", 40))
-    term.pump(3)
+    term.settle(3)
     if PACKAGE == str(REPO):
         check("the start card uses the new name", "\u03c0-frame" in term.plain())
     check("repository's fsmonitor does not run at startup", not marker.exists())
@@ -213,7 +222,7 @@ try:
             for mode in ("auto", "plan", "read-only", "normal"):
                 os.write(term.fd, SHIFT_TAB)
                 term.wait(f"mode: {mode}")
-                term.pump(1)
+                term.settle(1)
                 colors[f"back to {mode}" if mode == "normal" else mode] = frame_color()
             check(
                 "the frame changes color with the mode",
@@ -226,7 +235,7 @@ try:
             os.write(term.fd, b"\x1b")
             term.pump(0.4)
             os.write(term.fd, b"\r")
-            term.pump(1)
+            term.settle(1)
             check("/mode yolo asks first", term.wait("Enter start", 5))
             os.write(term.fd, b"\r")
             check("the footer shows yolo without another key", term.wait("mode: yolo", 5))
@@ -234,7 +243,7 @@ try:
             yolo = frame_color()
             check("yolo has its own frame color", yolo not in colors.values(), str(yolo).replace(ESC, "ESC"))
             os.write(term.fd, SHIFT_TAB)
-            term.pump(1)
+            term.settle(1)
             plain = term.plain()
             check("the skill is listed", "review-permissions" in plain)
             check("the card has a skills row", bool(re.search(r"skills +\S", plain)) and "[Skills]" not in plain)
@@ -244,7 +253,7 @@ try:
         term.pump(0.3)
         os.write(term.fd, b"\r")
         check("/effort high changes the effort", term.wait("Effort: high", 10))
-        term.pump(1)
+        term.settle(1)
         check("the frame shows the new effort", effort_on_frame() == "high", str(effort_on_frame()))
         os.write(term.fd, b"/effort")
         term.pump(0.5)
@@ -254,7 +263,7 @@ try:
         check("/effort opens a picker", term.wait("Effort (now high)", 10))
         term.pump(0.5)
         os.write(term.fd, b"\x1b")
-        term.pump(1)
+        term.settle(1)
 
     term.prompt("PRINT")
     term.prompt("ARG")
@@ -262,11 +271,11 @@ try:
     term.pump(2)
     check("repository's fsmonitor does not run after tool calls", not marker.exists())
     os.write(term.fd, b"\x1bo")
-    term.pump(1.5)
+    term.settle(1.5)
     os.write(term.fd, b"\x1b[C\x1b[D\x1b[D\x1b[D")
-    term.pump(1.5)
+    term.settle(1.5)
     os.write(term.fd, b"\x1b")
-    term.pump(1)
+    term.settle(1)
     for name, needle in [
         ("clipboard write", f"{ESC}]52;"),
         ("title from a tool's output", f"{ESC}]0;EVILTITLE"),
@@ -306,10 +315,10 @@ try:
     check("the card lists the extensions", bool(re.search(r"\u2502.*extensions +\S.*\u2502", plain)))
     check("Pi's own lists are not drawn too", "\u2500 extensions " not in plain)
     os.write(term.fd, b"\x0f")
-    term.pump(1.5)
+    term.settle(1.5)
     check("ctrl+o shows the full list in a frame", "\u2500 extensions " in term.plain())
     os.write(term.fd, b"\x0f")
-    term.pump(1)
+    term.settle(1)
     Path(os.environ.get("PI_FRAME_E2E_CARD", os.devnull)).write_text(term.raw)
     check("no bracketed section names", "[Extensions]" not in plain)
     if sys.platform == "darwin":
@@ -326,7 +335,7 @@ try:
     os.write(term.fd, b"\x13")
     check("ctrl+s opens the settings", term.wait("Frame", 8) and "Frame" in term.plain()[before:])
     os.write(term.fd, b"\x1b")
-    term.pump(1)
+    term.settle(1)
     if SANDBOX:
         check("the footer says the sandbox is on", "sandbox: on" in term.plain())
         def command(text):
@@ -339,7 +348,7 @@ try:
         before = len(term.plain())
         command("/sandbox-disable")
         check("/sandbox-disable turns the sandbox off", term.wait("Sandbox disabled", 8))
-        term.pump(1)
+        term.settle(1)
         check("the footer says the sandbox is off", "sandbox: off" in term.plain()[before:])
         command("/sandbox-enable")
         check("/sandbox-enable turns it back on", term.wait("Sandbox enabled", 8))
@@ -348,9 +357,9 @@ try:
         (project / ".env").write_text(f"API_KEY={SECRET}\n")
         for prompt in ("CATENV", "READENV"):
             term.prompt(prompt)
-            term.pump(1.5)
+            term.settle(1.5)
         os.write(term.fd, b"\x1bo")
-        term.pump(1.5)
+        term.settle(1.5)
         os.write(term.fd, b"\x1b")
         term.pump(0.5)
         sessions = "".join(path.read_text() for path in (agent / "sessions").rglob("*.jsonl"))
@@ -382,7 +391,7 @@ try:
     sent = json.dumps(last_request()["messages"])
     check("no reminder while the model can still see the list", "kept from earlier" not in sent)
     slash("/compact")
-    term.pump(4)
+    term.settle(4)
     term.prompt("after compaction")
     messages = last_request()["messages"]
     gone = sum(1 for message in messages if message.get("role") == "tool")
@@ -394,7 +403,7 @@ try:
     term.close()
     term = Terminal(args=["--continue"])
     check("the list comes back with the session", term.wait("todo 1/4", 40))
-    term.pump(2)
+    term.settle(2)
     if MODES_LOADED:
         os.write(term.fd, SHIFT_TAB)
         term.wait("mode: auto")
@@ -427,14 +436,14 @@ try:
     term.pump(0.4)
     term.send("\r")
     check("a response's line follows it while it's written", term.wait("slowfirst", 10))
-    term.pump(2.5)
+    term.settle(2.5)
     check("the live line shows the stall", bool(re.search(CLOCK + r".*writing.*stall", term.plain()[before:])))
     term.wait("slowlast", 10)
-    term.pump(1)
+    term.settle(1)
     final = term.plain()[before:]
     check("the final line has the clock, model, total and stall", bool(re.search(CLOCK + r"  m  ttft \S+  server \S+  total \d\.\d{3}s  stall", final)), final[-400:])
     term.prompt("TOUCH")
-    term.pump(1)
+    term.settle(1)
     check("a tool box has the clock and the time in ms", bool(re.search(CLOCK + r"  took \d+(?:ms|\.\d{3}s)", term.plain())))
 
     started = time.time()
@@ -448,13 +457,13 @@ try:
     term.pump(1)
     alive = lambda: os.waitpid(term.pid, os.WNOHANG)[0] == 0
     check("stopping a run does not exit", alive())
-    term.pump(1.5)
+    term.settle(1.5)
     term.send("\x03")
     check("with nothing running, ctrl+c says how to exit", term.wait("Press ctrl+c again to exit", 5))
     Path(os.environ.get("PI_FRAME_E2E_RAW", os.devnull)).write_text(term.raw)
-    term.pump(3)
+    term.pump(3)  # The warning's time has to pass, so this can't stop early.
     term.send("\x03")
-    term.pump(1)
+    term.settle(1)
     check("after the warning passes, it warns again", alive())
     term.send("\x03")
     term.pump(3)
@@ -463,13 +472,13 @@ try:
     if sys.platform == "darwin":
         term = Terminal(kitty=True)
         term.wait("Mock", 40)
-        term.pump(3)
+        term.settle(3)
         term.answer_kitty()
-        term.pump(2)
+        term.settle(2)
         term.send("x")
-        term.pump(2)
+        term.settle(2)
         os.write(term.fd, b"\x1b[127u")
-        term.pump(1.5)
+        term.settle(1.5)
         check("with the kitty protocol, the card says cmd+s", "cmd+s settings" in term.plain())
         before = len(term.plain())
         os.write(term.fd, b"\x1b[115;9u")
@@ -477,29 +486,29 @@ try:
     term.close()
     term = Terminal(args=["--continue"])
     term.wait("Mock", 40)
-    term.pump(3)
+    term.settle(3)
     check("a resumed session keeps a response's timings", bool(re.search(CLOCK + r"  m  ttft \S+  server \S+  total \d\.\d{3}s  stall", term.plain())), term.plain()[-500:])
     if BOARD:
         term.close()
         term = Terminal()
         term.wait("Mock", 40)
-        term.pump(3)
+        term.settle(3)
         LEFT = "\x1b[D"
         check("the card is up before the board", "ready when you are" in term.plain())
         term.send(LEFT)
         term.send(LEFT)
         check("left twice on an empty prompt opens the board", term.wait("π-board", 10))
-        term.pump(1)
+        term.settle(1)
         check("the open session is a row on the board", "new session" in term.plain())
         term.send("hello")
         term.pump(0.4)
         before = len(term.plain())
         term.send("\r")
         check("enter starts the task with no dialog", term.wait("Dispatched", 8) and "Start session" not in term.plain()[before:])
-        term.pump(1)
+        term.settle(1)
         before = len(term.plain())
         term.send("\x1b")
-        term.pump(2)
+        term.settle(2)
         after = term.plain()[before:]
         check("the frame's card comes back when the board closes", "ctrl+s settings" in after or "π-frame" in after)
         check("the frame's footer comes back", "ctx " in after and "(auto)" not in after)
@@ -514,7 +523,7 @@ try:
         term.pump(0.4)
         for switch in ("/new", "/reload", "/resume", "/new", "/resume"):
             term.send(switch + "\r")
-            term.pump(3)
+            term.settle(3)
             if switch == "/resume":
                 term.send("\r")
                 term.pump(3)

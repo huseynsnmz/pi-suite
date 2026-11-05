@@ -1,4 +1,4 @@
-// One package, seven parts. A part that's off isn't even imported, so it adds no tools, prompts or start-up time.
+// One package, many parts. A part that's off isn't even imported, so it adds no tools, prompts or start-up time.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";

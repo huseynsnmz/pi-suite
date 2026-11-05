@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { clearGate, hasPermissionSystem, installJudgeGate, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "../src/judge-gate.ts";
+import { clearGate, hasPermissionSystem, installJudgeGate, isProjectEdit, judgeGated, noteEditPaths, registerYoloLink, setGateCwd, setGateMode, YOLO_LINK } from "../src/judge-gate.ts";
 
 const SERVICES = Symbol.for("@gotgenes/pi-permission-system:session-services");
 type Link = (...args: unknown[]) => Promise<unknown>;
@@ -115,4 +118,70 @@ test("no permission system, no link", () => {
   installJudgeGate(store);
   assert.equal(registerYoloLink("s1", store), undefined);
   assert.equal(hasPermissionSystem("s1", store), false);
+});
+
+test("auto spares the judge only for ordinary files in the project", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "gate-")));
+  const project = join(root, "project");
+  mkdirSync(join(project, "src"), { recursive: true });
+  symlinkSync(root, join(project, "out"));
+  symlinkSync(join(root, "nowhere"), join(project, "dangling"));
+  const cases: [string, unknown, boolean][] = [
+    ["an existing folder", { toolName: "edit", path: "src/a.go" }, true],
+    ["a new folder", { toolName: "write", path: join(project, "new/deep/a.go") }, true],
+    ["a tool that isn't an edit", { toolName: "bash", path: "src/a.go" }, false],
+    ["no path", { toolName: "edit" }, false],
+    ["outside the project", { toolName: "edit", path: "../a.go" }, false],
+    ["a sibling folder with the same start", { toolName: "edit", path: "../project2/a.go" }, false],
+    ["through a symlink out", { toolName: "write", path: "out/a.go" }, false],
+    ["a link that leads nowhere", { toolName: "write", path: "dangling" }, false],
+    ["git's hooks", { toolName: "write", path: ".git/hooks/pre-commit" }, false],
+    ["a nested guarded folder", { toolName: "edit", path: "src/.github/workflows/x.yml" }, false],
+    ["direnv", { toolName: "write", path: ".envrc" }, false],
+    ["the project itself", { toolName: "write", path: "." }, false],
+  ];
+  for (const [name, details, want] of cases) assert.equal(isProjectEdit(details, project), want, name);
+  assert.equal(isProjectEdit({ toolName: "edit", path: "src/a.go" }, undefined), false, "no folder known");
+});
+
+test("project edits are allowed in auto alone, with or without the judge in the chain", async () => {
+  const { store, service, judge, judged } = setup();
+  service.registerAuthorizer("permission-judge", judge);
+  registerYoloLink("s1", store);
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "gate-")));
+  setGateCwd("s1", dir, store);
+  noteEditPaths("s1", { role: "assistant", content: [
+    { type: "text", text: "x" },
+    { type: "toolCall", id: "here", name: "edit", arguments: { path: "a.go" } },
+    { type: "toolCall", id: "away", name: "edit", arguments: { path: "/elsewhere/a.go" } },
+  ] }, store);
+  const edit = { toolName: "edit", toolCallId: "here" };
+  const reviews: string[] = [];
+  const log = { review: (event: string) => reviews.push(event) };
+  for (const name of ["permission-judge", YOLO_LINK]) {
+    setGateMode("s1", "auto", store);
+    assert.deepEqual(await service.links.get(name)?.(edit, null, log), { kind: "allow" }, name);
+    setGateMode("s1", "normal", store);
+    assert.deepEqual(await service.links.get(name)?.(edit, null, log), { kind: "defer" }, name);
+  }
+  assert.equal(judged(), 0);
+  assert.equal(reviews.length, 2);
+  setGateMode("s1", "auto", store);
+  await service.links.get("permission-judge")?.({ toolName: "edit", toolCallId: "away" }, null, log);
+  assert.equal(judged(), 1, "outside the project");
+  await service.links.get("permission-judge")?.({ toolName: "edit", toolCallId: "unknown" }, null, log);
+  assert.equal(judged(), 2, "a call it didn't see");
+  noteEditPaths("s1", { role: "assistant", content: [] }, store);
+  await service.links.get("permission-judge")?.(edit, null, log);
+  assert.equal(judged(), 3, "an older message's call");
+});
+
+test("agent needs no ask in any mode, as what it does is still checked", async () => {
+  const { store, service, judge, judged } = setup();
+  service.registerAuthorizer("permission-judge", judge);
+  for (const mode of ["normal", "auto"] as const) {
+    setGateMode("s1", mode, store);
+    assert.deepEqual(await service.links.get("permission-judge")?.({ toolName: "agent" }), { kind: "allow" });
+  }
+  assert.equal(judged(), 0);
 });

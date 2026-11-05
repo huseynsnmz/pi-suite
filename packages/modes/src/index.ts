@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -9,7 +9,8 @@ import { gitRisk } from "./git-safety.ts";
 import { registerInterview } from "./interview.ts";
 import { registerReviewTools } from "./review/tools.ts";
 import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
-import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, registerYoloLink, setGateMode, YOLO_LINK } from "./judge-gate.ts";
+import { addCdRules, registerWorkdir } from "./workdir.ts";
+import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, noteEditPaths, registerYoloLink, setGateCwd, setGateMode, YOLO_LINK } from "./judge-gate.ts";
 import { readSection, writeSection } from "../../../src/settings.ts";
 import { decideToolCall, displayCommand, fromExpectedPackage, notReadOnly, isMode, scriptedChange, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
@@ -107,11 +108,20 @@ function restoredMode(ctx: ExtensionContext): Mode {
     const saved: unknown = (entry.data as { mode?: unknown } | undefined)?.mode;
     if (isMode(saved)) mode = saved;
   }
+  if (mode === undefined && process.env.PI_MODES_START === "auto") return "auto"; // An agent started in auto.
   return mode === undefined ? startingMode(readConfig().defaultMode) : resumedMode(mode);
 }
 
 export default function piModes(pi: ExtensionAPI): void {
   installJudgeGate();
+
+  // Before the permission system reads its rules, when it loads after this.
+  const project = realpathSync(process.cwd());
+  const cdFolders = readConfig().cdRuleFolders;
+  const handled = Array.isArray(cdFolders) ? (cdFolders as string[]) : [];
+  const cdRule = process.env.PI_SUBAGENT_CHILD === "1" || handled.includes(project) ? { handled: false } : addCdRules(getAgentDir(), project);
+  if (cdRule.handled) writeSection(getAgentDir(), "modes", { ...readConfig(), cdRuleFolders: [...handled, project] });
+  let cdNotice = cdRule.notice;
 
   let mode: Mode = "normal";
   let stopListening: (() => void) | undefined;
@@ -129,10 +139,15 @@ export default function piModes(pi: ExtensionAPI): void {
     disposeYoloLink = registerYoloLink(sessionId);
   });
 
+  pi.on("message_end", (event, ctx) => noteEditPaths(ctx.sessionManager.getSessionId(), event.message));
+
+  const bash = registerWorkdir(pi);
+
   function apply(next: Mode, ctx: ExtensionContext): void {
     mode = next;
     if (next !== "yolo") denyOff = false;
     setGateMode(ctx.sessionManager.getSessionId(), next);
+    setGateCwd(ctx.sessionManager.getSessionId(), ctx.cwd);
     let others = withoutAliases(pi.getActiveTools().filter((name) => name !== SUBMIT_PLAN_TOOL), replacedTools);
     replacedTools = [];
     if (denyOff) ({ active: others, replaced: replacedTools } = withAliases(others));
@@ -194,6 +209,8 @@ export default function piModes(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    if (cdNotice !== undefined && ctx.hasUI) ctx.ui.notify(cdNotice, "info");
+    cdNotice = undefined;
     apply(restoredMode(ctx), ctx);
     if (ctx.mode === "tui") {
       if (sandboxInstalled(pi.getCommands()) && packagesLoadThisFirst()) statuses = borrowStatusReader(ctx.ui as never);
@@ -243,21 +260,25 @@ export default function piModes(pi: ExtensionAPI): void {
     }
     let decision = decideToolCall(mode, event.toolName, event.input);
     if (decision.action === "allow" && (mode === "plan" || mode === "read-only") && event.toolName === "bash") {
-      const risk = runsGit((event.input as { command: string }).command) ? await gitRisk(ctx.cwd) : undefined;
+      const risk = runsGit((event.input as { command: string }).command) ? await gitRisk(bash.folder() ?? ctx.cwd) : undefined;
       if (risk !== undefined) decision = notReadOnly(mode, risk);
     }
     if (decision.action === "allow" && (mode === "plan" || mode === "read-only")) {
       const path = pi.getAllTools().find((tool) => tool.name === event.toolName)?.sourceInfo.path;
       if (!fromExpectedPackage(event.toolName, path)) decision = { action: "block", reason: `${mode} mode blocks ${event.toolName} from another package.` };
     }
-    if (decision.action === "allow") return undefined;
+    // After the mode has read the command as the model wrote it, and before the permission system reads it.
+    const moveBash = () => {
+      if (event.toolName === "bash" || event.toolName === "yolo_bash") bash.apply(event.toolCallId, event.input as { command: string }, ctx.cwd);
+    };
+    if (decision.action === "allow") return moveBash();
     if (decision.action === "block") return { block: true, reason: decision.reason };
 
     const denied = `Plan mode blocked this command: ${decision.reason}.`;
     if (!ctx.hasUI) return { block: true, reason: denied };
     const command = (event.input as { command: string }).command;
     const approved = await ctx.ui.confirm("Plan mode: run this command?", `${displayCommand(decision.reason)}\n\n${displayCommand(command)}`);
-    return approved ? undefined : { block: true, reason: denied };
+    return approved ? moveBash() : { block: true, reason: denied };
   });
 
   registerReviewTools(pi);
