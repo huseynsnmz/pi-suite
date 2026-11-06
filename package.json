@@ -1,6 +1,6 @@
 {
   "name": "@huseynsnmz/pi-suite",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "One Pi package for all of it: modes and permissions, a framed screen, an agent board, memory, web tools with a separate page reader, and a model router. Turn off what you don't want with /suite.",
   "type": "module",
   "license": "MIT",

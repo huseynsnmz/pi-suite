@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.6]
+
+### Changes
+
+- The READMEs are rewritten to be shorter, with the same shape for every part.
+
+### Fixes
+
+- Finished reasoning now collapses by default, as Pi's setting for it was off unless you had changed it. `Ctrl+T` still opens it, and is saved.
+
 ## [0.2.5]
 
 ### Security

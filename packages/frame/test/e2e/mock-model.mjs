@@ -56,6 +56,16 @@ createServer((req, res) => {
 				res.end();
 			}, 3_000);
 		}
+		if (text === "THINK") {
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			chunk(res, { role: "assistant", reasoning_content: "SECRETREASON" });
+			return setTimeout(() => {
+				chunk(res, { role: "assistant", content: "thinkdone OK" });
+				chunk(res, {}, "stop");
+				res.write("data: [DONE]\n\n");
+				res.end();
+			}, 2_000);
+		}
 		return reply(res, SCRIPT[text] ? "" : "OK", SCRIPT[text]);
 	});
 }).listen(Number(port), "127.0.0.1");

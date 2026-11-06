@@ -28,7 +28,7 @@ A redrawn screen for Pi. If you have `pi-look`, remove it, as both draw the same
 
 On a Mac, `Alt` is the Option key, which needs setting up: Left Option as `Esc+` in iTerm2, `"terminal": { "option_as_meta": true }` in Zed, or "Use Option as Meta" in Terminal.app. In Ghostty or kitty, `Cmd+S` and `Cmd+O` work too.
 
-To collapse reasoning once a message is done, set `"hideThinkingBlock": true` in `~/.pi/agent/settings.json`.
+Reasoning shows while it's written and collapses when the message is done. To always show it, press `Ctrl+T`, which is saved, or set `"hideThinkingBlock": false` in `~/.pi/agent/settings.json`.
 
 More in [How it works](docs/how-it-works.md) and the [reference](docs/reference.md).
 
