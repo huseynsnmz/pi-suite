@@ -48,7 +48,10 @@ Restart Pi afterwards. With no judge or `pi-modes` link, also add `"agent": "all
 
 ## `auto`
 
-The judge decides each ask, and only runs in this mode. Edits and writes to project files skip it, so they don't ask and a slow judge doesn't hold them up. `deny` rules still apply.
+The judge decides each ask, and only runs in this mode. Some asks skip it, so they don't come to you and a slow judge doesn't hold them up. `deny` rules still apply.
+
+- **Edits and writes to project files.**
+- **pi-suite's own tools for memory, the playbook, todos, questions and the web.** They only change what pi-suite keeps, or have checks of their own. The judge defers what it doesn't know, so it would send each one to you. A tool with the same name from another package still goes to the judge.
 
 These still go to the judge:
 
@@ -56,7 +59,11 @@ These still go to the judge:
 - `.git`, `.pi`, `.claude`, `.husky`, `.github`, `.vscode` and `.envrc`
 - Paths Pi rewrites before writing, such as `@src/a.go` or a `file:` URL
 
-Other files can run code too, such as `package.json` scripts, so use `normal` where that matters. If `auto` asks too much, `/skill:review-permissions` also says why the judge deferred.
+Other files can run code too, such as `package.json` scripts, so use `normal` where that matters.
+
+If the judge passes 3 asks in a row to you without judging them, because its model is too slow, failing or missing, pi-modes tells you once a session, with what to do. A slow model is the usual cause: the judge waits 5 seconds by default, so give it a fast model of its own as `judge` in `/router`.
+
+If `auto` still asks too much, run `/skill:review-permissions`.
 
 ## `plan`
 
@@ -88,6 +95,10 @@ The agent can ask you questions with `ask_questions`, in any mode. Each dialog s
 ## Reviewing permissions
 
 `/skill:review-permissions` groups what you approved and what ran, and shows you suggested rules. You approve the exact list in a dialog the agent can't answer. It backs up your config, and your `deny` rules still win. It refuses rules that are too broad, or that cover things like `git push`, `rm`, `curl` or `python`.
+
+It also helps the judge. It says why the judge deferred, and suggests notes on what's routine for you, such as "Running `npm test` is routine." The judge reads them on its next ask. They go in a section of their own in your global `AGENTS.md` in `~/.pi/agent`, since the judge only reads Pi's context files, so the agent reads them too. Notes are refused if they're broad, such as "always allow git", and the section stays under 2,000 characters.
+
+`/mastermind permissions` runs it on your strong model.
 
 With `pi-sandbox`, it also lists what the sandbox blocked, and refuses credential folders and places where a written file runs later.
 

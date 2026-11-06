@@ -10,9 +10,9 @@ import { registerInterview } from "./interview.ts";
 import { registerReviewTools } from "./review/tools.ts";
 import { aliasDefinitions, DENY_OFF_PROMPT, withAliases, withoutAliases } from "./deny-off.ts";
 import { addCdGuards, addCdRules, registerWorkdir } from "./workdir.ts";
-import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, noteEditPaths, registerYoloLink, setGateAgentOurs, setGateCwd, setGateMode, YOLO_LINK } from "./judge-gate.ts";
+import { clearGate, hasPermissionSystem, installJudgeGate, JUDGE_NAMES, judgeGated, noteEditPaths, registerYoloLink, setGateCwd, setGateMode, setGateNotify, setGateSuiteTools, SUITE_TOOLS, YOLO_LINK } from "./judge-gate.ts";
 import { readSection, writeSection } from "../../../src/settings.ts";
-import { AGENT_TOOL, decideToolCall, displayCommand, fromExpectedPackage, notReadOnly, isMode, scriptedChange, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
+import { decideToolCall, displayCommand, fromExpectedPackage, fromSuite, notReadOnly, isMode, scriptedChange, loadsAfterPermissionSystem, type Mode, MODES, modePrompt, nextMode, resumedMode, startingMode, SUBMIT_PLAN_TOOL } from "./modes.ts";
 
 const STATUS_KEY = "pi-modes";
 const DENY_STATUS_KEY = "pi-modes-deny";
@@ -150,8 +150,9 @@ export default function piModes(pi: ExtensionAPI): void {
     if (next !== "yolo") denyOff = false;
     setGateMode(ctx.sessionManager.getSessionId(), next);
     setGateCwd(ctx.sessionManager.getSessionId(), ctx.cwd);
-    const agentTool = pi.getAllTools().find((tool) => tool.name === AGENT_TOOL);
-    setGateAgentOurs(ctx.sessionManager.getSessionId(), agentTool !== undefined && fromExpectedPackage(AGENT_TOOL, agentTool.sourceInfo.path));
+    const ours = pi.getAllTools().filter((tool) => SUITE_TOOLS.includes(tool.name) && fromSuite(tool.sourceInfo.path));
+    setGateSuiteTools(ctx.sessionManager.getSessionId(), ours.map((tool) => tool.name));
+    if (ctx.hasUI) setGateNotify(ctx.sessionManager.getSessionId(), (text) => ctx.ui.notify(text, "warning"));
     let others = withoutAliases(pi.getActiveTools().filter((name) => name !== SUBMIT_PLAN_TOOL), replacedTools);
     replacedTools = [];
     if (denyOff) ({ active: others, replaced: replacedTools } = withAliases(others));

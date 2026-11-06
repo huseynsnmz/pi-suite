@@ -15,10 +15,10 @@ const CODEMODE_TOOL = "codemode";
 // pi-web's tools only read, and a separate model reads the page for them.
 // Each tool a codemode script calls comes through this check itself, so the script needs none of its own.
 export const AGENT_TOOL = "agent";
-const READ_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search", "todo", ASK_TOOL, CODEMODE_TOOL]);
+const READ_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch", "web_search", "todo", "playbook", "memory_search", ASK_TOOL, CODEMODE_TOOL]);
 
 /** Allowed for what pi-suite's own do. Another package's tool with the name could do anything. */
-const SUITE_TOOLS: ReadonlySet<string> = new Set(["todo", "web_fetch", "web_search", ASK_TOOL, AGENT_TOOL]);
+const SUITE_TOOLS: ReadonlySet<string> = new Set(["todo", "web_fetch", "web_search", "playbook", "memory_search", ASK_TOOL, AGENT_TOOL]);
 const SUITE_ENTRY = fileURLToPath(new URL("../../../src/index.ts", import.meta.url));
 
 function realPath(path: string): string | undefined {
@@ -29,12 +29,16 @@ function realPath(path: string): string | undefined {
   }
 }
 
-/** The whole suite loads from one file, so that file is what these tools must come from. */
+/** The whole suite loads from one file, so that file is what its tools come from. */
+export function fromSuite(path: string | undefined, entry = SUITE_ENTRY): boolean {
+  const expected = realPath(entry);
+  return path !== undefined && expected !== undefined && realPath(path) === expected;
+}
+
 export function fromExpectedPackage(toolName: string, path: string | undefined, entry = SUITE_ENTRY): boolean {
   if (toolName === CODEMODE_TOOL) return path === "builtin:codemode";
   if (!SUITE_TOOLS.has(toolName)) return true;
-  const expected = realPath(entry);
-  return path !== undefined && expected !== undefined && realPath(path) === expected;
+  return fromSuite(path, entry);
 }
 
 export function isMode(value: unknown): value is Mode {

@@ -115,18 +115,64 @@ export function applySandbox(config, { read = [], write = [], domains = [] }) {
   return { config: { ...config, filesystem, network }, refusals: [] };
 }
 
+/**
+ * The judge reads the same global context file the agent does, the first of these in Pi's folder, so notes for it
+ * go there, in a section of their own. The agent reads them too.
+ */
+const CONTEXT_NAMES = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
+const NOTES_START = "<!-- pi-modes: notes for the permission judge, kept by /skill:review-permissions -->";
+const NOTES_END = "<!-- /pi-modes -->";
+const NOTES_HEADING = "## Routine here, for the permission judge";
+const NOTE_CHARS = 200;
+const NOTES_CHARS = 2000;
+const SECRET = /(?:token|secret|password|passwd|api[_-]?key|authorization|credential)|\b[A-Za-z0-9_-]{32,}\b/i;
+const TOO_BROAD = /\b(?:always allow|allow (?:everything|anything|all)|any command|anything goes|don't ask|never ask)\b/i;
+
+export function guidancePath(agent) {
+  return CONTEXT_NAMES.map((name) => join(agent, name)).find((path) => existsSync(path)) ?? join(agent, "AGENTS.md");
+}
+
+/** The notes in the section, one per line, without their bullets. */
+export function readNotes(text) {
+  const start = text.indexOf(NOTES_START);
+  const end = text.indexOf(NOTES_END, start);
+  if (start === -1 || end === -1) return [];
+  return text.slice(start + NOTES_START.length, end).split("\n").flatMap((line) => (line.startsWith("- ") ? [line.slice(2).trim()] : []));
+}
+
+/** The file with these notes added to the section, which is made at the end if it isn't there. Nothing else changes. */
+export function withNotes(text, notes) {
+  const all = [...new Set([...readNotes(text), ...notes.map((note) => note.trim())])];
+  const section = `${NOTES_START}\n${NOTES_HEADING}\n\n${all.map((note) => `- ${note}`).join("\n")}\n${NOTES_END}`;
+  const start = text.indexOf(NOTES_START);
+  const end = text.indexOf(NOTES_END, start);
+  if (start !== -1 && end !== -1) return `${text.slice(0, start)}${section}${text.slice(end + NOTES_END.length)}`;
+  return `${text.trimEnd()}${text.trim() === "" ? "" : "\n\n"}${section}\n`;
+}
+
+/** Why a note for the judge must not be added, or undefined when it may be. */
+export function refuseNote(note) {
+  const text = note.trim();
+  if (text === "") return "it's empty";
+  if (text.length > NOTE_CHARS) return `it's over ${NOTE_CHARS} characters, so make it one routine action`;
+  if (/[\n\r]|<!--|-->|```/.test(text)) return "it holds markup or more than one line";
+  if (SECRET.test(text)) return "it looks like it holds a secret";
+  if (TOO_BROAD.test(text)) return "it would let the judge allow too much, so describe one routine action";
+  return undefined;
+}
+
 function writeWithBackup(path, config) {
   let backup;
   if (existsSync(path)) {
     backup = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
     copyFileSync(path, backup);
   }
-  writeFileSync(`${path}.tmp`, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(`${path}.tmp`, typeof config === "string" ? config : `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   renameSync(`${path}.tmp`, path);
   return backup;
 }
 
-function planChoices(agent, { bash = [], tools = [], guards = [], read = [], write = [], domains = [] }) {
+function planChoices(agent, { bash = [], tools = [], guards = [], read = [], write = [], domains = [], guidance = [] }) {
   const path = join(agent, "extensions", "pi-permission-system", "config.json");
   const sandboxPath = join(agent, "sandbox.json");
   const wantsRules = bash.length > 0 || tools.length > 0;
@@ -142,9 +188,13 @@ function planChoices(agent, { bash = [], tools = [], guards = [], read = [], wri
     }
   }
   const sandbox = wantsSandbox ? applySandbox(sandboxConfig, { read, write, domains }) : { refusals: [] };
-  const refusals = [...rules.refusals, ...sandbox.refusals];
+  const notesPath = guidancePath(agent);
+  const notesRefused = guidance.flatMap((note) => [refuseNote(note)].filter(Boolean).map((why) => `${note}: ${why}`));
+  const notes = guidance.length > 0 && notesRefused.length === 0 ? withNotes(existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "", guidance) : undefined;
+  if (notes !== undefined && readNotes(notes).join("\n").length > NOTES_CHARS) notesRefused.push(`The notes for the judge would pass ${NOTES_CHARS} characters. Remove some from ${notesPath} first.`);
+  const refusals = [...rules.refusals, ...sandbox.refusals, ...notesRefused];
   if (refusals.length > 0) return { refusals };
-  return { refusals: [], writes: [...(wantsRules ? [[path, rules.config]] : []), ...(wantsSandbox ? [[sandboxPath, sandbox.config]] : [])] };
+  return { refusals: [], writes: [...(wantsRules ? [[path, rules.config]] : []), ...(wantsSandbox ? [[sandboxPath, sandbox.config]] : []), ...(notes === undefined ? [] : [[notesPath, notes]])] };
 }
 
 /** Why these can't be added, without changing anything. Empty when they can. */

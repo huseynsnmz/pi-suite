@@ -68,7 +68,7 @@ current["packages"] = installed + [str(REPO)] if ORDER in ("solo", "modes-last")
 # Only the parts under test, and they all load from the suite's one entry.
 WITH_FRAME = bool(os.environ.get("PI_MODES_E2E_FRAME"))
 parts = ["modes", "frame"] if WITH_FRAME else ["modes"]
-(agent / "suite.json").write_text(json.dumps({"off": [part for part in ("router", "web", "memory", "frame", "board") if part not in parts]}))
+(agent / "suite.json").write_text(json.dumps({"off": [part for part in ("router", "web", "frame", "board") if part not in parts]}))
 (agent / "settings.json").write_text(json.dumps(current))
 print("load order:", [str(p).split("/")[-1] for p in current["packages"]], flush=True)
 env["PI_OFFLINE"] = "1"
@@ -445,6 +445,30 @@ try:
         term.until((outside / "incd-up.txt").exists, "incd-up.txt")
         check("cd: going up and out of the project later in a chain is still gated", gated, f"judge={judge_calls()}")
         ran(f"cd {project} && touch back.txt", "back.txt")
+        term.settle(1)
+        asked_before = judge_calls()
+        term.prompt("MEMORY:the e2e project deploys from main")
+        term.until(lambda: "Saved" in log_results(), "the memory", 15)
+        check("auto: pi-suite's own memory tool runs without the judge or a prompt", judge_calls() == asked_before, f"judge={judge_calls()}")
+        term.settle(1)
+        mark = len(term.text)
+        term.prompt("NOTE:E2ENOTE touching files named noted-*.txt is routine.")
+        term.until(lambda: "Tell the judge" in term.text[mark:], "the question about the note", 20)
+        term.send("\r")
+        term.until(lambda: "E2ENOTE" in ((agent / "AGENTS.md").read_text() if (agent / "AGENTS.md").exists() else ""), "the note", 20)
+        term.settle(1)
+        ran("touch noted-1.txt", "noted-1.txt")
+        check("skill: a note for the judge reaches it on its next ask", "judge-read-note" in log.read_text().splitlines(), log.read_text()[-300:])
+        term.settle(1)
+        for n in range(3):
+            done = project / f"slowjudge{n}.txt"
+            term.prompt(f"RUN:touch slowjudge{n}.txt")
+            term.pump(8)  # The judge waits 5 seconds, then the ask comes to you.
+            if not done.exists():
+                term.send("y")
+            term.until(done.exists, done.name, 20)
+            term.settle(1)
+        check("auto: a judge that keeps timing out is reported, with what to do", "didn't answer in time" in term.text, term.text[-400:])
     term.settle(1)
 
     term.send(SHIFT_TAB)

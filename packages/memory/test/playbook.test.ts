@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { compact, review } from "../src/mastermind.ts";
-import { GLOBAL, parseProposals, playbookSection, readPlaybook, readProposals, reviewPrompt, writePlaybook } from "../src/playbook.ts";
+import { GLOBAL, parseProposals, playbookPath, playbookSection, readPlaybook, readProposals, reviewPrompt, writePlaybook } from "../src/playbook.ts";
 import type { MemoryStore } from "../src/store.ts";
 
 const dir = () => mkdtempSync(join(tmpdir(), "playbook-"));
@@ -104,4 +104,20 @@ test("sessions stay unread when the answer was cut off or can't be read", async 
   }
   await review(fakeCtx([{ text: "NONE" }]).ctx, folder, CHOSEN, store, [file]);
   assert.equal(marks.length, 1, "NONE is a real answer");
+});
+
+test("a folder's playbook is named after the folder, and one from 0.2.4 moves there", async () => {
+  const { createHash } = await import("node:crypto");
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const agent = dir();
+  assert.equal(playbookPath(agent, GLOBAL), join(agent, "memory/playbook/global.md"));
+  assert.equal(playbookPath(agent, "/Users/me/code/app"), join(agent, "memory/playbook/folders/Users-me-code-app.md"));
+  const old = join(agent, "memory/playbook", `${createHash("sha256").update("/old").digest("hex").slice(0, 16)}.md`);
+  mkdirSync(join(agent, "memory/playbook"), { recursive: true });
+  writeFileSync(old, "- kept\n");
+  writeFileSync(`${old}.bak`, "- older\n");
+  assert.equal(readPlaybook(agent, "/old"), "- kept");
+  assert.equal(existsSync(old), false);
+  assert.equal(readFileSync(`${playbookPath(agent, "/old")}.bak`, "utf8").trim(), "- older");
+  assert.match(playbookSection("- a", ""), /`playbook` tool/);
 });
