@@ -42,6 +42,15 @@ function isConditional(content: string): boolean {
   return front !== null && /^paths\s*:/m.test(front[1] as string);
 }
 
+/** False for a link that leads nowhere, rather than throwing on every message. */
+function isFolder(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Every file to add, in reading order, each once. */
 export function claudeInstructions(home: string): ContextFile[] {
   const files: ContextFile[] = [];
@@ -60,12 +69,17 @@ export function claudeInstructions(home: string): ContextFile[] {
     if (stat.isDirectory()) {
       for (const name of readdirSync(real).sort()) {
         const child = join(path, name);
-        if (name.endsWith(".md") || statSync(child).isDirectory()) visit(child, depth, fromRules);
+        if (name.endsWith(".md") || isFolder(child)) visit(child, depth, fromRules);
       }
       return;
     }
     if (!stat.isFile()) return;
-    const content = readFileSync(real, "utf8");
+    let content: string;
+    try {
+      content = readFileSync(real, "utf8");
+    } catch {
+      return; // Unreadable. A message to Claude is worth more than one file.
+    }
     if (fromRules && isConditional(content)) return;
     files.push({ path, content });
     if (depth >= MAX_DEPTH) return;

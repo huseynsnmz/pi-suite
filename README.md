@@ -7,7 +7,7 @@ One package that makes [Pi](https://pi.dev) safer and easier to run all day: per
 Requires Pi 1.5 or newer.
 
 ```bash
-pi install npm:@huseynsnmz/pi-suite@0.2.7
+pi install npm:@huseynsnmz/pi-suite@0.2.8
 ```
 
 Then restart Pi. Everything except `subscription` is on, and nothing else needs setting up.

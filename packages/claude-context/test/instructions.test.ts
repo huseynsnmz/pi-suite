@@ -63,3 +63,10 @@ test("skips files Pi already loads through a link", () => {
   assert.deepEqual(notLoaded([{ path: join(dir, ".pi/agent/CLAUDE.md"), content: "mine" }], extra), []);
   assert.equal(notLoaded([], extra).length, 1);
 });
+
+test("a broken link in the rules doesn't stop the rest", () => {
+  const dir = home({ ".claude/rules/a.md": "a" });
+  symlinkSync(join(dir, "nowhere"), join(dir, ".claude/rules/gone"));
+  symlinkSync(join(dir, "nowhere.md"), join(dir, ".claude/rules/gone.md"));
+  assert.deepEqual(names(dir), [".claude/rules/a.md"]);
+});
