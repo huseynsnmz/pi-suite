@@ -1,4 +1,4 @@
-import { AssistantMessageComponent } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 /** Private in pi. If a release renames them, reasoning just follows pi's setting again. */
 interface Message {
@@ -7,9 +7,32 @@ interface Message {
 	thinkingVisibilityOverrides?: Map<number, boolean>;
 }
 
+interface Settings {
+	getHideThinkingBlock(): boolean;
+	settings?: { hideThinkingBlock?: boolean };
+}
+
 const live = new WeakSet<object>();
 let isActive: () => boolean = () => false;
 let installed = false;
+
+let collapses: () => boolean = () => false;
+let defaultInstalled = false;
+
+/**
+ * Pi shows finished reasoning unless told otherwise, so nobody who hasn't found the setting sees it collapse.
+ * With the frame on, an unset setting means collapse. Ctrl+T, or setting it yourself, still decides from there.
+ */
+export function collapseThinkingByDefault(active: () => boolean): void {
+	collapses = active;
+	if (defaultInstalled) return;
+	defaultInstalled = true;
+	const prototype = SettingsManager.prototype as unknown as Settings;
+	const own = prototype.getHideThinkingBlock;
+	prototype.getHideThinkingBlock = function getHideThinkingBlock(this: Settings) {
+		return this.settings?.hideThinkingBlock === undefined && collapses() ? true : own.call(this);
+	};
+}
 
 /**
  * With pi's setting that collapses reasoning on, it still shows while it's being written, and

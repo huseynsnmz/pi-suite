@@ -1,20 +1,16 @@
 # commands
 
-Two commands for Pi. Part of [pi-suite](../../README.md); turn them off with `/suite off commands`.
+Part of [pi-suite](../../README.md). Turn it off with `/suite off commands`.
 
-## /clear
+## `/clear`
 
-Clears the conversation and starts a new session, keeping the model and reasoning level you have selected. `/new` goes back to your saved default instead. If the agent is working, it stops first. The old session is kept, and `/resume` brings it back.
+Starts a new session and keeps your selected model and reasoning. `/new` goes back to your saved default instead. If the agent is working, it stops first. `/resume` brings the old session back.
 
-## /security-review
+## `/security-review`
 
-Reviews your changes for security problems the code could really be attacked through. It compares against where your branch left the default branch, so it covers commits, staged and unstaged edits, and new files. Text after the command goes to the model, as in `/security-review focus on auth`.
+Reviews your branch for security problems an attacker could really use. It covers commits since the default branch, staged and unstaged edits, and new files. Add a focus if you like: `/security-review focus on auth`.
 
-The screen shows one line, and the diff goes to the model. A diff over 200,000 characters is replaced by a summary, and the model reads it a file at a time.
-
-**Limits:**
-
-- It turns off git hooks and diff programs while reading the changes. If the repository sets a git filter, it stops instead, since nothing can turn those off.
-- It asks the model not to change files, but the current mode decides what it can do. Use `read-only` to be sure, especially on a repository you don't trust.
-- The review is sent to your current model, like any other message.
-- It's one model's judgment, so it can miss things and isn't a replacement for a real audit.
+- **It reads safely.** Git hooks and diff programs are off while it reads your changes, and it stops if the repository sets a git filter.
+- **It doesn't lock the agent.** It asks the model not to change files, but your mode decides what it can do. Use `read-only` to be sure.
+- **It goes to your current model,** like any other message. A diff over 200,000 characters is read a file at a time.
+- **It's one model's judgment,** not a real audit.

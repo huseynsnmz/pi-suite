@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { AssistantMessageComponent, initTheme } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, initTheme, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 import { startPrefix, stepPrefix } from "../src/ui/history-search.ts";
-import { showThinkingWhileLive } from "../src/ui/thinking.ts";
+import { collapseThinkingByDefault, showThinkingWhileLive } from "../src/ui/thinking.ts";
 
 describe("Up with text typed", () => {
 	const entries = ["git status", "npm test", "git push", "Git log", "git status"];
@@ -27,6 +27,20 @@ describe("Up with text typed", () => {
 });
 
 describe("reasoning", () => {
+	test("collapses unless you've chosen otherwise, and only with the frame on", () => {
+		let on = true;
+		collapseThinkingByDefault(() => on);
+		const unset = SettingsManager.inMemory();
+		expect(unset.getHideThinkingBlock()).toBe(true);
+		expect(SettingsManager.inMemory({ hideThinkingBlock: false }).getHideThinkingBlock()).toBe(false);
+		expect(SettingsManager.inMemory({ hideThinkingBlock: true }).getHideThinkingBlock()).toBe(true);
+		unset.setHideThinkingBlock(false);
+		expect(unset.getHideThinkingBlock()).toBe(false);
+		on = false;
+		expect(SettingsManager.inMemory().getHideThinkingBlock()).toBe(false);
+		on = true;
+	});
+
 	const message = {
 		role: "assistant",
 		content: [{ type: "thinking", thinking: "SECRETPLAN" }],

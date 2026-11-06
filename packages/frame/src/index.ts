@@ -62,6 +62,7 @@ import { PACKAGE_VERSION, HeaderComponent, type LoadedCounts } from "./ui/header
 import { EXIT_WINDOW_MS, type InterruptState, nextInterrupt } from "./ui/interrupt.ts";
 import { OutputView, outputsOf } from "./ui/outputs.ts";
 import { framePiEntries, loadedLists, onLoadedListsChange } from "./ui/pi-entries.ts";
+import { collapseThinkingByDefault } from "./ui/thinking.ts";
 import { showTimings } from "./ui/timings.ts";
 import { timingLine } from "./render/timing.ts";
 import { frameQueue } from "./ui/queue.ts";
@@ -128,6 +129,7 @@ export const frameFeature = defineFeature({
 		registerTodos(scope, () => glyphs().set);
 		const sentLive = new Map<string, Mode>();
 		let sentSaved = { length: -1, modes: new Map<string, Mode>() };
+		collapseThinkingByDefault(() => frame.get(scope) !== "off");
 		framePiEntries(() => {
 			if (live.ctx === undefined) return undefined;
 			return {
