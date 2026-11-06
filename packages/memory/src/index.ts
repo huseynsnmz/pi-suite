@@ -3,10 +3,12 @@ import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { compact, type Mastermind, review, REVIEWED_KEY } from "./mastermind.ts";
-import { GLOBAL, playbookSection, readPlaybook } from "./playbook.ts";
+import { GLOBAL, playbookPath, playbookSection, readPlaybook } from "./playbook.ts";
 import { promptSection } from "./prompt.ts";
 import { countUnreviewed, nextBatch, sessionFiles, type ReviewBatch } from "./review.ts";
 import { CATEGORIES, MemoryStore, type Category, type Memory } from "./store.ts";
+
+type ThinkingLevel = Parameters<ExtensionAPI["setThinkingLevel"]>[0];
 
 /** Enough new material for a review to be worth what it costs. */
 const NUDGE_SESSIONS = 10;
@@ -102,6 +104,20 @@ export default function piMemory(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
+    name: "playbook",
+    label: "Playbook",
+    description: "The rules the user approved for working here, for every folder and for this one, and the files they're kept in. They're in your instructions too; read them again when unsure how the user wants something done.",
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const parts = [
+        ["Every folder", GLOBAL],
+        ["This folder", ctx.cwd],
+      ].map(([name, scope]) => `${name}, from ${playbookPath(agentDir, scope as string)}:\n${readPlaybook(agentDir, scope as string) || "(none yet)"}`);
+      return text(`${parts.join("\n\n")}\n\nThe user changes these with /mastermind.`);
+    },
+  });
+
+  pi.registerTool({
     name: "memory_search",
     label: "Search memories",
     description: "Find memories from past sessions by keywords, across all projects. With no query, lists what applies to the current folder.",
@@ -174,18 +190,63 @@ export default function piMemory(pi: ExtensionAPI): void {
 
   let reviewing = false;
 
+  // A review run on the strong model, and the model it replaced, which comes back when that run ends.
+  let restore: { model: Parameters<ExtensionAPI["setModel"]>[0]; thinking: ThinkingLevel } | undefined;
+  pi.on("agent_end", async () => {
+    if (restore === undefined) return;
+    const back = restore;
+    restore = undefined;
+    await pi.setModel(back.model);
+    pi.setThinkingLevel(back.thinking);
+  });
+
+  /** Runs a skill in this session on the strong model, as the user, so its questions and dialogs work as usual. */
+  async function onMastermind(ctx: ExtensionContext, chosen: Mastermind, skill: string): Promise<void> {
+    if (!ctx.isIdle()) return ctx.ui.notify("Wait until the agent is done, then run it again.", "warning");
+    const at = chosen.model.indexOf("/");
+    const model = ctx.modelRegistry.find(chosen.model.slice(0, at), chosen.model.slice(at + 1));
+    if (model === undefined) return ctx.ui.notify(`${chosen.model} isn't a known model. Choose another in /router.`, "warning");
+    const before = ctx.model === undefined ? undefined : { model: ctx.model, thinking: pi.getThinkingLevel() };
+    if (!(await pi.setModel(model))) return ctx.ui.notify(`No login for ${chosen.model}. Run /login.`, "warning");
+    if (chosen.thinking !== undefined) pi.setThinkingLevel(chosen.thinking as ThinkingLevel);
+    restore = before;
+    ctx.ui.notify(`${chosen.model} is running /skill:${skill}. The model goes back to ${before === undefined ? "the one before" : `${before.model.provider}/${before.model.id}`} when it's done.`, "info");
+    await pi.sendUserMessage(`/skill:${skill}`, { expandPromptTemplates: true });
+  }
+
+  const shownPlaybook = (cwd: string) => [GLOBAL, cwd].map((scope) => `${playbookPath(agentDir, scope)}:\n${readPlaybook(agentDir, scope) || "(empty)"}`).join("\n\n");
+
+  const JOBS: Record<string, string> = {
+    playbook: "Playbook: rules for your models, from past conversations",
+    permissions: "Permissions: allow rules, and notes that help the judge",
+    memory: "Memories: facts worth keeping, from past conversations",
+    compact: "Shorten the playbook",
+    show: "Show the playbook",
+  };
+
   pi.registerCommand("mastermind", {
-    description: "A strong model turns past conversations into rules for your other models. Or: compact | show",
+    description: "A strong model improves how your other models work: playbook | permissions | memory | compact | show",
+    getArgumentCompletions: (prefix) => {
+      const items = Object.keys(JOBS).filter((name) => name.startsWith(prefix)).map((value) => ({ value, label: value }));
+      return items.length > 0 ? items : null;
+    },
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
-      const action = args.trim();
+      let action = args.trim();
       if (action === "show") {
-        const shown = [GLOBAL, ctx.cwd].map((scope) => `${scope}:\n${readPlaybook(agentDir, scope) || "(empty)"}`).join("\n\n");
-        return ctx.ui.notify(shown, "info");
+        return ctx.ui.notify(shownPlaybook(ctx.cwd), "info");
       }
-      if (action !== "" && action !== "compact") return ctx.ui.notify("Usage: /mastermind [compact | show]", "warning");
+      if (action !== "" && !(action in JOBS)) return ctx.ui.notify(`Usage: /mastermind [${Object.keys(JOBS).join(" | ")}]`, "warning");
       const chosen = mastermind();
       if (chosen === undefined) return ctx.ui.notify("Choose a strong model first: set mastermind in /router.", "warning");
+      if (action === "") {
+        const picked = await ctx.ui.select(`What should ${chosen.model} improve?`, Object.values(JOBS));
+        if (picked === undefined) return;
+        action = Object.keys(JOBS).find((key) => JOBS[key] === picked) ?? "";
+        if (action === "show") return ctx.ui.notify(shownPlaybook(ctx.cwd), "info");
+      }
+      if (action === "permissions") return onMastermind(ctx, chosen, "review-permissions");
+      if (action === "memory") return onMastermind(ctx, chosen, "review-memory");
       if (reviewing) return ctx.ui.notify("/mastermind is already running.", "warning");
       reviewing = true;
       try {

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.7]
+
+### Changes
+
+- `auto` runs pi-suite's own memory, playbook, todo, question and web tools without the judge. The judge deferred them as unfamiliar, so each one came to you.
+- `auto` tells you once a session when the judge passes 3 asks in a row to you without judging them, such as when its model is too slow, and what to do.
+- `/skill:review-permissions` suggests notes that help the judge decide what's routine for you, and adds the ones you approve to a section of your global `AGENTS.md`, which the judge reads.
+- `/mastermind` can also run the permission review and the memory review on the strong model, with `/mastermind permissions` and `/mastermind memory`. On its own, it asks which.
+- A `playbook` tool shows agents the rules in force and their files. Folder playbooks are named after the folder, and old ones move there.
+
 ## [0.2.6]
 
 ### Changes

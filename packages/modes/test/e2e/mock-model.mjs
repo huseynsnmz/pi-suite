@@ -30,10 +30,12 @@ function scriptedCall(text, tools) {
   if (verb === "RUN") return { name: off ? "yolo_bash" : "bash", args: { command: arg } };
   if (verb === "WRITE") return off ? { name: "yolo_write", args: { file: arg, content: "x" } } : { name: "write", args: { path: arg, content: "x" } };
   if (verb === "AGENT") return { name: "agent", args: { description: "make a file", prompt: `WRITE:${arg}`, type: "general" } };
+  if (verb === "MEMORY") return { name: "memory_add", args: { category: "fact", content: arg, scope: "project" } };
   if (verb === "READ") return { name: "read", args: { path: arg } };
   if (verb === "CODE") return { name: "codemode", args: { code: arg } };
   if (verb === "SUBAGENT") return { name: "subagent", args: { agent: "scout", task: "x" } };
   if (verb === "APPLY") return { name: "permissions_apply", args: { bash: [arg] } };
+  if (verb === "NOTE") return { name: "permissions_apply", args: { guidance: [arg] } };
   if (verb === "PLAN") return { name: "submit_plan", args: { plan: "PLANBODY step one" } };
   if (verb === "ASK") return { name: "ask_questions", args: { questions: [
     { question: "Which database?\u001b]0;ASKTITLE\u0007", type: "select", options: ["Postgres", "SQLite"] },
@@ -53,6 +55,9 @@ createServer((req, res) => {
     const tools = (body.tools ?? []).map((tool) => tool.function?.name);
     if (tools.includes("report_verdict")) {
       appendFileSync(logPath, "judge\n");
+      if (raw.includes("E2ENOTE")) appendFileSync(logPath, "judge-read-note\n");
+      // Slower than the judge waits, so it gives up.
+      if (raw.includes("slowjudge")) return setTimeout(() => res.destroy(), 7_000);
       return reply(res, "", { name: "report_verdict", args: { verdict: "allow" } });
     }
     const last = body.messages?.at(-1);

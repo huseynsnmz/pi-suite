@@ -1,21 +1,37 @@
 /** A short list of rules a strong model wrote from past conversations, which every other model reads on each run. */
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { SessionPart } from "./review.ts";
 
 /** Weak models skim, and this is in every request: about 250 tokens for each of the two. */
 export const PLAYBOOK_CHARS = 1_000;
 export const GLOBAL = "global";
 
-/** Kept with Pi's own files, not the repository, since it goes in the system prompt. */
-function playbookPath(agentDir: string, scope: string): string {
-  const name = scope === GLOBAL ? GLOBAL : createHash("sha256").update(scope).digest("hex").slice(0, 16);
-  return join(agentDir, "memory", "playbook", `${name}.md`);
+/**
+ * Kept with Pi's own files, not the repository, since it goes in the system prompt. A folder's file is named after
+ * it, as Pi names its session folders, so a person or an agent can find it.
+ */
+export function playbookPath(agentDir: string, scope: string): string {
+  const dir = join(agentDir, "memory", "playbook");
+  if (scope === GLOBAL) return join(dir, "global.md");
+  return join(dir, "folders", `${scope.replace(/^[\\/]+/, "").replace(/[\\/:]+/g, "-") || "root"}.md`);
+}
+
+/** 0.2.4 named a folder's file by a hash of its path. */
+function movedFromHash(agentDir: string, scope: string): void {
+  if (scope === GLOBAL) return;
+  const old = join(agentDir, "memory", "playbook", `${createHash("sha256").update(scope).digest("hex").slice(0, 16)}.md`);
+  const path = playbookPath(agentDir, scope);
+  if (!existsSync(old) || existsSync(path)) return;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  renameSync(old, path);
+  if (existsSync(`${old}.bak`)) renameSync(`${old}.bak`, `${path}.bak`);
 }
 
 export function readPlaybook(agentDir: string, scope: string): string {
   try {
+    movedFromHash(agentDir, scope);
     return readFileSync(playbookPath(agentDir, scope), "utf8").trim();
   } catch {
     return "";
@@ -24,8 +40,9 @@ export function readPlaybook(agentDir: string, scope: string): string {
 
 /** Keeps the last version beside it. Empty text removes the playbook. */
 export function writePlaybook(agentDir: string, scope: string, text: string): void {
+  movedFromHash(agentDir, scope);
   const path = playbookPath(agentDir, scope);
-  mkdirSync(join(agentDir, "memory", "playbook"), { recursive: true, mode: 0o700 });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   if (existsSync(path)) copyFileSync(path, `${path}.bak`);
   if (text.trim() === "") {
     rmSync(path, { force: true });
@@ -38,7 +55,7 @@ export function writePlaybook(agentDir: string, scope: string, text: string): vo
 /** Unlike memories, these are instructions: the user read and approved each one. */
 export function playbookSection(global: string, folder: string): string {
   if (global === "" && folder === "") return "";
-  return ["", "# Playbook", "Rules the user approved after reviewing your past work. Follow them, unless the user says otherwise.", ...(global === "" ? [] : [global]), ...(folder === "" ? [] : [folder])].join("\n");
+  return ["", "# Playbook", "Rules the user approved after reviewing your past work. Follow them, unless the user says otherwise. The `playbook` tool shows them again, with where they're kept.", ...(global === "" ? [] : [global]), ...(folder === "" ? [] : [folder])].join("\n");
 }
 
 const RULES = `Write rules a weak model will follow while skimming:

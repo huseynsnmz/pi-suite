@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clearGate, hasPermissionSystem, installJudgeGate, isProjectEdit, judgeGated, noteEditPaths, registerYoloLink, setGateAgentOurs, setGateCwd, setGateMode, YOLO_LINK } from "../src/judge-gate.ts";
+import { clearGate, hasPermissionSystem, installJudgeGate, isProjectEdit, judgeGated, noteEditPaths, registerYoloLink, setGateCwd, setGateMode, setGateNotify, setGateSuiteTools, YOLO_LINK } from "../src/judge-gate.ts";
 
 const SERVICES = Symbol.for("@gotgenes/pi-permission-system:session-services");
 type Link = (...args: unknown[]) => Promise<unknown>;
@@ -189,7 +189,7 @@ test("another package's agent tool is asked about like anything else", async () 
   registerYoloLink("s1", store);
   setGateMode("s1", "normal", store);
   assert.deepEqual(await service.links.get("permission-judge")?.({ toolName: "agent" }), { kind: "defer" }, "nothing known yet");
-  setGateAgentOurs("s1", false, store);
+  setGateSuiteTools("s1", [], store);
   assert.deepEqual(await service.links.get("permission-judge")?.({ toolName: "agent" }), { kind: "defer" });
   assert.deepEqual(await service.links.get(YOLO_LINK)?.({ toolName: "agent" }), { kind: "defer" });
   setGateMode("s1", "auto", store);
@@ -200,10 +200,79 @@ test("another package's agent tool is asked about like anything else", async () 
 test("our agent needs no ask in any mode, as what it does is still checked", async () => {
   const { store, service, judge, judged } = setup();
   service.registerAuthorizer("permission-judge", judge);
-  setGateAgentOurs("s1", true, store);
+  setGateSuiteTools("s1", ["agent"], store);
   for (const mode of ["normal", "auto"] as const) {
     setGateMode("s1", mode, store);
     assert.deepEqual(await service.links.get("permission-judge")?.({ toolName: "agent" }), { kind: "allow" });
   }
   assert.equal(judged(), 0);
+});
+
+test("in auto, pi-suite's own tools for memory, todos, questions and the web skip the judge", async () => {
+  const { store, service, judge, judged } = setup();
+  service.registerAuthorizer("permission-judge", judge);
+  registerYoloLink("s1", store);
+  setGateSuiteTools("s1", ["memory_update", "todo"], store);
+  const reviews: string[] = [];
+  const log = { review: (event: string) => reviews.push(event) };
+  setGateMode("s1", "auto", store);
+  for (const name of ["permission-judge", YOLO_LINK]) {
+    assert.deepEqual(await service.links.get(name)?.({ toolName: "memory_update" }, null, log), { kind: "allow" }, name);
+    assert.deepEqual(await service.links.get(name)?.({ toolName: "todo" }, null, log), { kind: "allow" }, name);
+  }
+  assert.equal(judged(), 0);
+  assert.deepEqual(new Set(reviews), new Set(["pi-modes.suite_tool"]));
+  await service.links.get("permission-judge")?.({ toolName: "memory_add" }, null, log);
+  assert.equal(judged(), 1, "a name that isn't pi-suite's own here");
+  await service.links.get("permission-judge")?.({ toolName: "bash" }, null, log);
+  assert.equal(judged(), 2, "anything else");
+  setGateMode("s1", "normal", store);
+  assert.deepEqual(await service.links.get("permission-judge")?.({ toolName: "memory_update" }, null, log), { kind: "defer" }, "normal asks you");
+});
+
+test("when the judge keeps failing to judge, you're told once why", async () => {
+  const store: Record<symbol, unknown> = {};
+  installJudgeGate(store);
+  const service = fakeService();
+  (store[SERVICES] as Map<string, unknown>).set("s1", service);
+  let reason: string | undefined = "timeout";
+  service.registerAuthorizer("permission-judge", async (_details: unknown, _query: unknown, log: unknown) => {
+    (log as { review: (event: string, fields: unknown) => void }).review("classifier.decision", { verdict: reason === undefined ? "allow" : "defer", deferReason: reason });
+    return { kind: reason === undefined ? "allow" : "defer" };
+  });
+  const told: string[] = [];
+  const logged: string[] = [];
+  setGateNotify("s1", (text) => told.push(text), store);
+  setGateMode("s1", "auto", store);
+  const ask = () => service.links.get("permission-judge")?.({ toolName: "bash" }, null, { review: (event: string) => logged.push(event) });
+  await ask();
+  await ask();
+  reason = undefined;
+  await ask();
+  reason = "timeout";
+  await ask();
+  await ask();
+  assert.deepEqual(told, [], "a success in between starts the count again");
+  await ask();
+  assert.equal(told.length, 1);
+  assert.match(told[0] ?? "", /last 3 asks.*didn't answer in time.*\/router/);
+  await ask();
+  assert.equal(told.length, 1, "once a session");
+  assert.equal(logged.length, 7, "the judge's own log still gets everything");
+});
+
+test("a judgment the judge made itself isn't trouble", async () => {
+  const store: Record<symbol, unknown> = {};
+  installJudgeGate(store);
+  const service = fakeService();
+  (store[SERVICES] as Map<string, unknown>).set("s1", service);
+  service.registerAuthorizer("permission-judge", async (_details: unknown, _query: unknown, log: unknown) => {
+    (log as { review: (event: string, fields: unknown) => void }).review("classifier.decision", { verdict: "defer", deferReason: "model-verdict" });
+    return { kind: "defer" };
+  });
+  const told: string[] = [];
+  setGateNotify("s1", (text) => told.push(text), store);
+  setGateMode("s1", "auto", store);
+  for (let i = 0; i < 5; i++) await service.links.get("permission-judge")?.({ toolName: "bash" }, null, { review: () => {} });
+  assert.deepEqual(told, []);
 });

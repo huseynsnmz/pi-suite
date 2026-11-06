@@ -2,6 +2,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { guidancePath, readNotes } from "./apply.mjs";
 
 const APPROVED = new Set(["approved", "approved_for_session", "session_approved"]);
 /** Who approved: you, a rule you granted for the session, or your answer in a parent session. */
@@ -247,5 +248,7 @@ export async function reviewData(agent) {
   } catch {
     // Comments are allowed there. Already-allowed entries may show up, and apply won't add them twice.
   }
-  return { logFound, ...result, judge: collectJudge(log), sandbox: capped(collectSandbox(blocks, sandboxConfig)) };
+  const notesPath = guidancePath(agent);
+  const notes = { path: notesPath, current: existsSync(notesPath) ? readNotes(readFileSync(notesPath, "utf8")) : [] };
+  return { logFound, ...result, judge: { ...collectJudge(log), notes }, sandbox: capped(collectSandbox(blocks, sandboxConfig)) };
 }

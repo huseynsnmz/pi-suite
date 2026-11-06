@@ -19,7 +19,7 @@ Adds one choice to `/model`, `router/auto`, which uses a strong model to plan an
 | `reader` | Reads web pages for [web](../web/README.md) | Uses `build` |
 | `subagent` | Runs [agents](../subagent/README.md) | Uses `build` |
 | `fallback` | Takes over when a provider is overloaded | Retries the same model |
-| `mastermind` | Writes rules for your other models with [`/mastermind`](../memory/README.md) | `/mastermind` won't run |
+| `mastermind` | Improves how the others work with [`/mastermind`](../memory/README.md): the playbook, permissions and memories | `/mastermind` won't run |
 | `judge` | Decides permission asks in `auto` | See [Limits](#limits) |
 
 After you pick a model, `/router` asks how much reasoning that role should use. A role with no level uses `/effort`.

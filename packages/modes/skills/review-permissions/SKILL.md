@@ -1,6 +1,6 @@
 ---
 name: review-permissions
-description: Review the permission prompts the user approved in past sessions and propose additions to the pi-permission-system allowlist. Use when the user wants fewer prompts, asks to review approved permissions, or wants to update the allowlist.
+description: Review the permission prompts the user approved in past sessions and propose allow rules, sandbox paths, and notes that help the permission judge in auto mode. Use when the user wants fewer prompts, asks to review approved permissions, wants to update the allowlist, or says auto mode asks too much.
 ---
 
 # Review approved permissions
@@ -46,18 +46,33 @@ If `pi-sandbox` is in use, `sandbox.candidates` lists what it blocked, each a `r
 - `model-unresolved`, `auth-failed`, or `no-config`: the judge has no working model. Set one with `/permission-model`, or as `judge` in `/router`.
 - `timeout`, `breaker-open`: the model is too slow or failing. Choose a faster judge model, or raise `timeoutMs` in its config.
 - `context-over-budget`: the ask was too big to send. Raise `contextBudgetBytes` in its config.
-- `deny-capped` or `uncertain`: the judge worked and wasn't sure. A pattern here that the user keeps approving is a candidate for the list above, rated the same way.
+- `model-verdict`, `deny-capped` or `uncertain`: the judge worked and wasn't sure. See below.
+
+pi-modes already runs pi-suite's own memory, todo, question and web tools in `auto` without the judge, and tells the user when the judge keeps failing to answer, so those don't need notes.
+
+### Help the judge
+
+The judge defers what it doesn't know is normal. It reads notes on what's routine for this user from `judge.notes.path`, Pi's global context file, which the agent also reads. `judge.notes.current` is what's there already.
+
+For each group in `deferredThenApproved` with a judgment reason, and each `Your call` candidate the user would rather have judged case by case than allowed outright, write one note: a single routine action, as specific as the examples show, such as "Running `npm install` for packages already in package.json is routine." or "In ~/code/app, `./deploy.sh staging` is routine, and production deploys are not." Name a folder when the action is only routine there.
+
+- One action per note, under 200 characters, plain text.
+- Never a note for a `Don't add` item, or one that tells the judge to allow broadly. The judge's own never-allow list wins anyway.
+- A note can also say what isn't routine, which moves the judge toward asking.
+- Don't repeat a note that's already in `judge.notes.current`.
 
 ## 3. Present
 
 If `judge.decisions` isn't 0, start with a line on what the judge did and the fix above. Then show a table with the pattern, the rating, the approval count and a one-line reason. Group by rating. Mention each `Don't add` item with its reason, so the user sees it was considered.
 
+Then list the notes for the judge, each with what it would spare the user. Say that they go in `judge.notes.path`, and that the agent reads them too.
+
 ## 4. Apply only what the user picks
 
-Ask which rules to add, and wait for the answer. Then call `permissions_apply` with exactly those, using `bash` for patterns and `tools` for tool names. Sandbox choices go in the same call, as `read`, `write` and `domains`, and land in Pi's `sandbox.json`.
+Ask which rules and notes to add, and wait for the answer. Then call `permissions_apply` with exactly those, using `bash` for patterns and `tools` for tool names. Sandbox choices go in the same call, as `read`, `write` and `domains`, and land in Pi's `sandbox.json`. Notes go in `guidance`, and land in their own section of the global context file.
 
 The tool shows the user the exact list and only changes anything if they agree there. It keeps a backup next to the config, refuses unsafe patterns, and places new rules so that existing `deny` and `ask` rules keep winning. If it refuses a pattern, or the user declines, explain that instead of editing the config another way.
 
 ## 5. Finish
 
-Report what was added and where the backup is. Tell the user to restart Pi so the new rules load. Remind them the skill can be run again later as approvals build up.
+Report what was added and where the backup is. Tell the user to restart Pi so the new rules load. Notes for the judge apply from its next ask. Remind them the skill can be run again later as approvals build up.

@@ -358,7 +358,7 @@ try:
     term.settle(2)
     before = len(requests())
     mark = len(term.text)
-    term.command("/mastermind")
+    term.command("/mastermind playbook")
     check("it offers what the strong model wrote", term.wait("It has rules for global", mark, 20), term.text[mark:][-300:])
     asked = requests()[before:]
     check("the strong model gets it, without the session's tools", [r["model"] for r in asked] == ["strong"] and asked[0]["tools"] == 0, str(asked))
@@ -389,6 +389,19 @@ try:
     term.settle(1)
     saved_rules = [path.read_text() for path in (agent / "memory/playbook").glob("*.md")]
     check("escape leaves it as it was", saved_rules == ["- Always run the tests.\n"], str(saved_rules))
+    check("a folder's playbook is named after the folder", (agent / "memory/playbook/global.md").exists(), str(list((agent / "memory/playbook").rglob("*"))))
+    term.close()
+    set_router({**plain, "mastermind": "mock/back"})
+    term = Terminal()
+    term.wait("Auto", timeout=40)
+    term.settle(2)
+    before = len(requests())
+    term.command("/mastermind memory")
+    term.settle(20)
+    sent = requests()[before:]
+    check("/mastermind memory runs the memory review on the mastermind's model", any(r["model"] == "back" and "review-memory" in r["text"] for r in sent), str(sent))
+    sent = run_prompt("hello after the mastermind")
+    check("and the session's model comes back after", bool(sent) and all(r["model"] != "back" for r in sent), str(sent))
     term.close()
     set_router(plain)
 

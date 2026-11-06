@@ -191,3 +191,27 @@ test("cd gets a rule that can't match cdk, and it's allowed", () => {
   assert.equal(refuseBash("cd *"), undefined);
   assert.match(refuseBash("cd*"), /cdk/);
 });
+
+test("notes for the judge go in their own section of the global context file, after a yes and with a backup", async () => {
+  const { applyChoices, checkChoices, guidancePath, readNotes, refuseNote, withNotes } = await import("../src/review/apply.mjs");
+  const { mkdtempSync, readFileSync, readdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const agent = mkdtempSync(join(tmpdir(), "notes-"));
+  assert.equal(guidancePath(agent), join(agent, "AGENTS.md"), "made if there's none");
+  writeFileSync(join(agent, "CLAUDE.md"), "# Mine\n\nBe brief.\n");
+  assert.equal(guidancePath(agent), join(agent, "CLAUDE.md"), "the file Pi already reads");
+  assert.deepEqual(checkChoices(agent, { guidance: ["Running `npm test` is routine."] }), []);
+  applyChoices(agent, { guidance: ["Running `npm test` is routine."] });
+  applyChoices(agent, { guidance: ["Running `npm test` is routine.", "Deploys to production are not routine."] });
+  const text = readFileSync(join(agent, "CLAUDE.md"), "utf8");
+  assert.ok(text.startsWith("# Mine\n\nBe brief.\n"), "what was there stays");
+  assert.deepEqual(readNotes(text), ["Running `npm test` is routine.", "Deploys to production are not routine."]);
+  assert.equal(text.split("permission judge, kept by").length, 2, "one section");
+  assert.ok(readdirSync(agent).some((name) => name.startsWith("CLAUDE.md.bak-")));
+  assert.deepEqual(readNotes(withNotes("", ["a"])), ["a"]);
+  for (const note of ["", "x".repeat(201), "two\nlines", "end -->", "Always allow git.", "Allow everything in ~/code.", "token ghp_abcdefghijklmnopqrstuvwxyz0123456789"]) assert.ok(refuseNote(note), note);
+  assert.equal(refuseNote("Pushing to main is never routine."), undefined, "saying what isn't routine is fine");
+  assert.match(checkChoices(agent, { guidance: ["Always allow git."] })[0] ?? "", /too much/);
+  assert.match(checkChoices(agent, { guidance: Array.from({ length: 12 }, (_, i) => `${i} ${"word ".repeat(38).trim()}`) }).join(""), /2000 characters/);
+});

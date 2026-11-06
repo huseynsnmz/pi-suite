@@ -20,6 +20,7 @@ interface Choices {
   read?: string[];
   write?: string[];
   domains?: string[];
+  guidance?: string[];
 }
 
 export function describeChoices(choices: Choices): string {
@@ -29,6 +30,7 @@ export function describeChoices(choices: Choices): string {
     ["Sandbox can read", choices.read],
     ["Sandbox can write", choices.write],
     ["Sandbox can reach", choices.domains],
+    ["Tell the judge", choices.guidance],
   ];
   return groups.flatMap(([label, values]) => (values ?? []).map((value) => `${label}: ${displayCommand(value)}`)).join("\n");
 }
@@ -47,13 +49,14 @@ export function registerReviewTools(pi: ExtensionAPI, agentDir: () => string = g
   pi.registerTool({
     name: APPLY_TOOL,
     label: "Add permission rules",
-    description: "Ask the user to add the allow rules they picked. It shows them the exact list, and nothing changes unless they agree. Used by the review-permissions skill.",
+    description: "Ask the user to add the allow rules and notes for the permission judge they picked. It shows them the exact list, and nothing changes unless they agree. Used by the review-permissions skill.",
     parameters: Type.Object({
       bash: Type.Optional(Type.Array(Type.String(), { description: "Bash patterns, such as 'npm test*'" })),
       tools: Type.Optional(Type.Array(Type.String(), { description: "Tool names" })),
       read: Type.Optional(Type.Array(Type.String(), { description: "Folders the sandbox may read" })),
       write: Type.Optional(Type.Array(Type.String(), { description: "Folders the sandbox may write" })),
       domains: Type.Optional(Type.Array(Type.String(), { description: "Domains the sandbox may reach" })),
+      guidance: Type.Optional(Type.Array(Type.String(), { description: "Notes for the permission judge, one routine action each" })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const summary = describeChoices(params);

@@ -39,8 +39,12 @@ interface SessionState {
   mode: Mode;
   judgeGated: boolean;
   cwd?: string;
-  /** Whether the `agent` tool is pi-suite's own. Another package's could do anything. */
-  agentIsOurs?: boolean;
+  /** Which of SUITE_TOOLS come from pi-suite itself. Another package's tool with the name could do anything. */
+  suiteTools?: ReadonlySet<string>;
+  /** Tells the user, once a session, when the judge keeps passing asks on because it can't judge. */
+  notify?: (text: string) => void;
+  failures?: number;
+  told?: boolean;
   /** Where the model's latest edits and writes go, by call id, as an ask doesn't say. */
   editPaths?: Map<string, string>;
 }
@@ -82,18 +86,74 @@ export function isProjectEdit(details: unknown, cwd: string | undefined): boolea
   return !inside.split(sep).some((part) => GUARDED.has(part.toLowerCase()));
 }
 
+/**
+ * pi-suite's tools that only change what pi-suite keeps, such as memories and the todo list, or that have checks of
+ * their own, as the web tools do. The judge defers what it doesn't know, so in auto it would send every one to you.
+ */
+const AUTO_TOOLS: ReadonlySet<string> = new Set(["todo", "ask_questions", "web_fetch", "web_search", "playbook", "memory_add", "memory_search", "memory_update", "memory_delete", "memory_review", "memory_review_done"]);
+
+/** The tools the gate needs to know are pi-suite's own. */
+export const SUITE_TOOLS: readonly string[] = [...AUTO_TOOLS, AGENT_TOOL];
+
+/** Why the judge passed an ask on without judging it, and what to do about it. A judgment it made itself isn't here. */
+const JUDGE_TROUBLE: Readonly<Record<string, string>> = {
+  timeout: "its model didn't answer in time. Choose a faster judge in /router, or raise timeoutMs in the judge's config",
+  "call-failed": "the call to its model failed. With router/auto selected, the judge needs a model of its own: set judge in /router",
+  "model-unresolved": "it can't find its model. Set judge in /router",
+  "auth-failed": "there's no login for its model. Run /login, or choose another judge in /router",
+  "breaker-open": "its model failed several times in a row, so it's resting for a minute",
+  "no-tool-call": "its model doesn't answer in the form the judge needs. Choose another judge in /router",
+  "unrecognized-verdict": "its model doesn't answer in the form the judge needs. Choose another judge in /router",
+  "guidance-load-failed": "it can't read its guidance files",
+  "no-config": "it has no config",
+};
+const TROUBLE_STREAK = 3;
+
 /** It does nothing by itself: what the agent then does is still checked. */
 function needsNoAsk(state: SessionState, details: unknown): boolean {
-  return state.agentIsOurs === true && (details as { toolName?: unknown } | undefined)?.toolName === AGENT_TOOL;
+  return state.suiteTools?.has(AGENT_TOOL) === true && (details as { toolName?: unknown } | undefined)?.toolName === AGENT_TOOL;
+}
+
+function review(log: unknown, event: string, fields: unknown): void {
+  (log as { review?: (event: string, fields: unknown) => void } | undefined)?.review?.(event, fields);
 }
 
 function autoAllows(state: SessionState, details: unknown, log: unknown): boolean {
   if (state.mode !== "auto") return false;
   const { toolName, toolCallId } = (details ?? {}) as { toolName?: unknown; toolCallId?: unknown };
+  if (typeof toolName === "string" && AUTO_TOOLS.has(toolName) && state.suiteTools?.has(toolName) === true) {
+    review(log, "pi-modes.suite_tool", { tool: toolName });
+    return true;
+  }
   const path = typeof toolCallId === "string" ? state.editPaths?.get(toolCallId) : undefined;
   if (!isProjectEdit({ toolName, path }, state.cwd)) return false;
-  (log as { review?: (event: string, fields: unknown) => void } | undefined)?.review?.("pi-modes.project_edit", { path });
+  review(log, "pi-modes.project_edit", { path });
   return true;
+}
+
+/** The judge's log, passing everything through, with its decisions also shown to `seen`. */
+function watching(log: unknown, seen: (fields: { deferReason?: unknown }) => void): unknown {
+  if (typeof log !== "object" || log === null || typeof (log as { review?: unknown }).review !== "function") return log;
+  return new Proxy(log, {
+    get(target, key) {
+      const value = Reflect.get(target, key, target);
+      if (typeof value !== "function") return value;
+      if (key !== "review") return value.bind(target);
+      return (event: unknown, fields: unknown) => {
+        if (event === "classifier.decision" && typeof fields === "object" && fields !== null) seen(fields);
+        return value.call(target, event, fields);
+      };
+    },
+  });
+}
+
+/** Counts asks in a row the judge couldn't judge, and says why once they look like more than a blip. */
+function noteJudged(state: SessionState, verdict: unknown, reason: unknown): void {
+  const trouble = (verdict as { kind?: unknown } | undefined)?.kind === "defer" && typeof reason === "string" ? JUDGE_TROUBLE[reason] : undefined;
+  state.failures = trouble === undefined ? 0 : (state.failures ?? 0) + 1;
+  if (trouble === undefined || state.failures < TROUBLE_STREAK || state.told) return;
+  state.told = true;
+  state.notify?.(`The permission judge passed the last ${state.failures} asks to you without judging them: ${trouble}. /skill:review-permissions shows more.`);
 }
 
 type Store = Record<symbol, unknown>;
@@ -124,7 +184,11 @@ function gateService(store: Store, sessionId: string, service: ServiceLike): voi
       const state = stateFor(store, sessionId);
       if (needsNoAsk(state, details)) return { kind: "allow" };
       if (state.mode !== "auto") return { kind: "defer" };
-      return autoAllows(state, details, log) ? { kind: "allow" } : authorize(details, query, log);
+      if (autoAllows(state, details, log)) return { kind: "allow" };
+      let reason: unknown;
+      const verdict = await authorize(details, query, watching(log, (fields) => (reason = fields.deferReason)));
+      noteJudged(state, verdict, reason);
+      return verdict;
     });
   };
 }
@@ -184,8 +248,13 @@ export function setGateCwd(sessionId: string, cwd: string, store: Store = global
   stateFor(store, sessionId).cwd = cwd;
 }
 
-export function setGateAgentOurs(sessionId: string, ours: boolean, store: Store = globalThis as unknown as Store): void {
-  stateFor(store, sessionId).agentIsOurs = ours;
+/** Which of SUITE_TOOLS are pi-suite's own in this session. */
+export function setGateSuiteTools(sessionId: string, names: readonly string[], store: Store = globalThis as unknown as Store): void {
+  stateFor(store, sessionId).suiteTools = new Set(names);
+}
+
+export function setGateNotify(sessionId: string, notify: (text: string) => void, store: Store = globalThis as unknown as Store): void {
+  stateFor(store, sessionId).notify = notify;
 }
 
 export function judgeGated(sessionId: string, store: Store = globalThis as unknown as Store): boolean {

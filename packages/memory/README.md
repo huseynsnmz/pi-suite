@@ -23,21 +23,25 @@ A review batch costs up to about 15,000 tokens on your current model. Memories a
 
 | Command | What it does |
 | --- | --- |
-| `/mastermind` | A strong model reads past conversations and writes rules for your other models |
+| `/mastermind` | Choose what the strong model improves |
+| `/mastermind playbook` | Reads past conversations and writes rules for your other models |
+| `/mastermind permissions` | Runs `/skill:review-permissions`: allow rules, and notes that help the judge in `auto` |
+| `/mastermind memory` | Runs the memory review |
 | `/mastermind compact` | Shortens the playbook, keeping what each rule means |
-| `/mastermind show` | The rules in force in this folder |
+| `/mastermind show` | The rules in force in this folder, and their files |
 
-First choose a model as `mastermind` in [`/router`](../router/README.md). It looks for what you corrected, mistakes that came back, and what the model should have read first.
+First choose a model as `mastermind` in [`/router`](../router/README.md). For the playbook, it looks for what you corrected, mistakes that came back, and what the model should have read first. `permissions` and `memory` run in your session on that model, with the usual questions, and your model comes back when they're done.
 
 - **It stays short.** Up to 1,000 characters globally and 1,000 per folder, rewritten to fit each time.
 - **You approve every word** in an editor, and nothing is saved until you do. Secrets are refused.
 - **Your session stays small.** What the strong model reads never enters your conversation.
 - **It costs up to about 15,000 tokens a batch** on that model, and your conversations go to that provider. It never runs on its own, and Pi mentions it once 10 sessions are waiting.
 - **Sessions stay unread if an answer is cut off**, so you can try again.
+- **Agents can read it again** with the `playbook` tool, which also says where each file is.
 
 ## Where it's kept
 
-Memories are in `~/.pi/agent/memory/memory.db`, readable only by you. Playbooks are in `~/.pi/agent/memory/playbook/`, with the last version of each as `.bak`.
+Memories are in `~/.pi/agent/memory/memory.db`, readable only by you. The playbooks are `~/.pi/agent/memory/playbook/global.md` and one per folder in `folders/`, named after the folder, such as `Users-me-code-app.md`. The last version of each is kept as `.bak`.
 
 ## Limits
 
