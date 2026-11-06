@@ -29,6 +29,7 @@ If you use any of these, do this too:
 | [`frame`](packages/frame/README.md) | A start card, framed editor, tool boxes, footer and todo list |
 | [`board`](packages/board/README.md) | A board for starting, watching and attaching to background sessions |
 | [`commands`](packages/commands/README.md) | `/clear` and `/security-review` |
+| [`claude-context`](packages/claude-context/README.md) | Your `~/.claude/CLAUDE.md` and rules on requests to Claude |
 | [`subscription`](packages/subscription/README.md) | Off by default. Claude models on your Claude login |
 
 ## Settings

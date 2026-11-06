@@ -12,6 +12,7 @@ export const PARTS = {
   board: "The board of agent sessions",
   commands: "/clear and /security-review",
   subagent: "The agent tool: hand a task to a fresh agent, and get its answer back",
+  "claude-context": "Your Claude Code instructions (~/.claude/CLAUDE.md and rules) on requests to Claude",
   subscription: "Claude models on your Claude login, asking before anything is billed as extra usage",
 } as const;
 

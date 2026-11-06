@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changes
+
+- A `claude-context` part gives requests to Claude models your Claude Code instructions: `~/.claude/CLAUDE.md`, the files it imports with `@path`, and `~/.claude/rules`. Other models don't get them, and Pi's own `AGENTS.md` and `APPEND_SYSTEM.md` apply to every model as before. Turn it off with `/suite off claude-context`.
+
 ## [0.2.7]
 
 ### Changes
